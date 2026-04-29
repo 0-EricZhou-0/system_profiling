@@ -88,6 +88,12 @@ python tools/visualize_interactive.py session_metadata.pb --no-serve
 
 # Bind to localhost only (default is 0.0.0.0 = all interfaces):
 python tools/visualize_interactive.py session_metadata.pb --host 127.0.0.1
+
+# Live mode — tail the .pb files and stream new samples into a running
+# Bokeh server. Open the URL in a browser; new data appears every
+# poll-interval-ms (default 1s). Run alongside an active workload.
+python tools/visualize_interactive.py --live \
+    /tmp/run/profiling_output/session_metadata.pb
 ```
 
 What you get:
@@ -110,6 +116,56 @@ What you get:
 
 Panel set is identical to `visualize_all.py` — see the table in that
 section.
+
+### Live mode (`--live`)
+
+Adding `--live` switches the script from a one-shot static HTML render to
+a `bokeh.server` that **tails the `.pb` files as the profiler is still
+writing to them** and refreshes every `--poll-interval-ms` (default
+`1000`). Workflow:
+
+```bash
+# Terminal A — start the workload (anything that drives a ProfilerSuite)
+./build/examples/full_system_profiling -c configs/example.pbtxt
+
+# Terminal B — point the live visualizer at the same output_dir's manifest
+python tools/visualize_interactive.py --live \
+    profiling_output/session_metadata.pb \
+    --port 8000 --poll-interval-ms 1000
+# → http://localhost:8000/
+```
+
+How it works:
+
+- **`session_metadata.pb` is written at `Start()`**, not just `Stop()`.
+  The live visualizer reads it as soon as the run begins to discover
+  which probe files to tail. If you launch the visualizer before the
+  workload, it polls (up to `--live-bootstrap-timeout-s`, default 30 s)
+  for the manifest to appear.
+- **Each tick** (`--poll-interval-ms`) reads only the bytes appended
+  since the last tick using a strict offset-aware varint reader, parses
+  the new `*Trace` messages, and re-projects the full in-memory traces
+  onto every panel's `ColumnDataSource`. Cumulative columns (PCIe
+  cumulative bytes) and per-PID groupings stay correct because the
+  refresh is full-replace rather than incremental append.
+- **Pan/zoom is preserved across ticks** — the user's current view
+  isn't reset when new samples arrive.
+
+Caveats:
+
+- **GPU regions appear only after the workload's `Stop()`**. The GPU
+  region timeline is empty during a live run; it gets populated within
+  one poll interval after the workload exits. (CUDA event resolution
+  conflicts with active PM sampling, so resolution is deferred to
+  shutdown.) Generic-domain (host) regions / events stream in normally.
+- **One Python process per page.** Closing the browser does not stop
+  the server; Ctrl-C in Terminal B does.
+- **Long runs**: at default 10 kHz GPU + 100 Hz system/disk, ~60 s of
+  data is fine; beyond that, full-replace per-tick re-render starts to
+  cost noticeable CPU. Bump `--poll-interval-ms` if you see lag.
+
+Disk I/O is the only non-obvious permission gotcha — see
+[*Permissions for per-PID I/O*](../system-guide.md#permissions-for-per-pid-i-o).
 
 ### Viewing from a remote server
 
