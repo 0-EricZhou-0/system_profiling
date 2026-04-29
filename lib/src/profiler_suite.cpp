@@ -45,6 +45,12 @@ public:
     // between the .pbtxt path (LoadConfig) and the serialized-bytes path
     // used by language bindings (LoadConfigFromBytes).
     void ApplyParsedConfig(const ProfilerSuiteConfig& proto);
+
+    // Build the SessionMetadata message from the parsed config + the
+    // captured wall-clock anchor, and write it (atomically) to disk.
+    // Called from both Start() — so live tailers see the manifest from
+    // second one — and Stop(), which re-emits identical content.
+    void WriteSessionManifest();
 };
 
 ProfilerSuite::ProfilerSuite() : m_impl(std::make_unique<Impl>()) {}
@@ -211,6 +217,42 @@ void ProfilerSuite::Configure() {
     if (m_impl->eventEnabled) m_impl->eventProfiler.Configure(m_impl->eventConfig);
 }
 
+void ProfilerSuite::Impl::WriteSessionManifest() {
+    SessionMetadata meta;
+    char hostbuf[256] = {0};
+    gethostname(hostbuf, sizeof(hostbuf));
+    meta.set_hostname(hostbuf);
+    meta.set_wall_clock_epoch_ns(startWallClockEpochNs);
+    {
+        std::time_t secs = startWallClockEpochNs / 1000000000ULL;
+        uint64_t ns_part = startWallClockEpochNs % 1000000000ULL;
+        std::tm tm_utc{};
+        gmtime_r(&secs, &tm_utc);
+        std::ostringstream iso;
+        iso << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S")
+            << "." << std::setw(9) << std::setfill('0') << ns_part << "Z";
+        meta.set_start_iso8601(iso.str());
+    }
+    auto addProbe = [&](ProbeKind kind, const std::string& path, uint64_t hz) {
+        auto* p = meta.add_probes();
+        p->set_kind(kind);
+        p->set_output_file(path);
+        p->set_sampling_frequency_hz(hz);
+    };
+    if (gpuEnabled)
+        addProbe(PROBE_KIND_GPU,    gpuConfig.outputFile,
+                 gpuConfig.samplingFrequencyHz);
+    if (sysEnabled)
+        addProbe(PROBE_KIND_SYSTEM, sysConfig.outputFile,
+                 sysConfig.samplingFrequencyHz);
+    if (diskEnabled)
+        addProbe(PROBE_KIND_DISK,   diskConfig.outputFile,
+                 diskConfig.samplingFrequencyHz);
+    if (eventEnabled)
+        addProbe(PROBE_KIND_EVENTS, eventConfig.outputFile, 0);
+    internal::WriteSessionMetadata(sessionMetadataPath, meta);
+}
+
 void ProfilerSuite::Start() {
     m_impl->startWallClockEpochNs =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -219,6 +261,11 @@ void ProfilerSuite::Start() {
     if (m_impl->sysEnabled)   m_impl->systemProfiler.Start();
     if (m_impl->diskEnabled)  m_impl->diskProfiler.Start();
     if (m_impl->eventEnabled) m_impl->eventProfiler.Start();
+
+    // Emit the manifest now so live tailers (e.g. visualize_interactive.py
+    // --live) have a starting point. Stop() re-emits the identical content
+    // atomically.
+    m_impl->WriteSessionManifest();
 }
 
 void ProfilerSuite::Stop() {
@@ -233,40 +280,7 @@ void ProfilerSuite::Stop() {
     if (m_impl->diskEnabled)  m_impl->diskProfiler.Stop();
     if (m_impl->eventEnabled) m_impl->eventProfiler.Stop();
 
-    // Write the session manifest (one shot, single message).
-    SessionMetadata meta;
-    char hostbuf[256] = {0};
-    gethostname(hostbuf, sizeof(hostbuf));
-    meta.set_hostname(hostbuf);
-    meta.set_wall_clock_epoch_ns(m_impl->startWallClockEpochNs);
-    {
-        std::time_t secs = m_impl->startWallClockEpochNs / 1000000000ULL;
-        uint64_t ns_part = m_impl->startWallClockEpochNs % 1000000000ULL;
-        std::tm tm_utc{};
-        gmtime_r(&secs, &tm_utc);
-        std::ostringstream iso;
-        iso << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S")
-            << "." << std::setw(9) << std::setfill('0') << ns_part << "Z";
-        meta.set_start_iso8601(iso.str());
-    }
-    auto addProbe = [&](ProbeKind kind, const std::string& path, uint64_t hz) {
-        auto* p = meta.add_probes();
-        p->set_kind(kind);
-        p->set_output_file(path);
-        p->set_sampling_frequency_hz(hz);
-    };
-    if (m_impl->gpuEnabled)
-        addProbe(PROBE_KIND_GPU,    m_impl->gpuConfig.outputFile,
-                 m_impl->gpuConfig.samplingFrequencyHz);
-    if (m_impl->sysEnabled)
-        addProbe(PROBE_KIND_SYSTEM, m_impl->sysConfig.outputFile,
-                 m_impl->sysConfig.samplingFrequencyHz);
-    if (m_impl->diskEnabled)
-        addProbe(PROBE_KIND_DISK,   m_impl->diskConfig.outputFile,
-                 m_impl->diskConfig.samplingFrequencyHz);
-    if (m_impl->eventEnabled)
-        addProbe(PROBE_KIND_EVENTS, m_impl->eventConfig.outputFile, 0);
-    internal::WriteSessionMetadata(m_impl->sessionMetadataPath, meta);
+    m_impl->WriteSessionManifest();
 }
 
 } // namespace cupti_profiler
