@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+import "tracked_process.proto";
+
+message GPUProfilerConfig {
+    bool enabled = 1;
+    int32 device_index = 2;
+    uint64 sampling_frequency_hz = 3;
+    uint64 hw_buffer_size = 4;
+    uint64 max_samples = 5;
+    repeated string metrics = 6;
+    uint64 flush_interval_ms = 7;
+    string output_file = 8;
+}
+
+message SystemProfilerConfig {
+    bool enabled = 1;
+    uint64 sampling_frequency_hz = 2;
+    // Processes to track per-process. Empty = system-wide only.
+    // Each entry is { pid, alias }; alias is optional.
+    repeated TrackedProcess processes = 3;
+    uint64 flush_interval_ms = 4;
+    string output_file = 5;
+}
+
+message DiskProfilerConfig {
+    bool enabled = 1;
+    uint64 sampling_frequency_hz = 2;
+    repeated string devices = 3;
+    // Processes to track per-process. Empty = device-only sampling.
+    repeated TrackedProcess processes = 4;
+    uint64 flush_interval_ms = 5;
+    string output_file = 6;
+}
+
+message EventsProfilerConfig {
+    bool enabled = 1;
+    uint64 flush_interval_ms = 2;
+    string output_file = 3;          // events.pb
+}
+
+message ProfilerSuiteConfig {
+    GPUProfilerConfig gpu = 1;
+    SystemProfilerConfig system = 2;
+    DiskProfilerConfig disk = 3;
+
+    // Output directory for all .pb files. Prepended to each component's output_file.
+    // Empty or unset = current working directory.
+    string output_dir = 4;
+
+    EventsProfilerConfig events = 5;
+
+    // session_metadata.pb path, relative to output_dir.
+    // Empty = "session_metadata.pb" by default at runtime.
+    string session_metadata_file = 6;
+}

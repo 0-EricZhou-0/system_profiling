@@ -1,0 +1,50 @@
+# Python dependencies for cupti-profiler.
+#
+# Install everything with:
+#     pip install -r requirements.txt
+#
+# Versions are floors that match what the project has been validated
+# against. Newer versions are usually fine; pin tighter if a CI run
+# starts behaving differently.
+
+# --- Build-time: pybind11 wrapper ----------------------------------------
+# pybind11 ships its CMake config inside the Python package; the python/
+# CMakeLists.txt asks the active interpreter for it via
+# `python -c "import pybind11; print(pybind11.get_cmake_dir())"`.
+pybind11>=2.11
+
+# Generates .pyi type stubs for the built extension during cmake build.
+# Optional — if missing, the build still succeeds and skips stub gen.
+pybind11-stubgen>=2.5
+
+# --- Build-time: protobuf Python codegen ---------------------------------
+# Provides `python -m grpc_tools.protoc`, used by the root CMakeLists.txt
+# to regenerate generated/proto/*_pb2.py. Pinned to the grpcio-tools that
+# ships a protoc compatible with the runtime protobuf below.
+grpcio-tools>=1.60
+
+# --- Runtime: protobuf message classes -----------------------------------
+# Used by the visualizer and the Python smoke test to read the .pb files
+# the C++ profiler emits.
+protobuf>=4.25
+
+# --- Tests ---------------------------------------------------------------
+pytest>=8.0
+
+# --- Visualizer (tools/visualize_all.py) ---------------------------------
+numpy>=1.24
+matplotlib>=3.7
+
+# --- Interactive Bokeh visualizer (tools/visualize_interactive.py) -------
+# Renders a self-contained HTML file with synced pan/zoom + hover.
+# pandas is a transitive runtime dependency of bokeh's data validation.
+bokeh>=3.4
+pandas>=2.0
+
+# --- Optional: examples/full_system_profiling.py -------------------------
+# Drives a torch GEMM + vecAdd workload through the pybind11 wrapper.
+# Requires a CUDA build of torch matching your driver. For CUDA 12.8:
+#     pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Listed here as a reminder; not installed by default since it's a heavy
+# dependency you only need to run that one example.
+# torch

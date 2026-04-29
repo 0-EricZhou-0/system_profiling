@@ -1,0 +1,64 @@
+# Full-system profiler configuration
+# All fields are optional — defaults are applied for missing values.
+# PID 0 is resolved to the current process PID at runtime.
+
+# Output directory for all .pb files (created if it doesn't exist).
+# Each component's output_file is relative to this directory.
+# Empty or omitted = current working directory.
+output_dir: "profiling_output"
+
+gpu {
+    enabled: true
+    device_index: 0
+    sampling_frequency_hz: 10000    # 10 kHz
+    hw_buffer_size: 536870912       # 512 MB
+    max_samples: 50000
+    metrics: "sm__cycles_active.avg"
+    metrics: "sm__cycles_active.max"
+    metrics: "sm__cycles_elapsed.avg"
+    metrics: "sm__warps_active.avg"
+    metrics: "sm__warps_active.max"
+    metrics: "dram__read_throughput.avg.pct_of_peak_sustained_elapsed"
+    metrics: "dram__read_throughput.max.pct_of_peak_sustained_elapsed"
+    metrics: "dram__write_throughput.avg.pct_of_peak_sustained_elapsed"
+    metrics: "dram__write_throughput.max.pct_of_peak_sustained_elapsed"
+    # PCIe host<->device throughput (bytes/sec) and per-window byte counter
+    metrics: "pcie__read_bytes.sum.per_second"
+    metrics: "pcie__write_bytes.sum.per_second"
+    # Raw bytes per sample window — cumsum gives total bytes transferred over the run
+    metrics: "pcie__read_bytes.sum"
+    metrics: "pcie__write_bytes.sum"
+    # NVLink rx/tx throughput (bytes/sec)
+    metrics: "nvlrx__bytes.sum.per_second"
+    metrics: "nvltx__bytes.sum.per_second"
+    flush_interval_ms: 10000
+    output_file: "gpu_metrics.pb"
+}
+
+system {
+    enabled: true
+    sampling_frequency_hz: 100      # 100 Hz
+    # Processes to track per-process. Each entry is { pid, alias } —
+    # alias is optional (omit it for plain "PID xxx" labels in the
+    # visualizer; otherwise the legend shows "<alias> (PID xxx)").
+    # pid: 0 is resolved to the current process at runtime.
+    processes { pid: 0  alias: "self" }
+    flush_interval_ms: 5000
+    output_file: "system_metrics.pb"
+}
+
+disk {
+    enabled: true
+    sampling_frequency_hz: 100      # 100 Hz
+    devices: "md0"
+    devices: "nvme7n1"
+    processes { pid: 0  alias: "self" }   # see `system` block above
+    flush_interval_ms: 5000
+    output_file: "disk_metrics.pb"
+}
+
+events {
+    enabled: true
+    flush_interval_ms: 1000
+    output_file: "events.pb"
+}

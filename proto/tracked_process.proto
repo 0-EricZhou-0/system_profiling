@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+// One tracked process — appears as a repeated field in both *_config and
+// *_metrics protos. `alias` is optional; an entry with only `pid` set is
+// equivalent to an unaliased PID.
+message TrackedProcess {
+    uint32 pid = 1;     // 0 = resolved to the current process at runtime
+    string alias = 2;   // optional display name; empty = no alias
+}

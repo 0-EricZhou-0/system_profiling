@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+// Events trace: regions and instantaneous events grouped by time domain.
+// Written length-delimited to events.pb on a periodic flush schedule.
+
+enum TimeDomain {
+    TIME_DOMAIN_UNSPECIFIED = 0;
+    TIME_DOMAIN_GENERIC = 1;   // host steady_clock
+    TIME_DOMAIN_GPU = 2;       // CUPTI clock (cuptiGetTimestamp)
+}
+
+// A named time interval [start, end].
+message Region {
+    string name = 1;
+    uint64 start_timestamp_ns = 2;
+    uint64 end_timestamp_ns = 3;
+}
+
+// A named instantaneous marker.
+message Event {
+    string name = 1;
+    uint64 timestamp_ns = 2;
+}
+
+// One buffer per active TimeDomain per flush. Timestamps within are in the
+// domain's native clock; convert to steady_clock using TraceMetadata.
+message EventBuffer {
+    TimeDomain domain = 1;
+    repeated Region regions = 2;
+    repeated Event events = 3;
+}
+
+// Per-flush write accounting (matches the pattern used by gpu/system/disk).
+// Each entry describes the previous flush; carried forward because a flush's
+// own size is known only after its message is serialized.
+message EventFlushStats {
+    uint64 timestamp_ns = 1;
+    uint64 bytes_written = 2;
+    uint64 interval_ns = 3;
+}
+
+// Per-trace anchor info that lets consumers convert domain timestamps into
+// steady_clock / wall-clock space. Repeated on every EventTrace message so
+// events.pb remains interpretable in isolation; hostname/probe-list constants
+// live in session_metadata.pb instead.
+message TraceMetadata {
+    uint64 steady_clock_reference_ns = 1;
+    uint64 cupti_reference_ns = 2;
+    uint64 wall_clock_epoch_ns = 3;
+}
+
+message EventTrace {
+    TraceMetadata metadata = 1;
+    repeated EventBuffer buffers = 2;
+    repeated EventFlushStats flush_stats = 3;
+}

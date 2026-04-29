@@ -1,0 +1,267 @@
+---
+title: "Full-System Profiler — Overview"
+tags:
+  - profiling
+  - gpu
+  - cpu
+  - memory
+  - disk
+  - documentation
+---
+
+# Full-system profiler overview
+
+A unified profiling suite that simultaneously collects GPU hardware counters, CPU utilization, memory usage, and disk I/O — both system-wide and per-process. All components are controlled by a single `.pbtxt` config file and produce time-aligned protobuf traces visualized on one plot.
+
+## Architecture
+
+```text ln:false
+┌─────────────────────────────────────────────────────────────────────┐
+│  Your Application (links against libcupti_profiler.so)              │
+│                                                                     │
+│   ProfilerSuite suite;                                              │
+│   suite.LoadConfig("config.pbtxt");                                 │
+│   suite.Configure();                                                │
+│   suite.Start();                                                    │
+│   // ... your CUDA workload ...                                     │
+│   suite.Stop();                                                     │
+└───────┬─────────────────────┬───────────────────────┬───────────────┘
+        │                     │                       │
+        ▼                     ▼                       ▼
+┌───────────────┐   ┌─────────────────┐   ┌───────────────────┐
+│  GpuProfiler  │   │ SystemProfiler  │   │  DiskProfiler     │
+│               │   │                 │   │                   │
+│ CUPTI PM      │   │ /proc/stat      │   │ /proc/diskstats   │
+│ Sampling      │   │ /proc/meminfo   │   │ /sys/block/*/     │
+│ HW counters   │   │ /proc/[PID]/*   │   │ /proc/[PID]/io    │
+└───────┬───────┘   └────────┬────────┘   └─────────┬─────────┘
+        │                    │                       │
+        ▼                    ▼                       ▼
+  gpu_metrics.pb      system_metrics.pb       disk_metrics.pb
+        │                    │                       │
+        └────────────┬───────┘───────────────────────┘
+                     ▼
+          tools/visualize_all.py  →  full_profile.png
+```
+
+Each profiler runs independently with its own sampling frequency and flush interval. They write to separate `.pb` files using length-delimited protobuf streaming.
+
+---
+
+## Quick start
+
+### Build
+
+```bash title:"Build from source"
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+```
+
+### Create a config
+
+```protobuf title:"configs/example.pbtxt"
+gpu {
+    enabled: true
+    device_index: 0
+    sampling_interval_ns: 100000
+    metrics: "sm__cycles_active.avg"
+    metrics: "sm__cycles_elapsed.avg"
+    flush_interval_ms: 10000
+    output_file: "gpu_metrics.pb"
+}
+system {
+    enabled: true
+    sampling_interval_ms: 100
+    pids: 0                          # 0 = current process
+    flush_interval_ms: 5000
+    output_file: "system_metrics.pb"
+}
+disk {
+    enabled: true
+    sampling_interval_ms: 100
+    devices: "nvme0n1"
+    pids: 0
+    flush_interval_ms: 5000
+    output_file: "disk_metrics.pb"
+}
+```
+
+> [!TIP]
+> PID `0` is a special sentinel — it is resolved to the current process PID (`getpid()`) at runtime, so you don't need to know it in advance.
+
+### Run
+
+```bash title:"Run the example"
+./build/examples/full_system_profiling -c configs/example.pbtxt
+```
+
+### Visualize
+
+```bash title:"Generate unified plot"
+# Generate Python protobuf bindings first (one-time)
+/usr/bin/protoc --python_out=tools -Iproto proto/gpu_metrics.proto
+/usr/bin/protoc --python_out=tools -Iproto proto/system_metrics.proto
+/usr/bin/protoc --python_out=tools -Iproto proto/disk_metrics.proto
+
+# Plot
+python tools/visualize_all.py \
+    --gpu gpu_metrics.pb \
+    --system system_metrics.pb \
+    --disk disk_metrics.pb \
+    -o full_profile.png
+```
+
+All `--gpu`, `--system`, `--disk` arguments are optional — panels for missing files are simply omitted.
+
+---
+
+## Config file reference
+
+The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are comments.
+
+### GPU section
+
+| Field                  | Type       | Default       | Description                                      |
+| ---------------------- | ---------- | ------------- | ------------------------------------------------ |
+| `enabled`              | bool       | false         | Enable GPU profiling                             |
+| `device_index`         | int32      | 0             | CUDA device index                                |
+| `sampling_interval_ns` | uint64     | 100000        | HW counter sampling period (ns). 100000 = 10 kHz |
+| `hw_buffer_size`       | uint64     | 536870912     | GPU ring buffer size (bytes). 512 MB default     |
+| `max_samples`          | uint64     | 50000         | Decode buffer capacity per cycle                 |
+| `metrics`              | string[]   | (empty)       | CUPTI metric names. Must fit single pass         |
+| `flush_interval_ms`    | uint64     | 10000         | Periodic flush interval. 0 = flush at end only   |
+| `output_file`          | string     | (empty)       | Output `.pb` path                                |
+
+### System section (CPU + memory)
+
+| Field                  | Type       | Default | Description                                      |
+| ---------------------- | ---------- | ------- | ------------------------------------------------ |
+| `enabled`              | bool       | false   | Enable CPU + memory profiling                    |
+| `sampling_interval_ms` | uint64     | 100     | Sampling period in milliseconds                  |
+| `pids`                 | uint32[]   | (empty) | PIDs for per-process tracking. 0 = self          |
+| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval                          |
+| `output_file`          | string     | (empty) | Output `.pb` path                                |
+
+### Disk section
+
+| Field                  | Type       | Default | Description                                      |
+| ---------------------- | ---------- | ------- | ------------------------------------------------ |
+| `enabled`              | bool       | false   | Enable disk I/O profiling                        |
+| `sampling_interval_ms` | uint64     | 100     | Sampling period in milliseconds                  |
+| `devices`              | string[]   | (empty) | Block device names (e.g. `"nvme0n1"`, `"sda"`)  |
+| `pids`                 | uint32[]   | (empty) | PIDs for per-process I/O. 0 = self               |
+| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval                          |
+| `output_file`          | string     | (empty) | Output `.pb` path                                |
+
+> [!WARNING]
+> Per-process disk I/O (`/proc/[PID]/io`) requires the profiler to run as the same user as the target process, or with `CAP_SYS_PTRACE`. If access is denied, a warning is printed and per-process disk data is skipped.
+
+---
+
+## Visualization output
+
+The unified plot `tools/visualize_all.py` produces up to 11 panels on a shared time axis:
+
+```text ln:false
+Row  0: SM Utilization %               (GPU)
+Row  1: Active Warps / Cycle           (GPU)
+Row  2: DRAM Throughput GB/s           (GPU)
+Row  3: CPU Utilization %              (system-wide stacked: user/system/iowait)
+Row  4: Per-Process CPU %              (lines per PID)
+Row  5: System Memory                  (stacked: used/buffers/cached)
+Row  6: Per-Process Memory RSS         (lines per PID)
+Row  7: Disk Throughput per device     (read/write per device in MB/s)
+Row  8: Disk Queue Depth               (read/write per device)
+Row  9: Per-Process Disk IO            (read/write per PID in MB/s)
+```
+
+Panels for disabled or missing profilers are automatically omitted. GPU region annotations (shaded spans) overlay all panels.
+
+---
+
+## CLI reference
+
+### `full_system_profiling`
+
+```text ln:false
+Usage: full_system_profiling [-c config.pbtxt]
+  -c  Config file path (default: configs/example.pbtxt)
+```
+
+### `gemm_profiling` (GPU-only, legacy)
+
+```text ln:false
+Usage: gemm_profiling [-d device] [-i interval_ns] [-o output.pb]
+  -d  Device index (default: 0)
+  -i  Sampling interval in nanoseconds (default: 100000)
+  -o  Output protobuf file (default: gpu_metrics.pb)
+```
+
+### `visualize_all.py`
+
+```text ln:false
+Usage: visualize_all.py [--gpu FILE] [--system FILE] [--disk FILE] [-o FILE]
+  --gpu     GPU metrics .pb file
+  --system  System (CPU+Mem) metrics .pb file
+  --disk    Disk metrics .pb file
+  -o        Output image (default: full_profile.png)
+```
+
+---
+
+## Programmatic usage
+
+### Minimal integration (GPU only)
+
+```cpp title:"Your application"
+#include <cupti_profiler/gpu_profiler.h>
+
+cupti_profiler::ProfilerConfig config;
+config.outputFile = "gpu.pb";
+config.metrics = { "sm__cycles_active.avg", "sm__cycles_elapsed.avg" };
+
+cupti_profiler::GpuProfiler profiler;
+profiler.Configure(config);
+profiler.Start();
+// ... your CUDA workload ...
+profiler.Stop();
+```
+
+### Full suite with config file
+
+```cpp title:"Using ProfilerSuite"
+#include <cupti_profiler/profiler_suite.h>
+
+cupti_profiler::ProfilerSuite suite;
+suite.LoadConfig("my_config.pbtxt");
+suite.Configure();
+suite.Start();
+// ... your workload ...
+suite.Stop();
+```
+
+### Individual profilers without config file
+
+```cpp title:"Composing profilers manually"
+#include <cupti_profiler/system_profiler.h>
+#include <cupti_profiler/disk_profiler.h>
+
+cupti_profiler::SystemProfilerConfig sysCfg;
+sysCfg.samplingIntervalMs = 50;
+sysCfg.PIDs = { static_cast<uint32_t>(getpid()) };
+sysCfg.outputFile = "system.pb";
+
+cupti_profiler::SystemProfiler sysProfiler;
+sysProfiler.Configure(sysCfg);
+sysProfiler.Start();
+// ... workload ...
+sysProfiler.Stop();
+```
+
+---
+
+## References
+
+- [[full-system-internals|Detailed internals documentation]]
+- [[system-guide|GPU profiler system guide]]
+- [[cupti-overhead-analysis|CUPTI overhead analysis]]

@@ -1,0 +1,50 @@
+# pip-install entry point for the cupti_profiler Python package. Drives the
+# existing CMake build via scikit-build-core, then assembles the wheel from
+# the install-rule layout (see python/CMakeLists.txt and lib/CMakeLists.txt).
+#
+# Editable install (recommended for developing this repo or consuming it as a
+# git submodule from a sibling project):
+#
+#     pip install -e .
+#
+# A regular install:
+#
+#     pip install .
+#
+# Either way, the package shows up in the active env's site-packages and you
+# can `import cupti_profiler` from anywhere — no PYTHONPATH gymnastics.
+
+[build-system]
+requires = [
+    "scikit-build-core>=0.10",
+    "pybind11>=2.11",
+    "pybind11-stubgen>=2.5",
+    "grpcio-tools>=1.60",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "cupti-profiler"
+version = "0.0.1-dev0"
+description = "GPU + system + disk profiling around CUPTI PM Sampling, with a Python wrapper."
+requires-python = ">=3.8"
+authors = [{ name = "Eric Zhou", email = "yiruiz2@illinois.edu" }]
+license = { file = "LICENSE" }
+keywords = ["cuda", "cupti", "profiling", "gpu", "pm-sampling"]
+dependencies = [
+    "protobuf>=4.25",
+]
+
+[project.optional-dependencies]
+viz = ["numpy>=1.24", "matplotlib>=3.7"]
+dev = ["pytest>=8.0"]
+
+[tool.scikit-build]
+# CMake is the source of truth; tell scikit-build-core not to auto-discover
+# Python packages from the source tree (we provide all of them via CMake's
+# install rules).
+cmake.version = ">=3.18"
+cmake.build-type = "Release"
+wheel.packages = []
+# Forward important CMake options.
+cmake.args = ["-DBUILD_PYTHON_BINDINGS=ON"]

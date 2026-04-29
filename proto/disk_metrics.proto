@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+import "tracked_process.proto";
+
+message DiskDeviceSample {
+    uint64 timestamp_ns = 1;
+    string device_name = 2;
+    double read_bytes_per_sec = 3;
+    double write_bytes_per_sec = 4;
+    uint32 read_queue_depth = 5;    // from /sys/block/<dev>/inflight
+    uint32 write_queue_depth = 6;
+}
+
+message DiskProcessSample {
+    uint64 timestamp_ns = 1;
+    uint32 pid = 2;
+    double read_bytes_per_sec = 3;
+    double write_bytes_per_sec = 4;
+}
+
+// Per-flush write accounting. See gpu_metrics.proto::DiskFlushStats.
+message DiskFlushStats {
+    uint64 timestamp_ns = 1;
+    uint64 bytes_written = 2;
+    uint64 interval_ns = 3;
+}
+
+message DiskMetricsTrace {
+    string hostname = 1;
+    uint64 sampling_frequency_hz = 2;
+    repeated string tracked_devices = 3;
+    // PIDs (with optional aliases) tracked in this run; see
+    // SystemMetricsTrace.tracked_processes for the same semantics.
+    repeated TrackedProcess tracked_processes = 4;
+    repeated DiskDeviceSample device_samples = 5;
+    repeated DiskProcessSample process_samples = 6;
+
+    // Sync anchor: steady_clock reading at profiler Start() time.
+    uint64 steady_clock_reference_ns = 7;
+    uint64 wall_clock_epoch_ns = 8;
+
+    // Per-flush write stats (see DiskFlushStats). Each Trace message carries at most
+    // one entry here — the size of the previous flush.
+    repeated DiskFlushStats flush_stats = 9;
+}

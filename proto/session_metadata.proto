@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+// Session-level manifest. A single SessionMetadata message is written
+// (NOT length-delimited) to session_metadata.pb at ProfilerSuite::Stop().
+//
+// Describes what was running and when, so consumers can interpret the
+// per-component .pb files in context.
+
+enum ProbeKind {
+    PROBE_KIND_UNSPECIFIED = 0;
+    PROBE_KIND_GPU = 1;
+    PROBE_KIND_SYSTEM = 2;
+    PROBE_KIND_DISK = 3;
+    PROBE_KIND_EVENTS = 4;
+}
+
+message ActiveProbe {
+    ProbeKind kind = 1;
+    string output_file = 2;            // path resolved via output_dir
+    uint64 sampling_frequency_hz = 3;  // 0 if not applicable (e.g. events)
+}
+
+message SessionMetadata {
+    string hostname = 1;
+    uint64 wall_clock_epoch_ns = 2;     // captured at suite Start()
+    string start_iso8601 = 3;           // human-display copy of wall-clock
+    repeated ActiveProbe probes = 4;
+}
