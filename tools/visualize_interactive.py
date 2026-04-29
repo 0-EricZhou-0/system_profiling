@@ -38,6 +38,7 @@ from bokeh.plotting import figure
 from bokeh.resources import CDN, INLINE
 
 import visualize_all as va  # reuse the existing loaders
+import live_tail as lt      # projection + tail support shared with --live
 
 
 # ----- Layout / style constants -------------------------------------------
@@ -60,12 +61,14 @@ EVENT_COLORS  = ["#000000", "#FF1493", "#00CED1", "#FFD700",
 
 # ----- Data loading helpers ------------------------------------------------
 
-def _pid_label(trace, pid):
-    """"<alias> (PID xxx)" if the trace carries an alias for this PID,
+def _pid_label(tracked_processes, pid):
+    """"<alias> (PID xxx)" if the run carries an alias for this PID,
     else "PID xxx". Aliases come from the optional `alias` field on each
-    TrackedProcess entry in `tracked_processes`."""
+    TrackedProcess entry. Accepts either a `repeated TrackedProcess`
+    proto field or a plain list of `TrackedProcess` messages.
+    """
     pid = int(pid)
-    for tp in getattr(trace, "tracked_processes", []) or []:
+    for tp in tracked_processes or []:
         if int(tp.pid) == pid and tp.alias:
             return f"{tp.alias} (PID {pid})"
     return f"PID {pid}"
@@ -127,48 +130,10 @@ def _load_all(metadata_path):
     return gpu_trace, sys_trace, disk_trace, events, session_meta
 
 
-def _global_t0(gpu_trace, sys_trace, disk_trace):
-    """Earliest data point across the active probes, in steady_clock ns."""
-    cands = []
-    if gpu_trace and len(gpu_trace.samples) > 1:
-        cands.append(va.gpu_to_steady(gpu_trace.samples[1].start_timestamp_ns,
-                                       gpu_trace.cupti_reference_ns,
-                                       gpu_trace.steady_clock_reference_ns))
-    if sys_trace and len(sys_trace.cpu_system_samples) > 0:
-        cands.append(sys_trace.cpu_system_samples[0].timestamp_ns)
-    if disk_trace and len(disk_trace.device_samples) > 0:
-        cands.append(disk_trace.device_samples[0].timestamp_ns)
-    return min(cands) if cands else 0
-
-
-def _global_xmax_ms(gpu_trace, sys_trace, disk_trace, events, global_t0):
-    """Latest data point across the active probes, expressed in ms from
-    global_t0. Used to set the shared X axis bounds."""
-    cands = []
-    if gpu_trace and len(gpu_trace.samples) > 1:
-        last = gpu_trace.samples[-1]
-        cands.append(va.gpu_to_steady(last.start_timestamp_ns,
-                                       gpu_trace.cupti_reference_ns,
-                                       gpu_trace.steady_clock_reference_ns))
-    if sys_trace and len(sys_trace.cpu_system_samples) > 0:
-        cands.append(sys_trace.cpu_system_samples[-1].timestamp_ns)
-    if disk_trace and len(disk_trace.device_samples) > 0:
-        cands.append(disk_trace.device_samples[-1].timestamp_ns)
-    if events:
-        for r in events["generic_regions"]:
-            cands.append(r.end_timestamp_ns)
-        for e in events["generic_events"]:
-            cands.append(e.timestamp_ns)
-        meta = events["metadata"]
-        if meta is not None:
-            cref, sref = meta.cupti_reference_ns, meta.steady_clock_reference_ns
-            for r in events["gpu_regions"]:
-                cands.append(int(va.gpu_to_steady(r.end_timestamp_ns, cref, sref)))
-            for e in events["gpu_events"]:
-                cands.append(int(va.gpu_to_steady(e.timestamp_ns, cref, sref)))
-    if not cands:
-        return 0.0
-    return (max(cands) - global_t0) / 1e6
+# Note: `live_tail.global_t0_from_traces` and `live_tail.global_xmax_ms`
+# are the canonical implementations of the time-range helpers; both the
+# static and live entrypoints route through them so the shared x-axis is
+# computed identically in either mode.
 
 
 # ----- Per-panel builders --------------------------------------------------
@@ -257,16 +222,18 @@ def _clamp_and_mark_peak(fig, peak, *, label=None):
             text_color="black", text_baseline="bottom"))
 
 
-def build_annot_panel(events, x_range, gpu_trace, global_t0):
-    """Single strip showing regions (colored bars at y=0) + events (vertical
-    lines + triangle markers at y=0.5). Hover shows the name and duration
-    or absolute timestamp.
+def build_annot_panel(annot_data, x_range):
+    """Single strip showing regions (colored bars at y=0) + events
+    (vertical lines + triangle markers at y=0.5). Hover shows the name
+    and duration or absolute timestamp.
+
+    `annot_data` is the projection-output dict:
+        {"annot_regions": {col: list, ...} | None,
+         "annot_events":  {col: list, ...} | None}
+
+    Returns (figure, cds_by_key).
     """
     kwargs = dict(width=PLOT_WIDTH, height=ANNOT_HEIGHT, title="Regions / Events",
-                  # Pin the y-range and refuse pan/zoom outside [-1, 1] so the
-                  # strip can't slide off-screen when the user scrolls. The
-                  # strip is purely categorical (no real units), so the same
-                  # initial view doubles as the bounds.
                   y_range=Range1d(start=-1, end=1, bounds=(-1, 1)),
                   tools="pan,box_zoom,xwheel_zoom,reset,save",
                   active_scroll="xwheel_zoom")
@@ -278,149 +245,83 @@ def build_annot_panel(events, x_range, gpu_trace, global_t0):
     fig.title.text_font_size = PANEL_FONT_SIZE
     fig.xaxis.axis_label = "Time (ms)"
 
-    # Build the merged region list (generic first, then GPU converted via metadata).
-    regions = []
-    instant_events = []
-    if events:
-        for r in events["generic_regions"]:
-            regions.append((r.name, r.start_timestamp_ns, r.end_timestamp_ns))
-        for e in events["generic_events"]:
-            instant_events.append((e.name, e.timestamp_ns))
-        meta = events["metadata"]
-        if meta is not None:
-            cref, sref = meta.cupti_reference_ns, meta.steady_clock_reference_ns
-            for r in events["gpu_regions"]:
-                regions.append((r.name,
-                                int(va.gpu_to_steady(r.start_timestamp_ns, cref, sref)),
-                                int(va.gpu_to_steady(r.end_timestamp_ns,   cref, sref))))
-            for e in events["gpu_events"]:
-                instant_events.append((e.name,
-                                        int(va.gpu_to_steady(e.timestamp_ns, cref, sref))))
+    cds_by_key = {}
 
-    # Regions: rectangle (left, right, top, bottom) per region.
-    if regions:
-        names, lefts, rights, dur_ms, colors = [], [], [], [], []
-        for i, (name, s_ns, e_ns) in enumerate(regions):
-            names.append(name)
-            lefts.append((s_ns - global_t0) / 1e6)
-            rights.append((e_ns - global_t0) / 1e6)
-            dur_ms.append((e_ns - s_ns) / 1e6)
-            colors.append(REGION_COLORS[i % len(REGION_COLORS)])
-        src = ColumnDataSource(dict(name=names, left=lefts, right=rights,
-                                     dur_ms=dur_ms, color=colors,
-                                     bottom=[-0.4] * len(names),
-                                     top=[0.4] * len(names)))
-        region_renderer = fig.quad(
-            left="left", right="right", bottom="bottom", top="top",
-            color="color", alpha=0.7, line_color="color", source=src,
-            legend_label="region")
-        # Scope to the quad renderer so hovering an event marker won't
-        # also fire this hover and surface bogus "@left = ???" cells.
-        fig.add_tools(HoverTool(renderers=[region_renderer],
-                                 tooltips=[("region", "@name"),
-                                           ("start (ms)", "@left{0.00}"),
-                                           ("end (ms)", "@right{0.00}"),
-                                           ("duration (ms)", "@dur_ms{0.00}")]))
+    region_data = annot_data.get("annot_regions")
+    # Always create the CDS — even if currently empty — so live tick can
+    # populate it later when the first regions arrive.
+    region_cds = ColumnDataSource(region_data or dict(
+        name=[], left=[], right=[], dur_ms=[], color=[], bottom=[], top=[]))
+    cds_by_key["annot_regions"] = region_cds
+    region_renderer = fig.quad(
+        left="left", right="right", bottom="bottom", top="top",
+        color="color", alpha=0.7, line_color="color", source=region_cds,
+        legend_label="region")
+    fig.add_tools(HoverTool(renderers=[region_renderer],
+                             tooltips=[("region", "@name"),
+                                       ("start (ms)", "@left{0.00}"),
+                                       ("end (ms)", "@right{0.00}"),
+                                       ("duration (ms)", "@dur_ms{0.00}")]))
 
-    # Events: vertical line + triangle marker.
-    if instant_events:
-        en, ex, ec = [], [], []
-        for i, (name, ts) in enumerate(instant_events):
-            en.append(name)
-            ex.append((ts - global_t0) / 1e6)
-            ec.append(EVENT_COLORS[i % len(EVENT_COLORS)])
-        src = ColumnDataSource(dict(name=en, x=ex, color=ec,
-                                     y=[0.7] * len(en),
-                                     y0=[-1.0] * len(en),
-                                     y1=[1.0] * len(en)))
-        event_marker = fig.scatter(
-            x="x", y="y", marker="inverted_triangle", size=12,
-            color="color", line_color="black", source=src,
-            legend_label="event")
-        # Vertical lines so the event is visible across the strip height.
-        fig.segment(x0="x", y0="y0", x1="x", y1="y1",
-                    line_color="color", line_width=1.5, line_alpha=0.6,
-                    source=src)
-        # Hover only fires on the marker glyph — not on the region quads
-        # (which have no @x column and would render as "???").
-        fig.add_tools(HoverTool(renderers=[event_marker],
-                                 tooltips=[("event", "@name"),
-                                           ("t (ms)", "@x{0.00}")]))
+    event_data = annot_data.get("annot_events")
+    event_cds = ColumnDataSource(event_data or dict(
+        name=[], x=[], color=[], y=[], y0=[], y1=[]))
+    cds_by_key["annot_events"] = event_cds
+    event_marker = fig.scatter(
+        x="x", y="y", marker="inverted_triangle", size=12,
+        color="color", line_color="black", source=event_cds,
+        legend_label="event")
+    fig.segment(x0="x", y0="y0", x1="x", y1="y1",
+                line_color="color", line_width=1.5, line_alpha=0.6,
+                source=event_cds)
+    fig.add_tools(HoverTool(renderers=[event_marker],
+                             tooltips=[("event", "@name"),
+                                       ("t (ms)", "@x{0.00}")]))
 
     _move_legend_outside(fig)
-    return fig
+    return fig, cds_by_key
 
 
-def build_gpu_panels(gpu_trace, x_range, global_t0):
-    """SM Utilization, DRAM throughput, PCIe throughput — only the three the
-    matplotlib version emits most prominently. Each is its own figure.
+def build_gpu_panels(gpu_frame, x_range):
+    """Build SM/DRAM/PCIe/NVLink panels from a projected gpu frame.
+
+    `gpu_frame` is `{"data": {key: cds-shaped dict | None}, "meta": {...}}`
+    produced by `live_tail.project_gpu`. Returns `(panels, cds_by_key)`.
     """
     panels = []
-    if not gpu_trace or len(gpu_trace.samples) <= 1:
-        return panels
+    cds_by_key = {}
+    data = gpu_frame["data"]
+    meta = gpu_frame["meta"]
 
-    samples = list(gpu_trace.samples)[1:]  # skip init artifact
-    cref, sref = gpu_trace.cupti_reference_ns, gpu_trace.steady_clock_reference_ns
-    ts_steady = np.array([s.start_timestamp_ns for s in samples], dtype=np.float64)
-    time_ms = (va.gpu_to_steady(ts_steady, cref, sref) - global_t0) / 1e6
-
-    metric_names = list(gpu_trace.metric_names)
-    idx = {name: i for i, name in enumerate(metric_names)}
-    vals = np.zeros((len(samples), len(metric_names)))
-    for i, s in enumerate(samples):
-        for j, v in enumerate(s.values):
-            vals[i, j] = v
-
-    if "sm__cycles_active.avg" in idx and "sm__cycles_elapsed.avg" in idx:
-        # One ColumnDataSource per panel + a single HoverTool scoped to one
-        # renderer = single combined tooltip box (no stacked popups when
-        # multiple series share the figure).
-        elapsed = vals[:, idx["sm__cycles_elapsed.avg"]]
-        cds_data = {
-            "t":   time_ms,
-            "avg": np.where(elapsed > 0,
-                             vals[:, idx["sm__cycles_active.avg"]] / elapsed * 100, 0),
-        }
-        if "sm__cycles_active.max" in idx:
-            cds_data["max"] = np.where(elapsed > 0,
-                                        vals[:, idx["sm__cycles_active.max"]] / elapsed * 100, 0)
-        src = ColumnDataSource(cds_data)
+    if data["gpu_sm_util"] is not None:
+        src = ColumnDataSource(data["gpu_sm_util"])
+        cds_by_key["gpu_sm_util"] = src
         fig = _empty_figure("GPU SM Utilization", x_range, y_label="%")
-        avg_line = fig.line("t", "avg", source=src, line_width=1,
-                             color="#1f77b4", legend_label="avg")
-        last = avg_line
-        if "max" in cds_data:
-            last = fig.line("t", "max", source=src, line_width=1.4,
-                             color="#d62728", legend_label="max")
+        fig.line("t", "avg", source=src, line_width=1,
+                 color="#1f77b4", legend_label="avg")
+        if "max" in data["gpu_sm_util"]:
+            fig.line("t", "max", source=src, line_width=1.4,
+                     color="#d62728", legend_label="max")
         tt = [("t (ms)", "@t{0.00}"), ("avg", "@avg{0.0}%")]
-        if "max" in cds_data:
+        if "max" in data["gpu_sm_util"]:
             tt.append(("max", "@max{0.0}%"))
         _attach_anchored_hover(fig, src, tt)
         _clamp_and_mark_peak(fig, 100, label="Max SM Util: 100%")
         _move_legend_outside(fig)
         panels.append(fig)
 
-    if "sm__warps_active.avg" in idx and "sm__cycles_elapsed.avg" in idx:
-        elapsed = vals[:, idx["sm__cycles_elapsed.avg"]]
-        cds_data = {
-            "t":   time_ms,
-            "avg": np.where(elapsed > 0,
-                             vals[:, idx["sm__warps_active.avg"]] / elapsed, 0),
-        }
-        if "sm__warps_active.max" in idx:
-            cds_data["max"] = np.where(elapsed > 0,
-                                        vals[:, idx["sm__warps_active.max"]] / elapsed, 0)
-        src = ColumnDataSource(cds_data)
+    if data["gpu_warps"] is not None:
+        src = ColumnDataSource(data["gpu_warps"])
+        cds_by_key["gpu_warps"] = src
         fig = _empty_figure("Active Warps / Cycle", x_range,
                              y_label="warps / cycle")
         fig.line("t", "avg", source=src, line_width=0.8, alpha=0.45,
                  color="#ff7f0e", legend_label="avg (across all SMs)")
-        last = fig.renderers[-1]
-        if "max" in cds_data:
-            last = fig.line("t", "max", source=src, line_width=1.0,
-                             color="#ff7f0e", legend_label="max (busiest SM)")
+        if "max" in data["gpu_warps"]:
+            fig.line("t", "max", source=src, line_width=1.0,
+                     color="#ff7f0e", legend_label="max (busiest SM)")
         tt = [("t (ms)", "@t{0.00}"), ("avg", "@avg{0.00}")]
-        if "max" in cds_data:
+        if "max" in data["gpu_warps"]:
             tt.append(("max", "@max{0.00}"))
         _attach_anchored_hover(fig, src, tt)
         # H100 / GH100: 64 warps/SM is the architectural cap.
@@ -428,138 +329,107 @@ def build_gpu_panels(gpu_trace, x_range, global_t0):
         _move_legend_outside(fig)
         panels.append(fig)
 
-    drum_avg_key = "dram__read_throughput.avg.pct_of_peak_sustained_elapsed"
-    if drum_avg_key in idx:
-        # Convert "% of peak" → GiB/s for direct readability, matching
-        # the matplotlib visualizer.
-        peak_dram_gibps = (gpu_trace.peak_dram_bw_gbps * 1e9 / (1024 ** 3)
-                           if gpu_trace.peak_dram_bw_gbps > 0 else None)
-        scale = (peak_dram_gibps / 100.0) if peak_dram_gibps else 1.0
-        unit = "GiB/s" if peak_dram_gibps else "% of peak"
-
-        cds_data = {"t": time_ms, "rd": vals[:, idx[drum_avg_key]] * scale}
-        if "dram__write_throughput.avg.pct_of_peak_sustained_elapsed" in idx:
-            cds_data["wr"] = vals[:, idx["dram__write_throughput.avg.pct_of_peak_sustained_elapsed"]] * scale
-        src = ColumnDataSource(cds_data)
+    if data["gpu_dram"] is not None:
+        peak = meta.get("peak_dram_gibps")
+        unit = "GiB/s" if peak else "% of peak"
+        src = ColumnDataSource(data["gpu_dram"])
+        cds_by_key["gpu_dram"] = src
         fig = _empty_figure("GPU DRAM Bandwidth", x_range, y_label=unit)
         fig.line("t", "rd", source=src, line_width=1, color="#2ca02c",
                  legend_label="read avg")
-        last = fig.renderers[-1]
-        if "wr" in cds_data:
-            last = fig.line("t", "wr", source=src, line_width=1, color="#ff7f0e",
-                             legend_label="write avg")
+        if "wr" in data["gpu_dram"]:
+            fig.line("t", "wr", source=src, line_width=1, color="#ff7f0e",
+                     legend_label="write avg")
         tt = [("t (ms)", "@t{0.00}"), (f"read ({unit})", "@rd{0.00}")]
-        if "wr" in cds_data:
+        if "wr" in data["gpu_dram"]:
             tt.append((f"write ({unit})", "@wr{0.00}"))
         _attach_anchored_hover(fig, src, tt)
-        if peak_dram_gibps:
-            _clamp_and_mark_peak(fig, peak_dram_gibps,
-                                  label=f"Max DRAM BW: {peak_dram_gibps:.0f} GiB/s")
+        if peak:
+            _clamp_and_mark_peak(fig, peak,
+                                  label=f"Max DRAM BW: {peak:.0f} GiB/s")
         _move_legend_outside(fig)
         panels.append(fig)
 
-    if "pcie__read_bytes.sum.per_second" in idx:
-        cds_data = {"t": time_ms,
-                    "rd": vals[:, idx["pcie__read_bytes.sum.per_second"]] / (1024 ** 3)}
-        if "pcie__write_bytes.sum.per_second" in idx:
-            cds_data["wr"] = vals[:, idx["pcie__write_bytes.sum.per_second"]] / (1024 ** 3)
-        src = ColumnDataSource(cds_data)
+    if data["gpu_pcie"] is not None:
+        src = ColumnDataSource(data["gpu_pcie"])
+        cds_by_key["gpu_pcie"] = src
         fig = _empty_figure("GPU PCIe Bandwidth", x_range, y_label="GiB/s")
         fig.line("t", "rd", source=src, line_width=1, color="#9467bd",
                  legend_label="H→D")
-        last = fig.renderers[-1]
-        if "wr" in cds_data:
-            last = fig.line("t", "wr", source=src, line_width=1, color="#8c564b",
-                             legend_label="D→H")
+        if "wr" in data["gpu_pcie"]:
+            fig.line("t", "wr", source=src, line_width=1, color="#8c564b",
+                     legend_label="D→H")
         tt = [("t (ms)", "@t{0.00}"), ("H→D (GiB/s)", "@rd{0.00}")]
-        if "wr" in cds_data:
+        if "wr" in data["gpu_pcie"]:
             tt.append(("D→H (GiB/s)", "@wr{0.00}"))
         _attach_anchored_hover(fig, src, tt)
-        # PCIe trace metadata stores per-direction peak; matplotlib panel
-        # plots both directions on the same axis and uses the bidirectional
-        # peak (×2) as the reference. Mirror that here.
-        peak_pcie_bidi = (gpu_trace.peak_pcie_bw_bytes_per_sec * 2 / (1024 ** 3)
-                          if gpu_trace.peak_pcie_bw_bytes_per_sec > 0 else None)
+        peak_pcie_bidi = meta.get("peak_pcie_bidi_gibps")
         if peak_pcie_bidi:
             _clamp_and_mark_peak(fig, peak_pcie_bidi,
                                   label=f"Max PCIe BW: {peak_pcie_bidi:.1f} GiB/s (Bi-directional)")
         _move_legend_outside(fig)
         panels.append(fig)
 
-    if "pcie__read_bytes.sum" in idx and "pcie__write_bytes.sum" in idx:
-        # Per-sample raw bytes; cumsum gives the running total.
-        rd_cum = np.cumsum(vals[:, idx["pcie__read_bytes.sum"]])
-        wr_cum = np.cumsum(vals[:, idx["pcie__write_bytes.sum"]])
-        max_bytes = float(max(rd_cum[-1] if rd_cum.size else 0,
-                               wr_cum[-1] if wr_cum.size else 0))
-        # Pick the largest binary unit such that the max value is ≥ 1 in it.
-        for div, unit in [(1024 ** 4, "TiB"), (1024 ** 3, "GiB"),
-                          (1024 ** 2, "MiB"), (1024, "KiB"), (1, "B")]:
-            if max_bytes >= div:
-                break
-        src = ColumnDataSource({"t": time_ms,
-                                 "rd": rd_cum / div, "wr": wr_cum / div})
+    if data["gpu_pcie_cum"] is not None:
+        src = ColumnDataSource(data["gpu_pcie_cum"])
+        cds_by_key["gpu_pcie_cum"] = src
+        unit = meta.get("pcie_cum_unit", "B")
         fig = _empty_figure("Cumulative PCIe Bytes", x_range, y_label=unit)
         fig.line("t", "rd", source=src, line_width=1, color="#9467bd",
                  legend_label="H→D cumulative")
-        last = fig.line("t", "wr", source=src, line_width=1, color="#8c564b",
-                         legend_label="D→H cumulative")
+        fig.line("t", "wr", source=src, line_width=1, color="#8c564b",
+                 legend_label="D→H cumulative")
         _attach_anchored_hover(fig, src,
             [("t (ms)", "@t{0.00}"),
              (f"H→D ({unit})", "@rd{0.00}"),
              (f"D→H ({unit})", "@wr{0.00}")])
-        # Cumulative — auto-fit to data, just clamp >= 0.
-        upper = max(0.01, max_bytes / div) * YLIM_HEADROOM
+        # Cumulative — auto-fit, just keep >= 0. Cap from the initial frame;
+        # in live mode, axis bound stays put as new samples scroll past.
+        max_val = max(float(np.max(data["gpu_pcie_cum"]["rd"])
+                              if len(data["gpu_pcie_cum"]["rd"]) else 0),
+                       float(np.max(data["gpu_pcie_cum"]["wr"])
+                              if len(data["gpu_pcie_cum"]["wr"]) else 0))
+        upper = max(0.01, max_val) * YLIM_HEADROOM
         fig.y_range = Range1d(start=0, end=upper, bounds=(0, upper))
         _move_legend_outside(fig)
         panels.append(fig)
 
-    if "nvlrx__bytes.sum.per_second" in idx and "nvltx__bytes.sum.per_second" in idx:
-        rx_gibps = vals[:, idx["nvlrx__bytes.sum.per_second"]] / (1024 ** 3)
-        tx_gibps = vals[:, idx["nvltx__bytes.sum.per_second"]] / (1024 ** 3)
-        src = ColumnDataSource({"t": time_ms, "rx": rx_gibps, "tx": tx_gibps})
+    if data["gpu_nvlink"] is not None:
+        src = ColumnDataSource(data["gpu_nvlink"])
+        cds_by_key["gpu_nvlink"] = src
         fig = _empty_figure("GPU NVLink Bandwidth", x_range, y_label="GiB/s")
         fig.line("t", "rx", source=src, line_width=1, color="#e377c2",
                  legend_label="RX")
-        last = fig.line("t", "tx", source=src, line_width=1, color="#17becf",
-                         legend_label="TX")
+        fig.line("t", "tx", source=src, line_width=1, color="#17becf",
+                 legend_label="TX")
         _attach_anchored_hover(fig, src,
             [("t (ms)", "@t{0.00}"),
              ("RX (GiB/s)", "@rx{0.00}"),
              ("TX (GiB/s)", "@tx{0.00}")])
-        peak_nvl_bidi = (gpu_trace.peak_nvlink_bw_bytes_per_sec * 2 / (1024 ** 3)
-                         if gpu_trace.peak_nvlink_bw_bytes_per_sec > 0 else None)
+        peak_nvl_bidi = meta.get("peak_nvlink_bidi_gibps")
         if peak_nvl_bidi:
             _clamp_and_mark_peak(fig, peak_nvl_bidi,
                                   label=f"Max NVLink BW: {peak_nvl_bidi:.1f} GiB/s (Bi-directional)")
         _move_legend_outside(fig)
         panels.append(fig)
 
-    return panels
+    return panels, cds_by_key
 
 
-def build_system_panels(sys_trace, x_range, global_t0):
+def build_system_panels(sys_frame, x_range):
+    """Build CPU + memory panels from a projected system frame.
+
+    Returns `(panels, cds_by_key)`.
+    """
     panels = []
-    if not sys_trace:
-        return panels
+    cds_by_key = {}
+    data = sys_frame["data"]
+    meta = sys_frame["meta"]
+    tracked = meta.get("tracked_processes", [])
 
-    if len(sys_trace.cpu_system_samples) > 0:
-        s = sys_trace.cpu_system_samples
-        time_ms = (np.array([x.timestamp_ns for x in s]) - global_t0) / 1e6
-        user = np.array([x.user_pct for x in s])
-        sysp = np.array([x.system_pct for x in s])
-        iow  = np.array([x.iowait_pct for x in s])
-        # Use the trace's authoritative total_utilization_pct rather than
-        # summing components; matches visualize_all.py's "Total" line.
-        total = np.array([x.total_utilization_pct for x in s])
-        # Stacked vareas need cumulative tops as columns in the source.
-        src = ColumnDataSource({
-            "t": time_ms,
-            "user": user, "sys": sysp, "iow": iow, "total": total,
-            "y_user_top": user,
-            "y_sys_top":  user + sysp,
-            "y_iow_top":  user + sysp + iow,
-        })
+    if data["sys_cpu_total"] is not None:
+        src = ColumnDataSource(data["sys_cpu_total"])
+        cds_by_key["sys_cpu_total"] = src
         fig = _empty_figure("CPU Utilization (system-wide)", x_range, y_label="%")
         fig.varea(x="t", y1=0,            y2="y_user_top", source=src,
                   color="#4c72b0", alpha=0.7, legend_label="User")
@@ -567,8 +437,8 @@ def build_system_panels(sys_trace, x_range, global_t0):
                   color="#dd8452", alpha=0.7, legend_label="System")
         fig.varea(x="t", y1="y_sys_top",  y2="y_iow_top",  source=src,
                   color="#c44e52", alpha=0.7, legend_label="IOWait")
-        total_line = fig.line("t", "total", source=src, color="black",
-                               line_width=1, legend_label="Total")
+        fig.line("t", "total", source=src, color="black",
+                 line_width=1, legend_label="Total")
         _attach_anchored_hover(fig, src,
             [("t (ms)", "@t{0.00}"),
              ("User", "@user{0.0}%"),
@@ -579,60 +449,31 @@ def build_system_panels(sys_trace, x_range, global_t0):
         _move_legend_outside(fig)
         panels.append(fig)
 
-    if len(sys_trace.cpu_process_samples) > 0:
-        proc = list(sys_trace.cpu_process_samples)
-        pids = sorted(set(s.pid for s in proc))
-        # All PIDs share the per-tick timestamp set; take the first PID's
-        # timestamps as the canonical x axis.
-        per_pid = {pid: [s for s in proc if s.pid == pid] for pid in pids}
-        base = per_pid[pids[0]]
-        time_ms = (np.array([x.timestamp_ns for x in base]) - global_t0) / 1e6
-        cds_data = {"t": time_ms}
-        max_val = 0.0
-        for pid in pids:
-            samps = per_pid[pid]
-            user = np.array([x.user_pct for x in samps])
-            sysp = np.array([x.system_pct for x in samps])
-            n = len(time_ms)
-            if user.size != n: user = np.resize(user, n)
-            if sysp.size != n: sysp = np.resize(sysp, n)
-            cds_data[f"pid_{pid}_user"] = user
-            cds_data[f"pid_{pid}_sum"]  = user + sysp
-            max_val = max(max_val, float((user + sysp).max() if user.size else 0))
-        src = ColumnDataSource(cds_data)
+    if data["sys_cpu_proc"] is not None:
+        src = ColumnDataSource(data["sys_cpu_proc"])
+        cds_by_key["sys_cpu_proc"] = src
+        pids = meta["pids"]
         fig = _empty_figure("CPU Utilization (per process)", x_range, y_label="%")
-        last = None
         tt = [("t (ms)", "@t{0.00}")]
         for i, pid in enumerate(pids):
             color = REGION_COLORS[i % 8]
-            label = _pid_label(sys_trace, pid)
+            label = _pid_label(tracked, pid)
             fig.line("t", f"pid_{pid}_sum", source=src, line_width=1, color=color,
                      legend_label=f"{label} (usr+sys)")
-            last = fig.line("t", f"pid_{pid}_user", source=src, line_width=0.8,
-                             alpha=0.5, line_dash="dashed", color=color,
-                             legend_label=f"{label} (usr)")
+            fig.line("t", f"pid_{pid}_user", source=src, line_width=0.8,
+                     alpha=0.5, line_dash="dashed", color=color,
+                     legend_label=f"{label} (usr)")
             tt.append((f"{label} usr+sys", f"@pid_{pid}_sum{{0.0}}%"))
             tt.append((f"{label} usr",     f"@pid_{pid}_user{{0.0}}%"))
         _attach_anchored_hover(fig, src, tt)
-        upper = max(1.0, max_val) * YLIM_HEADROOM
+        upper = max(1.0, meta["cpu_proc_max"]) * YLIM_HEADROOM
         fig.y_range = Range1d(start=0, end=upper, bounds=(0, upper))
         _move_legend_outside(fig)
         panels.append(fig)
 
-    if len(sys_trace.memory_system_samples) > 0:
-        s = sys_trace.memory_system_samples
-        time_ms = (np.array([x.timestamp_ns for x in s]) - global_t0) / 1e6
-        used    = np.array([x.used_bytes    for x in s]) / (1024 ** 3)
-        buffers = np.array([x.buffers_bytes for x in s]) / (1024 ** 3)
-        cached  = np.array([x.cached_bytes  for x in s]) / (1024 ** 3)
-        # Stack: Used → Buffers → Cached, matching visualize_all.py.
-        src = ColumnDataSource({
-            "t": time_ms,
-            "used": used, "buffers": buffers, "cached": cached,
-            "y_used_top":    used,
-            "y_buffers_top": used + buffers,
-            "y_cached_top":  used + buffers + cached,
-        })
+    if data["sys_mem_total"] is not None:
+        src = ColumnDataSource(data["sys_mem_total"])
+        cds_by_key["sys_mem_total"] = src
         fig = _empty_figure("System Memory", x_range, y_label="GiB")
         fig.varea(x="t", y1=0,                y2="y_used_top",    source=src,
                   color="#c44e52", alpha=0.7, legend_label="Used")
@@ -645,178 +486,113 @@ def build_system_panels(sys_trace, x_range, global_t0):
              ("Used (GiB)",    "@used{0.00}"),
              ("Buffers (GiB)", "@buffers{0.00}"),
              ("Cached (GiB)",  "@cached{0.00}")])
-        # First sample's total_bytes is the install RAM size (constant).
-        total_gib = s[0].total_bytes / (1024 ** 3) if s[0].total_bytes else 0
+        total_gib = meta.get("total_ram_gib", 0.0)
         if total_gib > 0:
             _clamp_and_mark_peak(fig, total_gib,
                                   label=f"Total: {total_gib:.0f} GiB")
         _move_legend_outside(fig)
         panels.append(fig)
 
-    if len(sys_trace.memory_process_samples) > 0:
-        proc = list(sys_trace.memory_process_samples)
-        pids = sorted(set(s.pid for s in proc))
-        per_pid = {pid: [s for s in proc if s.pid == pid] for pid in pids}
-        base = per_pid[pids[0]]
-        time_ms = (np.array([x.timestamp_ns for x in base]) - global_t0) / 1e6
-        cds_data = {"t": time_ms}
-        max_val = 0.0
-        for pid in pids:
-            samps = per_pid[pid]
-            rss = np.array([x.rss_bytes for x in samps]) / (1024 ** 3)
-            n = len(time_ms)
-            if rss.size != n: rss = np.resize(rss, n)
-            cds_data[f"pid_{pid}_rss"] = rss
-            max_val = max(max_val, float(rss.max() if rss.size else 0))
-        src = ColumnDataSource(cds_data)
+    if data["sys_mem_proc"] is not None:
+        src = ColumnDataSource(data["sys_mem_proc"])
+        cds_by_key["sys_mem_proc"] = src
+        pids = meta["pids"]
         fig = _empty_figure("Process Memory (RSS)", x_range, y_label="GiB")
-        last = None
         tt = [("t (ms)", "@t{0.00}")]
         for i, pid in enumerate(pids):
-            last = fig.line("t", f"pid_{pid}_rss", source=src, line_width=1,
-                             color=REGION_COLORS[i % 8],
-                             legend_label=f"{_pid_label(sys_trace, pid)} RSS")
-            tt.append((f"{_pid_label(sys_trace, pid)} RSS", f"@pid_{pid}_rss{{0.00}} GiB"))
+            label = _pid_label(tracked, pid)
+            fig.line("t", f"pid_{pid}_rss", source=src, line_width=1,
+                     color=REGION_COLORS[i % 8],
+                     legend_label=f"{label} RSS")
+            tt.append((f"{label} RSS", f"@pid_{pid}_rss{{0.00}} GiB"))
         _attach_anchored_hover(fig, src, tt)
-        upper = max(0.01, max_val) * YLIM_HEADROOM
+        upper = max(0.01, meta.get("mem_proc_max_gib", 0.0)) * YLIM_HEADROOM
         fig.y_range = Range1d(start=0, end=upper, bounds=(0, upper))
         _move_legend_outside(fig)
         panels.append(fig)
 
-    return panels
+    return panels, cds_by_key
 
 
-def build_disk_panels(disk_trace, x_range, global_t0):
+def build_disk_panels(disk_frame, x_range):
+    """Build per-device + per-process disk panels from a projected disk frame.
+
+    Returns `(panels, cds_by_key)`.
+    """
     panels = []
-    if not disk_trace or len(disk_trace.device_samples) == 0:
-        return panels
+    cds_by_key = {}
+    data = disk_frame["data"]
+    meta = disk_frame["meta"]
+    devs = meta.get("devs", [])
+    tracked = meta.get("tracked_processes", [])
 
-    # Group device samples by device name.
-    by_dev = {}
-    for s in disk_trace.device_samples:
-        by_dev.setdefault(s.device_name, []).append(s)
+    if data["disk_dev_bw"] is not None:
+        src = ColumnDataSource(data["disk_dev_bw"])
+        cds_by_key["disk_dev_bw"] = src
+        fig = _empty_figure("Disk Bandwidth (per device)", x_range, y_label="MiB/s")
+        for palette_idx, dev in enumerate(devs):
+            color = REGION_COLORS[palette_idx % 8]
+            fig.line("t", f"{dev}_rd", source=src, line_width=1.2, color=color,
+                     legend_label=f"{dev} read")
+            fig.line("t", f"{dev}_wr", source=src, line_width=1.0,
+                     line_dash="dashed", color=color,
+                     legend_label=f"{dev} write")
+        tt = [("t (ms)", "@t{0.00}")]
+        for dev in devs:
+            tt.append((f"{dev} read",  f"@{dev}_rd{{0.00}} MiB/s"))
+            tt.append((f"{dev} write", f"@{dev}_wr{{0.00}} MiB/s"))
+        _attach_anchored_hover(fig, src, tt)
+        bw_max = meta.get("dev_bw_max_mibps", 0.0)
+        if bw_max > 0:
+            upper = max(0.01, bw_max) * YLIM_HEADROOM
+            fig.y_range = Range1d(start=0, end=upper, bounds=(0, upper))
+        _move_legend_outside(fig)
+        panels.append(fig)
 
-    fig = _empty_figure("Disk Bandwidth (per device)", x_range, y_label="MiB/s")
-
-    # Build one combined ColumnDataSource keyed on the union of device
-    # timestamps. All devices tick together in the C++ flush thread, so
-    # the timestamp arrays match across devices in practice.
-    devs = list(by_dev.keys())
-    base_samps = by_dev[devs[0]]
-    time_ms = (np.array([x.timestamp_ns for x in base_samps]) - global_t0) / 1e6
-    cds_data = {"t": time_ms}
-    data_max = 0.0
-    for dev in devs:
-        samps = by_dev[dev]
-        rd = np.array([x.read_bytes_per_sec for x in samps]) / (1024 ** 2)
-        wr = np.array([x.write_bytes_per_sec for x in samps]) / (1024 ** 2)
-        # Pad / truncate if a device's sample count drifts from the base.
-        n = len(time_ms)
-        if rd.size != n:
-            rd = np.resize(rd, n)
-            wr = np.resize(wr, n)
-        cds_data[f"{dev}_rd"] = rd
-        cds_data[f"{dev}_wr"] = wr
-        data_max = max(data_max, float(rd.max() if rd.size else 0),
-                                  float(wr.max() if wr.size else 0))
-    src = ColumnDataSource(cds_data)
-
-    last = None
-    for palette_idx, dev in enumerate(devs):
-        color = REGION_COLORS[palette_idx % 8]
-        fig.line("t", f"{dev}_rd", source=src, line_width=1.2, color=color,
-                 legend_label=f"{dev} read")
-        last = fig.line("t", f"{dev}_wr", source=src, line_width=1.0,
-                         line_dash="dashed", color=color,
-                         legend_label=f"{dev} write")
-    tt = [("t (ms)", "@t{0.00}")]
-    for dev in devs:
-        tt.append((f"{dev} read",  f"@{dev}_rd{{0.00}} MiB/s"))
-        tt.append((f"{dev} write", f"@{dev}_wr{{0.00}} MiB/s"))
-    _attach_anchored_hover(fig, src, tt)
-    # No theoretical peak for disk — clamp to observed-data max with the
-    # standard headroom, mirroring tools/visualize_all.py.
-    if data_max > 0:
-        upper = max(0.01, data_max) * YLIM_HEADROOM
-        fig.y_range = Range1d(start=0, end=upper, bounds=(0, upper))
-    _move_legend_outside(fig)
-    panels.append(fig)
-
-    # Per-process disk IO
-    if len(disk_trace.process_samples) > 0:
-        proc = list(disk_trace.process_samples)
-        pids = sorted(set(s.pid for s in proc))
-        per_pid = {pid: [s for s in proc if s.pid == pid] for pid in pids}
-        base = per_pid[pids[0]]
-        time_ms = (np.array([x.timestamp_ns for x in base]) - global_t0) / 1e6
-        cds_data = {"t": time_ms}
-        max_val = 0.0
-        for pid in pids:
-            samps = per_pid[pid]
-            rd = np.array([x.read_bytes_per_sec for x in samps]) / (1024 ** 2)
-            wr = np.array([x.write_bytes_per_sec for x in samps]) / (1024 ** 2)
-            n = len(time_ms)
-            if rd.size != n: rd = np.resize(rd, n)
-            if wr.size != n: wr = np.resize(wr, n)
-            cds_data[f"pid_{pid}_rd"] = rd
-            cds_data[f"pid_{pid}_wr"] = wr
-            max_val = max(max_val, float(rd.max() if rd.size else 0),
-                                    float(wr.max() if wr.size else 0))
-        src = ColumnDataSource(cds_data)
+    if data["disk_proc_bw"] is not None:
+        src = ColumnDataSource(data["disk_proc_bw"])
+        cds_by_key["disk_proc_bw"] = src
+        pids = meta["pids"]
         fig = _empty_figure("Process Disk IO", x_range, y_label="MiB/s")
-        last = None
         tt = [("t (ms)", "@t{0.00}")]
         for i, pid in enumerate(pids):
             color = REGION_COLORS[i % 8]
-            label = _pid_label(disk_trace, pid)
+            label = _pid_label(tracked, pid)
             fig.line("t", f"pid_{pid}_rd", source=src, line_width=1, color=color,
                      legend_label=f"{label} read")
-            last = fig.line("t", f"pid_{pid}_wr", source=src, line_width=1,
-                             line_dash="dashed", color=color,
-                             legend_label=f"{label} write")
+            fig.line("t", f"pid_{pid}_wr", source=src, line_width=1,
+                     line_dash="dashed", color=color,
+                     legend_label=f"{label} write")
             tt.append((f"{label} read",  f"@pid_{pid}_rd{{0.00}} MiB/s"))
             tt.append((f"{label} write", f"@pid_{pid}_wr{{0.00}} MiB/s"))
         _attach_anchored_hover(fig, src, tt)
-        upper = max(0.01, max_val) * YLIM_HEADROOM
+        upper = max(0.01, meta.get("proc_bw_max_mibps", 0.0)) * YLIM_HEADROOM
         fig.y_range = Range1d(start=0, end=upper, bounds=(0, upper))
         _move_legend_outside(fig)
         panels.append(fig)
 
-    # Per-device queue depth
-    cds_data = {"t": (np.array([x.timestamp_ns for x in by_dev[devs[0]]])
-                       - global_t0) / 1e6}
-    q_max = 0.0
-    for dev in devs:
-        samps = by_dev[dev]
-        rdq = np.array([x.read_queue_depth  for x in samps], dtype=np.float64)
-        wrq = np.array([x.write_queue_depth for x in samps], dtype=np.float64)
-        n = len(cds_data["t"])
-        if rdq.size != n: rdq = np.resize(rdq, n)
-        if wrq.size != n: wrq = np.resize(wrq, n)
-        cds_data[f"{dev}_rdq"] = rdq
-        cds_data[f"{dev}_wrq"] = wrq
-        q_max = max(q_max, float(rdq.max() if rdq.size else 0),
-                            float(wrq.max() if wrq.size else 0))
-    src = ColumnDataSource(cds_data)
-    fig = _empty_figure("Disk Queue Depth (per device)", x_range, y_label="depth")
-    last = None
-    tt = [("t (ms)", "@t{0.00}")]
-    for i, dev in enumerate(devs):
-        color = REGION_COLORS[i % 8]
-        fig.line("t", f"{dev}_rdq", source=src, line_width=1, color=color,
-                 legend_label=f"{dev} read Q")
-        last = fig.line("t", f"{dev}_wrq", source=src, line_width=1,
-                         line_dash="dashed", color=color,
-                         legend_label=f"{dev} write Q")
-        tt.append((f"{dev} read Q",  f"@{dev}_rdq{{0}}"))
-        tt.append((f"{dev} write Q", f"@{dev}_wrq{{0}}"))
-    _attach_anchored_hover(fig, src, tt)
-    upper = max(1.0, q_max) * YLIM_HEADROOM
-    fig.y_range = Range1d(start=0, end=upper, bounds=(0, upper))
-    _move_legend_outside(fig)
-    panels.append(fig)
+    if data["disk_dev_q"] is not None:
+        src = ColumnDataSource(data["disk_dev_q"])
+        cds_by_key["disk_dev_q"] = src
+        fig = _empty_figure("Disk Queue Depth (per device)", x_range,
+                             y_label="depth")
+        tt = [("t (ms)", "@t{0.00}")]
+        for i, dev in enumerate(devs):
+            color = REGION_COLORS[i % 8]
+            fig.line("t", f"{dev}_rdq", source=src, line_width=1, color=color,
+                     legend_label=f"{dev} read Q")
+            fig.line("t", f"{dev}_wrq", source=src, line_width=1,
+                     line_dash="dashed", color=color,
+                     legend_label=f"{dev} write Q")
+            tt.append((f"{dev} read Q",  f"@{dev}_rdq{{0}}"))
+            tt.append((f"{dev} write Q", f"@{dev}_wrq{{0}}"))
+        _attach_anchored_hover(fig, src, tt)
+        upper = max(1.0, meta.get("q_max", 0.0)) * YLIM_HEADROOM
+        fig.y_range = Range1d(start=0, end=upper, bounds=(0, upper))
+        _move_legend_outside(fig)
+        panels.append(fig)
 
-    return panels
+    return panels, cds_by_key
 
 
 # ----- Main ----------------------------------------------------------------
@@ -850,56 +626,68 @@ def _serve_html(html_bytes, port, host="0.0.0.0"):
             print("\nShutting down.")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("metadata",
-                        help="session_metadata.pb (per-probe files are discovered from it)")
-    parser.add_argument("-o", "--output", default="profile.html",
-                        help="Path to also write the HTML to (default: %(default)s)")
-    parser.add_argument("--port", type=int, default=8000,
-                        help="HTTP port to serve on (default: %(default)s)")
-    parser.add_argument("--host", default="0.0.0.0",
-                        help="Bind address (default: %(default)s — all interfaces)")
-    parser.add_argument("--no-serve", action="store_true",
-                        help="Skip the HTTP server; just write the HTML file")
-    args = parser.parse_args()
+def _build_layout(frame, gpu_trace, sys_trace, disk_trace, events,
+                   global_t0, session_meta, *, live=False):
+    """Construct the full Bokeh layout from a projected frame.
 
-    gpu_trace, sys_trace, disk_trace, events, session_meta = _load_all(args.metadata)
-    print(f"Session: {session_meta.hostname} @ {session_meta.start_iso8601}")
-    print(f"Probes:  {[p.output_file for p in session_meta.probes]}")
+    `frame` is the dict returned by `LiveState.project_all()` (or an
+    equivalent built directly via `live_tail.project_*` calls in static
+    mode). Returns `(layout, cds_by_key)`. The trace handles are passed
+    through purely for the title line (device name, etc.) and for the
+    initial xmax computation; the layout itself only consumes `frame`.
+    """
+    from bokeh.models import Div
 
-    global_t0 = _global_t0(gpu_trace, sys_trace, disk_trace)
-
-    # Shared x-range — pan/zoom on one panel syncs the rest. Bounds are
-    # set so the user can't drag below 0 (no "before the run started"
-    # blank space) or past xmax + 80% of the data span (room to scroll
-    # right if labels are clipped, but not infinite).
-    xmax_ms = _global_xmax_ms(gpu_trace, sys_trace, disk_trace, events, global_t0)
+    xmax_ms = lt.global_xmax_ms(gpu_trace, sys_trace, disk_trace,
+                                  events, global_t0)
     if xmax_ms <= 0:
-        xmax_ms = 1.0  # nothing to plot, but keep the range valid
-    x_upper_bound = xmax_ms * 1.8  # xmax + 0.8 * (xmax - 0)
-    shared_x = Range1d(start=0, end=xmax_ms,
-                        bounds=(0, x_upper_bound))
+        xmax_ms = 1.0
+    # In live mode the data extends past the initial xmax. Give the upper
+    # bound enough headroom that pan/zoom doesn't immediately bottom out,
+    # while the static path keeps the snug 1.8x bound it had before.
+    x_upper_bound = xmax_ms * (10.0 if live else 1.8)
+    shared_x = Range1d(start=0, end=xmax_ms, bounds=(0, x_upper_bound))
 
-    annot = build_annot_panel(events, shared_x, gpu_trace, global_t0)
-    panels = [annot]
-    panels += build_gpu_panels(gpu_trace, shared_x, global_t0)
-    panels += build_system_panels(sys_trace, shared_x, global_t0)
-    panels += build_disk_panels(disk_trace, shared_x, global_t0)
+    cds_by_key = {}
 
-    # Shared synced crosshair: a single CrosshairTool with one vertical
-    # Span overlay, attached to every panel. Bokeh 3.x propagates the
-    # cursor's x across all figures sharing the tool, so moving the mouse
-    # in any panel draws the dashed line at the same x on all of them.
+    annot_data = {k: frame["data"].get(k) for k in ("annot_regions",
+                                                       "annot_events")}
+    annot, annot_cds = build_annot_panel(annot_data, shared_x)
+    cds_by_key.update(annot_cds)
+
+    gpu_frame = {"data": {k: frame["data"].get(k)
+                           for k in ("gpu_sm_util", "gpu_warps", "gpu_dram",
+                                     "gpu_pcie", "gpu_pcie_cum", "gpu_nvlink")},
+                  "meta": frame["meta"].get("gpu", {})}
+    gpu_panels, gpu_cds = build_gpu_panels(gpu_frame, shared_x)
+    cds_by_key.update(gpu_cds)
+
+    sys_frame = {"data": {k: frame["data"].get(k)
+                           for k in ("sys_cpu_total", "sys_cpu_proc",
+                                     "sys_mem_total", "sys_mem_proc")},
+                  "meta": frame["meta"].get("sys", {})}
+    sys_panels, sys_cds = build_system_panels(sys_frame, shared_x)
+    cds_by_key.update(sys_cds)
+
+    disk_frame = {"data": {k: frame["data"].get(k)
+                            for k in ("disk_dev_bw", "disk_proc_bw",
+                                      "disk_dev_q")},
+                   "meta": frame["meta"].get("disk", {})}
+    disk_panels, disk_cds = build_disk_panels(disk_frame, shared_x)
+    cds_by_key.update(disk_cds)
+
+    panels = [annot] + gpu_panels + sys_panels + disk_panels
+
+    # Shared synced crosshair across every panel.
     crosshair = CrosshairTool(overlay=Span(
         dimension="height", line_dash="dashed",
         line_color="#666666", line_width=1, line_alpha=0.6))
     for fig in panels:
         fig.add_tools(crosshair)
 
-    # Title block as a Div above the column.
-    from bokeh.models import Div
     title_lines = [f"<b>Full-System Profile</b> — {session_meta.hostname}"]
+    if live:
+        title_lines[0] += " (live)"
     if gpu_trace:
         title_lines[0] += f" — {gpu_trace.device_name} ({gpu_trace.chip_name})"
     if session_meta.start_iso8601:
@@ -917,24 +705,138 @@ def main():
     title_div = Div(text="<br>".join(title_lines),
                     styles={"font-size": TITLE_FONT_SIZE,
                              "padding-bottom": "10px"})
-
-    # Per-figure widths are fixed (PLOT_WIDTH); the column itself just stacks.
     layout = column(title_div, *panels)
+    return layout, cds_by_key
 
-    # Render the layout to an HTML document. INLINE bundles BokehJS into
-    # the page so the served copy doesn't need outbound network.
+
+def _project_static(gpu_trace, sys_trace, disk_trace, events, t0):
+    """Run the four projection helpers and merge their outputs into the
+    same shape `LiveState.project_all` returns. Lets `_build_layout`
+    treat static and live entrypoints identically.
+    """
+    gpu = lt.project_gpu(gpu_trace, t0)
+    sysm = lt.project_system(sys_trace, t0)
+    disk = lt.project_disk(disk_trace, t0)
+    annot = lt.project_events(events, gpu_trace, t0,
+                                REGION_COLORS, EVENT_COLORS)
+    return {
+        "data": {**gpu["data"], **sysm["data"], **disk["data"], **annot["data"]},
+        "meta": {"gpu": gpu["meta"], "sys": sysm["meta"], "disk": disk["meta"]},
+    }
+
+
+def _run_live(args):
+    """Bokeh-server entrypoint: tail the .pb files and stream new samples
+    into the running document on every poll tick.
+    """
+    from bokeh.application import Application
+    from bokeh.application.handlers.function import FunctionHandler
+    from bokeh.server.server import Server
+
+    state = lt.LiveState(args.metadata, REGION_COLORS, EVENT_COLORS)
+    print(f"[live] Waiting for {args.metadata} (timeout {args.live_bootstrap_timeout_s}s)…")
+    if not state.wait_for_metadata(args.live_bootstrap_timeout_s):
+        print(f"[live] Timed out waiting for {args.metadata}.", file=sys.stderr)
+        sys.exit(1)
+    state.initial_load()
+    print(f"[live] Session: {state.session_meta.hostname} "
+          f"@ {state.session_meta.start_iso8601}")
+    print(f"[live] Probes:  {[p.output_file for p in state.session_meta.probes]}")
+
+    def make_doc(doc):
+        frame = state.project_all()
+        layout, cds = _build_layout(frame, state.gpu_trace, state.sys_trace,
+                                      state.disk_trace, state.events,
+                                      state.t0, state.session_meta, live=True)
+        # Each browser tab gets its own CDS registry — `state.cds` would
+        # be shared across tabs and confuse the per-tick replace logic.
+        # Wrap tick() so the callback closes over this connection's CDS.
+        per_doc_cds = dict(cds)
+
+        def tick():
+            if not state._drain_into_traces():
+                return
+            f = state.project_all()
+            for key, cols in f["data"].items():
+                if cols is None:
+                    continue
+                src = per_doc_cds.get(key)
+                if src is None:
+                    continue
+                src.data = {k: list(v) if isinstance(v, np.ndarray) else v
+                             for k, v in cols.items()}
+
+        doc.add_root(layout)
+        doc.add_periodic_callback(tick, args.poll_interval_ms)
+        doc.title = "cupti_profiler — Bokeh visualization (live)"
+
+    app = Application(FunctionHandler(make_doc))
+    origins = [f"{args.host}:{args.port}", f"localhost:{args.port}",
+                f"127.0.0.1:{args.port}"]
+    server = Server({"/": app}, address=args.host, port=args.port,
+                    allow_websocket_origin=origins)
+    server.start()
+    url = f"http://localhost:{args.port}/"
+    print(f"[live] Serving on {url}  (Ctrl-C to stop)")
+    try:
+        server.io_loop.add_callback(server.show, "/")
+    except Exception:
+        pass  # show() opens a browser; ignore failures (e.g. headless server).
+    try:
+        server.io_loop.start()
+    except KeyboardInterrupt:
+        print("\n[live] Shutting down.")
+
+
+def _run_static(args):
+    gpu_trace, sys_trace, disk_trace, events, session_meta = _load_all(args.metadata)
+    print(f"Session: {session_meta.hostname} @ {session_meta.start_iso8601}")
+    print(f"Probes:  {[p.output_file for p in session_meta.probes]}")
+
+    global_t0 = lt.global_t0_from_traces(gpu_trace, sys_trace, disk_trace)
+    frame = _project_static(gpu_trace, sys_trace, disk_trace, events, global_t0)
+    layout, _ = _build_layout(frame, gpu_trace, sys_trace, disk_trace,
+                                events, global_t0, session_meta, live=False)
+
     page_title = "cupti_profiler — Bokeh visualization"
     html = file_html(layout, INLINE, title=page_title)
     html_bytes = html.encode("utf-8")
 
-    # Always write the file too, so the user can copy / share / re-open
-    # without keeping the server up.
     with open(args.output, "wb") as f:
         f.write(html_bytes)
     print(f"Saved interactive plot to {args.output}")
 
     if not args.no_serve:
         _serve_html(html_bytes, port=args.port, host=args.host)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("metadata",
+                        help="session_metadata.pb (per-probe files are discovered from it)")
+    parser.add_argument("-o", "--output", default="profile.html",
+                        help="Path to also write the HTML to (default: %(default)s)")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="HTTP port to serve on (default: %(default)s)")
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="Bind address (default: %(default)s — all interfaces)")
+    parser.add_argument("--no-serve", action="store_true",
+                        help="Skip the HTTP server; just write the HTML file")
+    parser.add_argument("--live", action="store_true",
+                        help="Tail .pb files and stream new samples into a "
+                             "running Bokeh server (auto-refreshes the page).")
+    parser.add_argument("--poll-interval-ms", type=int, default=1000,
+                        help="Live mode: how often to read new bytes "
+                             "(default: %(default)s).")
+    parser.add_argument("--live-bootstrap-timeout-s", type=float, default=30.0,
+                        help="Live mode: how long to wait for "
+                             "session_metadata.pb to appear (default: %(default)s).")
+    args = parser.parse_args()
+
+    if args.live:
+        _run_live(args)
+    else:
+        _run_static(args)
 
 
 if __name__ == "__main__":
