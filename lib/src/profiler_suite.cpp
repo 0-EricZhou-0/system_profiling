@@ -123,7 +123,11 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     if (proto.has_gpu() && proto.gpu().enabled()) {
         m_impl->gpuEnabled = true;
         const auto& g = proto.gpu();
-        m_impl->gpuConfig.deviceIndex = g.device_index();
+        // Multi-device wiring lands in commit 6; for now consume the
+        // first entry of device_indices (defaulting to 0 if empty) so
+        // the single-device ProfilerConfig.deviceIndex still works.
+        m_impl->gpuConfig.deviceIndex = (g.device_indices_size() > 0)
+            ? g.device_indices(0) : 0;
         m_impl->gpuConfig.samplingFrequencyHz = g.sampling_frequency_hz() > 0 ? g.sampling_frequency_hz() : 10000;
         m_impl->gpuConfig.hwBufferSize = g.hw_buffer_size() > 0 ? g.hw_buffer_size() : 512 * 1024 * 1024;
         m_impl->gpuConfig.maxSamples = g.max_samples() > 0 ? g.max_samples() : 50000;

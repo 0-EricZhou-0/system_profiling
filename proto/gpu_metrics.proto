@@ -1,51 +1,31 @@
 syntax = "proto3";
 
-message GpuMetricSample {
-    uint64 start_timestamp_ns = 1;
-    uint64 end_timestamp_ns = 2;
-    // Metric values in the same order as GpuMetricsTrace.metric_names
-    repeated double values = 3;
-}
+import "metric_sample.proto";
 
-// Per-flush write accounting. One entry per completed flush cycle.
-// Each entry describes the flush *before* it was written — the flush cycle's
-// own byte count is known only after serialization, so it's carried forward
-// and attached to the next cycle's trace message.
-message GpuFlushStats {
-    uint64 timestamp_ns = 1;    // steady_clock ns at the time the flush completed
-    uint64 bytes_written = 2;   // serialized size of that flush's protobuf message
-    uint64 interval_ns = 3;     // ns since previous flush (0 for the first)
-}
+// GPU performance-counter trace. One length-delimited GPUMetricsTrace
+// message per flush; each is self-contained (TraceHeader and the
+// per-scope FQN registry are replayed on every flush) so a mid-stream
+// reader can join the trace at any point.
+//
+// Multi-device runs funnel samples from every device in
+// GPUProfilerConfig.device_indices into a single trace; each sample's
+// `gpu_index` disambiguates the source. Per-device peaks live in the
+// `tracked_gpus` repeated GPUDeviceInfo.
+message GPUMetricsTrace {
+    TraceHeader header                           = 1;
 
-message GpuMetricsTrace {
-    string device_name = 1;
-    string chip_name = 2;
-    uint64 sampling_frequency_hz = 3;
-    repeated string metric_names = 4;
-    repeated GpuMetricSample samples = 5;
-    // Field 6 (regions) and field 8 (region_timing_method) were removed —
-    // regions now live in events.pb (see proto/events.proto).
-    reserved 6, 8;
-    reserved "regions", "region_timing_method";
-    double peak_dram_bw_gbps = 7;  // theoretical peak DRAM bandwidth in GB/s (decimal)
-    // Theoretical peak PCIe bandwidth per direction, in bytes/sec.
-    // Derived from NVML max link generation × width × per-gen line-coding ratio.
-    double peak_pcie_bw_bytes_per_sec = 13;
+    // FQN registry per active scope. GPU traces typically carry a
+    // single entry of scope = SCOPE_GPU whose `fqns` field is the
+    // ordered list matched by every GPUSample's `values[]`.
+    repeated ScopeMetricNames scope_metric_names = 2;
 
-    // Theoretical peak NVLink bandwidth per direction, in bytes/sec.
-    // Derived from NVML: Σ over active links of per-gen per-link bandwidth.
-    double peak_nvlink_bw_bytes_per_sec = 14;
+    // Active GPUs in this run. One entry per index in
+    // GPUProfilerConfig.device_indices.
+    repeated GPUDeviceInfo tracked_gpus          = 3;
 
-    // Sync anchor: steady_clock and CUPTI clock readings taken at the same moment.
-    // Allows converting GPU timestamps to steady_clock space:
-    //   unified_ns = cupti_ts - cupti_reference_ns + steady_clock_reference_ns
-    uint64 steady_clock_reference_ns = 9;
-    uint64 cupti_reference_ns = 10;
-    // Wall-clock (system_clock) at profiler start, for absolute time display.
-    // Nanoseconds since Unix epoch.
-    uint64 wall_clock_epoch_ns = 11;
+    repeated GPUSample samples                   = 4;
 
-    // Per-flush write stats (see GpuFlushStats). Each Trace message appended to the
-    // file carries at most one entry here, describing the previous flush's size.
-    repeated GpuFlushStats flush_stats = 12;
+    // Per-flush write accounting; carries the PREVIOUS flush's stats
+    // (the current flush's byte size is unknowable before write).
+    repeated FlushStats flush_stats              = 5;
 }

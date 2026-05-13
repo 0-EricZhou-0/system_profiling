@@ -1,10 +1,13 @@
 syntax = "proto3";
 
-import "tracked_process.proto";
+import "metric_sample.proto";
 
 message GPUProfilerConfig {
     bool enabled = 1;
-    int32 device_index = 2;
+    // Empty = device 0. Otherwise CUPTI PM Sampling opens one session
+    // per index; the metric set in `metrics` is applied identically
+    // across every device.
+    repeated int32 device_indices = 2;
     uint64 sampling_frequency_hz = 3;
     uint64 hw_buffer_size = 4;
     uint64 max_samples = 5;
@@ -17,8 +20,9 @@ message SystemProfilerConfig {
     bool enabled = 1;
     uint64 sampling_frequency_hz = 2;
     // Processes to track per-process. Empty = system-wide only.
-    // Each entry is { pid, alias }; alias is optional.
-    repeated TrackedProcess processes = 3;
+    // PIDs can also be added/removed mid-run via
+    // ProfilerSuite::AddTrackedProcess/RemoveTrackedProcess.
+    repeated TrackedProcessV2 processes = 3;
     uint64 flush_interval_ms = 4;
     string output_file = 5;
 }
@@ -27,8 +31,8 @@ message DiskProfilerConfig {
     bool enabled = 1;
     uint64 sampling_frequency_hz = 2;
     repeated string devices = 3;
-    // Processes to track per-process. Empty = device-only sampling.
-    repeated TrackedProcess processes = 4;
+    // See SystemProfilerConfig.processes for mid-run add/remove behavior.
+    repeated TrackedProcessV2 processes = 4;
     uint64 flush_interval_ms = 5;
     string output_file = 6;
 }
@@ -53,4 +57,9 @@ message ProfilerSuiteConfig {
     // session_metadata.pb path, relative to output_dir.
     // Empty = "session_metadata.pb" by default at runtime.
     string session_metadata_file = 6;
+
+    // Path to a MetricCatalog pbtxt (see proto/metric_catalog.proto +
+    // configs/metric_catalog.pbtxt). Empty = the suite loads
+    // `configs/metric_catalog.pbtxt` next to the binary.
+    string metric_catalog_path = 7;
 }

@@ -4,6 +4,7 @@
 #include "system_flush_thread.h"
 
 #include "system_metrics.pb.h"
+#include "metric_sample.pb.h"
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 
@@ -21,6 +22,7 @@ class SystemProfiler::Impl {
 public:
     SystemProfilerConfig config;
     std::string hostname;
+    uint32_t hostCpuCount = 0;
 
     // Sample accumulation
     internal::SystemSampleBatch batch;
@@ -65,6 +67,8 @@ void SystemProfiler::Configure(const SystemProfilerConfig& config) {
     char buf[256];
     gethostname(buf, sizeof(buf));
     m_impl->hostname = buf;
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    m_impl->hostCpuCount = (nproc > 0) ? static_cast<uint32_t>(nproc) : 0;
 
     std::cout << "[System] Sampling frequency: " << config.samplingFrequencyHz << " Hz\n";
     std::cout << "[System] Tracking " << config.Processes.size() << " PID(s)\n";
@@ -112,72 +116,52 @@ void SystemProfiler::Start() {
             auto now = std::chrono::steady_clock::now().time_since_epoch();
             uint64_t tsNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
 
-            // CPU system-wide
+            // System-wide tick — CPU + memory in one Sample.
             auto curCPU = internal::ReadCPUStat();
+            auto mem    = internal::ReadMemInfo();
             {
                 uint64_t dTotal = curCPU.Total() - impl.prevCPU.Total();
                 if (dTotal > 0) {
                     double scale = 100.0 / dTotal;
-                    CPUSystemSample s;
-                    s.set_timestamp_ns(tsNs);
-                    s.set_total_utilization_pct((double)(curCPU.Busy() - impl.prevCPU.Busy()) * scale);
-                    s.set_user_pct((double)(curCPU.user + curCPU.nice - impl.prevCPU.user - impl.prevCPU.nice) * scale);
-                    s.set_system_pct((double)(curCPU.system - impl.prevCPU.system) * scale);
-                    s.set_iowait_pct((double)(curCPU.iowait - impl.prevCPU.iowait) * scale);
+                    internal::SystemTick t;
+                    t.timestamp_ns        = tsNs;
+                    t.cpu_busy_pct        = (double)(curCPU.Busy() - impl.prevCPU.Busy()) * scale;
+                    t.cpu_user_pct        = (double)(curCPU.user + curCPU.nice - impl.prevCPU.user - impl.prevCPU.nice) * scale;
+                    t.cpu_kernel_pct      = (double)(curCPU.system - impl.prevCPU.system) * scale;
+                    t.cpu_iowait_pct      = (double)(curCPU.iowait - impl.prevCPU.iowait) * scale;
+                    t.mem_capacity_bytes  = mem.totalKB * 1024;
+                    t.mem_used_bytes      = (mem.totalKB - mem.freeKB - mem.buffersKB - mem.cachedKB) * 1024;
+                    t.mem_available_bytes = mem.availableKB * 1024;
+                    t.mem_buffers_bytes   = mem.buffersKB * 1024;
+                    t.mem_cached_bytes    = mem.cachedKB * 1024;
 
                     std::lock_guard<std::mutex> lock(impl.batchMutex);
-                    impl.batch.CPUSysSamples.push_back(std::move(s));
+                    impl.batch.systemTicks.push_back(std::move(t));
                 }
                 impl.prevCPU = curCPU;
             }
 
-            // CPU per-process
+            // Per-PID tick — CPU + memory in one ProcessSample.
             for (const auto& proc : impl.config.Processes) {
                 uint32_t pid = proc.pid;
                 auto curPID = internal::ReadPIDStat(pid);
-                auto& prev = impl.prevPID[pid];
+                auto& prev  = impl.prevPID[pid];
+                auto statm  = internal::ReadPIDStatm(pid);
 
                 double dtSec = 1.0 / impl.config.samplingFrequencyHz;
-                CPUProcessSample s;
-                s.set_timestamp_ns(tsNs);
-                s.set_pid(pid);
-                s.set_user_pct((double)(curPID.utime - prev.utime) / (dtSec * clkTck) * 100.0);
-                s.set_system_pct((double)(curPID.stime - prev.stime) / (dtSec * clkTck) * 100.0);
-                s.set_iowait_pct((double)(curPID.blkioTicks - prev.blkioTicks) / (dtSec * clkTck) * 100.0);
+                internal::ProcessTick t;
+                t.timestamp_ns   = tsNs;
+                t.pid            = pid;
+                t.cpu_user_pct   = (double)(curPID.utime - prev.utime) / (dtSec * clkTck) * 100.0;
+                t.cpu_kernel_pct = (double)(curPID.stime - prev.stime) / (dtSec * clkTck) * 100.0;
+                t.cpu_iowait_pct = (double)(curPID.blkioTicks - prev.blkioTicks) / (dtSec * clkTck) * 100.0;
+                t.rss_bytes      = statm.RSSPages   * pageSize;
+                t.vms_bytes      = statm.VMSPages   * pageSize;
+                t.shared_bytes   = statm.sharedPages * pageSize;
                 prev = curPID;
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
-                impl.batch.CPUProcSamples.push_back(std::move(s));
-            }
-
-            // Memory system-wide
-            {
-                auto mem = internal::ReadMemInfo();
-                MemorySystemSample s;
-                s.set_timestamp_ns(tsNs);
-                s.set_total_bytes(mem.totalKB * 1024);
-                s.set_used_bytes((mem.totalKB - mem.freeKB - mem.buffersKB - mem.cachedKB) * 1024);
-                s.set_available_bytes(mem.availableKB * 1024);
-                s.set_buffers_bytes(mem.buffersKB * 1024);
-                s.set_cached_bytes(mem.cachedKB * 1024);
-
-                std::lock_guard<std::mutex> lock(impl.batchMutex);
-                impl.batch.memSysSamples.push_back(std::move(s));
-            }
-
-            // Memory per-process
-            for (const auto& proc : impl.config.Processes) {
-                uint32_t pid = proc.pid;
-                auto statm = internal::ReadPIDStatm(pid);
-                MemoryProcessSample s;
-                s.set_timestamp_ns(tsNs);
-                s.set_pid(pid);
-                s.set_rss_bytes(statm.RSSPages * pageSize);
-                s.set_vms_bytes(statm.VMSPages * pageSize);
-                s.set_shared_bytes(statm.sharedPages * pageSize);
-
-                std::lock_guard<std::mutex> lock(impl.batchMutex);
-                impl.batch.memProcSamples.push_back(std::move(s));
+                impl.batch.processTicks.push_back(std::move(t));
             }
         }
     });
@@ -192,6 +176,7 @@ void SystemProfiler::Start() {
                                            std::ref(m_impl->outMutex),
                                            std::cref(m_impl->hostname),
                                            m_impl->config.samplingFrequencyHz,
+                                           m_impl->hostCpuCount,
                                            std::cref(m_impl->config.Processes),
                                            std::ref(m_impl->stopFlush),
                                            m_impl->config.flushIntervalMs,
@@ -226,43 +211,26 @@ void SystemProfiler::Stop() {
         internal::SystemSampleBatch drained;
         {
             std::lock_guard<std::mutex> lock(m_impl->batchMutex);
-            drained.CPUSysSamples.swap(m_impl->batch.CPUSysSamples);
-            drained.CPUProcSamples.swap(m_impl->batch.CPUProcSamples);
-            drained.memSysSamples.swap(m_impl->batch.memSysSamples);
-            drained.memProcSamples.swap(m_impl->batch.memProcSamples);
+            drained.systemTicks.swap(m_impl->batch.systemTicks);
+            drained.processTicks.swap(m_impl->batch.processTicks);
         }
 
-        if (!drained.CPUSysSamples.empty() || !drained.memSysSamples.empty() ||
+        if (!drained.systemTicks.empty() || !drained.processTicks.empty() ||
             m_impl->flushStatsPending.valid) {
-            SystemMetricsTrace trace;
-            trace.set_hostname(m_impl->hostname);
-            trace.set_sampling_frequency_hz(m_impl->config.samplingFrequencyHz);
-            trace.set_steady_clock_reference_ns(m_impl->steadyClockRefNs);
-            trace.set_wall_clock_epoch_ns(m_impl->wallClockEpochNs);
-            for (const auto& p : m_impl->config.Processes) {
-                auto* tp = trace.add_tracked_processes();
-                tp->set_pid(p.pid);
-                tp->set_alias(p.alias);
-            }
-            for (auto& s : drained.CPUSysSamples) *trace.add_cpu_system_samples() = std::move(s);
-            for (auto& s : drained.CPUProcSamples) *trace.add_cpu_process_samples() = std::move(s);
-            for (auto& s : drained.memSysSamples) *trace.add_memory_system_samples() = std::move(s);
-            for (auto& s : drained.memProcSamples) *trace.add_memory_process_samples() = std::move(s);
+            SystemMetricsTrace trace = internal::BuildSystemTrace(
+                m_impl->hostname, m_impl->config.samplingFrequencyHz,
+                m_impl->hostCpuCount,
+                m_impl->steadyClockRefNs, m_impl->wallClockEpochNs,
+                m_impl->config.Processes, drained);
             // Attach any pending flush stats from the last background flush cycle.
             if (m_impl->flushStatsPending.valid) {
                 auto* fs = trace.add_flush_stats();
-                fs->set_timestamp_ns(m_impl->flushStatsPending.timestampNs);
-                fs->set_bytes_written(m_impl->flushStatsPending.bytesWritten);
-                fs->set_interval_ns(m_impl->flushStatsPending.intervalNs);
+                fs->set_flush_byte_size(m_impl->flushStatsPending.bytesWritten);
+                fs->set_flush_interval_ns(m_impl->flushStatsPending.intervalNs);
                 m_impl->flushStatsPending.valid = false;
             }
 
-            std::string serialized;
-            trace.SerializeToString(&serialized);
-            google::protobuf::io::OstreamOutputStream raw(&m_impl->outFile);
-            google::protobuf::io::CodedOutputStream coded(&raw);
-            coded.WriteVarint32(static_cast<uint32_t>(serialized.size()));
-            coded.WriteString(serialized);
+            internal::WriteDelimitedSystemTraceSized(trace, m_impl->outFile);
             m_impl->outFile.flush();
         }
         m_impl->outFile.close();

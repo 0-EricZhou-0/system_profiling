@@ -7,6 +7,7 @@
 #include "helper_cupti.h"
 
 #include "gpu_metrics.pb.h"
+#include "metric_sample.pb.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -21,6 +22,7 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <unistd.h>
 
 // Declared here to avoid pulling in cupti_activity.h
 extern "C" CUptiResult cuptiGetTimestamp(uint64_t *timestamp);
@@ -105,10 +107,18 @@ public:
     std::vector<uint8_t> configImage;
     std::vector<uint8_t> counterDataImage;
 
+    // Host info (captured at Configure() — written into TraceHeader)
+    std::string hostname;
+    uint32_t hostCpuCount = 0;
+
     // Device info
     std::string deviceName;
     std::string chipName;
+    // Peaks. peakDramBwGbps is kept for the public GetPeakDramBwGbps()
+    // API; the bytes/sec version is what the new GPUDeviceInfo wire
+    // format consumes.
     double peakDramBwGbps = 0.0;
+    double peakDramBwBytesPerSec = 0.0;
     double peakPcieBwBytesPerSec = 0.0;    // theoretical max per direction
     double peakNvlinkBwBytesPerSec = 0.0;  // sum across active NVLink links, per direction
 
@@ -147,6 +157,13 @@ GpuProfiler& GpuProfiler::operator=(GpuProfiler&&) noexcept = default;
 
 void GpuProfiler::Configure(const ProfilerConfig& config) {
     m_impl->config = config;
+
+    // Capture host context for the TraceHeader.
+    char hostbuf[256] = {0};
+    gethostname(hostbuf, sizeof(hostbuf));
+    m_impl->hostname = hostbuf;
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    m_impl->hostCpuCount = (nproc > 0) ? static_cast<uint32_t>(nproc) : 0;
 
     DRIVER_API_CALL(cuInit(0));
 
@@ -204,6 +221,8 @@ void GpuProfiler::Configure(const ProfilerConfig& config) {
     cudaDeviceProp prop;
     RUNTIME_API_CALL(cudaGetDeviceProperties(&prop, config.deviceIndex));
     m_impl->peakDramBwGbps = (double)prop.memoryClockRate * 1e3 * (prop.memoryBusWidth / 8) * 2 / 1e9;
+    // Bytes/sec form for the new GPUDeviceInfo proto field.
+    m_impl->peakDramBwBytesPerSec = m_impl->peakDramBwGbps * 1e9;
     std::cout << "Peak DRAM BW: " << std::fixed << std::setprecision(1)
               << m_impl->peakDramBwGbps << " GB/s"
               << " (memClk=" << prop.memoryClockRate / 1000 << " MHz"
@@ -307,11 +326,13 @@ void GpuProfiler::Start() {
                                            std::ref(m_impl->host),
                                            std::ref(m_impl->outFile),
                                            std::ref(m_impl->outMutex),
+                                           std::cref(m_impl->hostname),
+                                           m_impl->config.samplingFrequencyHz,
+                                           m_impl->hostCpuCount,
                                            std::cref(m_impl->deviceName),
                                            std::cref(m_impl->chipName),
-                                           m_impl->config.samplingFrequencyHz,
                                            std::cref(m_impl->metricsCstr),
-                                           &m_impl->peakDramBwGbps,
+                                           &m_impl->peakDramBwBytesPerSec,
                                            &m_impl->peakPcieBwBytesPerSec,
                                            &m_impl->peakNvlinkBwBytesPerSec,
                                            std::ref(m_impl->stopFlush),
@@ -356,22 +377,22 @@ void GpuProfiler::Stop() {
         auto remaining = m_impl->host.DrainSamples();
         std::cout << "Remaining samples after flush: " << remaining.size() << "\n";
         if (!remaining.empty() || m_impl->flushStatsPending.valid) {
-            GpuMetricsTrace finalTrace = internal::BuildTrace(
-                m_impl->deviceName, m_impl->chipName, m_impl->config.samplingFrequencyHz,
+            GPUMetricsTrace finalTrace = internal::BuildTrace(
+                m_impl->hostname, m_impl->config.samplingFrequencyHz, m_impl->hostCpuCount,
+                m_impl->deviceName, m_impl->chipName,
                 m_impl->metricsCstr, remaining,
-                m_impl->peakDramBwGbps, m_impl->peakPcieBwBytesPerSec,
+                m_impl->peakDramBwBytesPerSec, m_impl->peakPcieBwBytesPerSec,
                 m_impl->peakNvlinkBwBytesPerSec,
                 m_impl->steadyClockRefNs, m_impl->cuptiRefNs, m_impl->wallClockEpochNs);
             // Attach any pending flush stats from the last background flush cycle.
             if (m_impl->flushStatsPending.valid) {
                 auto* fs = finalTrace.add_flush_stats();
-                fs->set_timestamp_ns(m_impl->flushStatsPending.timestampNs);
-                fs->set_bytes_written(m_impl->flushStatsPending.bytesWritten);
-                fs->set_interval_ns(m_impl->flushStatsPending.intervalNs);
+                fs->set_flush_byte_size(m_impl->flushStatsPending.bytesWritten);
+                fs->set_flush_interval_ns(m_impl->flushStatsPending.intervalNs);
                 m_impl->flushStatsPending.valid = false;
             }
             std::lock_guard<std::mutex> lock(m_impl->outMutex);
-            internal::WriteDelimitedTo(finalTrace, m_impl->outFile);
+            internal::WriteDelimitedToSized(finalTrace, m_impl->outFile);
             m_impl->outFile.flush();
         }
         m_impl->outFile.close();

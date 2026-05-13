@@ -1,7 +1,11 @@
 syntax = "proto3";
 
+import "metric_catalog.proto";
+
 // Session-level manifest. A single SessionMetadata message is written
-// (NOT length-delimited) to session_metadata.pb at ProfilerSuite::Stop().
+// (NOT length-delimited) to session_metadata.pb at ProfilerSuite::Start()
+// and re-emitted at Stop() with identical content. The write is atomic
+// (tmp file + rename(2)) so tailers never see a torn file.
 //
 // Describes what was running and when, so consumers can interpret the
 // per-component .pb files in context.
@@ -25,4 +29,11 @@ message SessionMetadata {
     uint64 wall_clock_epoch_ns = 2;     // captured at suite Start()
     string start_iso8601 = 3;           // human-display copy of wall-clock
     repeated ActiveProbe probes = 4;
+
+    // The active metric catalog at run time. Inlined so visualizers can
+    // read FQN type / unit / peak information without a separate file
+    // dependency. Includes both the user-supplied catalog and any
+    // GPU-specific descriptors appended at Configure() by walking
+    // cuptiProfilerHostGetSubMetrics().
+    MetricCatalog catalog = 5;
 }

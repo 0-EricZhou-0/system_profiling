@@ -4,6 +4,7 @@
 #include "disk_flush_thread.h"
 
 #include "disk_metrics.pb.h"
+#include "metric_sample.pb.h"
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 
@@ -23,6 +24,7 @@ class DiskProfiler::Impl {
 public:
     DiskProfilerConfig config;
     std::string hostname;
+    uint32_t hostCpuCount = 0;
 
     internal::DiskSampleBatch batch;
     std::mutex batchMutex;
@@ -64,6 +66,8 @@ void DiskProfiler::Configure(const DiskProfilerConfig& config) {
     char buf[256];
     gethostname(buf, sizeof(buf));
     m_impl->hostname = buf;
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    m_impl->hostCpuCount = (nproc > 0) ? static_cast<uint32_t>(nproc) : 0;
 
     std::cout << "[Disk] Tracking " << config.devices.size() << " device(s): ";
     for (const auto& d : config.devices) std::cout << d << " ";
@@ -134,17 +138,17 @@ void DiskProfiler::Start() {
 
                 auto inflight = internal::ReadDiskInflight(ds.device);
 
-                DiskDeviceSample s;
-                s.set_timestamp_ns(tsNs);
-                s.set_device_name(ds.device);
-                s.set_read_bytes_per_sec((double)(ds.sectorsRead - prev.sectorsRead) * 512.0 / dtSec);
-                s.set_write_bytes_per_sec((double)(ds.sectorsWritten - prev.sectorsWritten) * 512.0 / dtSec);
-                s.set_read_queue_depth(inflight.readInflight);
-                s.set_write_queue_depth(inflight.writeInflight);
+                internal::DiskDeviceTick t;
+                t.timestamp_ns        = tsNs;
+                t.device_name         = ds.device;
+                t.read_bytes_per_sec  = (double)(ds.sectorsRead - prev.sectorsRead) * 512.0 / dtSec;
+                t.write_bytes_per_sec = (double)(ds.sectorsWritten - prev.sectorsWritten) * 512.0 / dtSec;
+                t.read_inflight       = inflight.readInflight;
+                t.write_inflight      = inflight.writeInflight;
                 prev = ds;
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
-                impl.batch.deviceSamples.push_back(std::move(s));
+                impl.batch.deviceTicks.push_back(std::move(t));
             }
 
             // Per-process I/O
@@ -167,15 +171,15 @@ void DiskProfiler::Start() {
                 }
                 auto& prev = it->second;
 
-                DiskProcessSample s;
-                s.set_timestamp_ns(tsNs);
-                s.set_pid(pid);
-                s.set_read_bytes_per_sec((double)(curIO.readBytes - prev.readBytes) / dtSec);
-                s.set_write_bytes_per_sec((double)(curIO.writeBytes - prev.writeBytes) / dtSec);
+                internal::DiskProcessTick t;
+                t.timestamp_ns        = tsNs;
+                t.pid                 = pid;
+                t.rchar_bytes_per_sec = (double)(curIO.readBytes - prev.readBytes) / dtSec;
+                t.wchar_bytes_per_sec = (double)(curIO.writeBytes - prev.writeBytes) / dtSec;
                 prev = curIO;
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
-                impl.batch.procSamples.push_back(std::move(s));
+                impl.batch.processTicks.push_back(std::move(t));
             }
         }
     });
@@ -190,6 +194,7 @@ void DiskProfiler::Start() {
                                            std::ref(m_impl->outMutex),
                                            std::cref(m_impl->hostname),
                                            m_impl->config.samplingFrequencyHz,
+                                           m_impl->hostCpuCount,
                                            std::cref(m_impl->config.devices),
                                            std::cref(m_impl->config.Processes),
                                            std::ref(m_impl->stopFlush),
@@ -224,40 +229,25 @@ void DiskProfiler::Stop() {
         internal::DiskSampleBatch drained;
         {
             std::lock_guard<std::mutex> lock(m_impl->batchMutex);
-            drained.deviceSamples.swap(m_impl->batch.deviceSamples);
-            drained.procSamples.swap(m_impl->batch.procSamples);
+            drained.deviceTicks.swap(m_impl->batch.deviceTicks);
+            drained.processTicks.swap(m_impl->batch.processTicks);
         }
 
-        if (!drained.deviceSamples.empty() || !drained.procSamples.empty() ||
+        if (!drained.deviceTicks.empty() || !drained.processTicks.empty() ||
             m_impl->flushStatsPending.valid) {
-            DiskMetricsTrace trace;
-            trace.set_hostname(m_impl->hostname);
-            trace.set_sampling_frequency_hz(m_impl->config.samplingFrequencyHz);
-            trace.set_steady_clock_reference_ns(m_impl->steadyClockRefNs);
-            trace.set_wall_clock_epoch_ns(m_impl->wallClockEpochNs);
-            for (const auto& d : m_impl->config.devices) trace.add_tracked_devices(d);
-            for (const auto& p : m_impl->config.Processes) {
-                auto* tp = trace.add_tracked_processes();
-                tp->set_pid(p.pid);
-                tp->set_alias(p.alias);
-            }
-            for (auto& s : drained.deviceSamples) *trace.add_device_samples() = std::move(s);
-            for (auto& s : drained.procSamples) *trace.add_process_samples() = std::move(s);
-            // Attach any pending flush stats from the last background flush cycle.
+            DiskMetricsTrace trace = internal::BuildDiskTrace(
+                m_impl->hostname, m_impl->config.samplingFrequencyHz,
+                m_impl->hostCpuCount,
+                m_impl->steadyClockRefNs, m_impl->wallClockEpochNs,
+                m_impl->config.devices, m_impl->config.Processes, drained);
             if (m_impl->flushStatsPending.valid) {
                 auto* fs = trace.add_flush_stats();
-                fs->set_timestamp_ns(m_impl->flushStatsPending.timestampNs);
-                fs->set_bytes_written(m_impl->flushStatsPending.bytesWritten);
-                fs->set_interval_ns(m_impl->flushStatsPending.intervalNs);
+                fs->set_flush_byte_size(m_impl->flushStatsPending.bytesWritten);
+                fs->set_flush_interval_ns(m_impl->flushStatsPending.intervalNs);
                 m_impl->flushStatsPending.valid = false;
             }
 
-            std::string serialized;
-            trace.SerializeToString(&serialized);
-            google::protobuf::io::OstreamOutputStream raw(&m_impl->outFile);
-            google::protobuf::io::CodedOutputStream coded(&raw);
-            coded.WriteVarint32(static_cast<uint32_t>(serialized.size()));
-            coded.WriteString(serialized);
+            internal::WriteDelimitedDiskTraceSized(trace, m_impl->outFile);
             m_impl->outFile.flush();
         }
         m_impl->outFile.close();

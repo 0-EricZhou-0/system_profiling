@@ -9,7 +9,9 @@ output_dir: "profiling_output"
 
 gpu {
     enabled: true
-    device_index: 0
+    # Multi-device sampling: list one entry per device to profile.
+    # Empty = device 0. Same metrics list is applied across all devices.
+    device_indices: 0
     sampling_frequency_hz: 10000    # 10 kHz
     hw_buffer_size: 536870912       # 512 MB
     max_samples: 50000
