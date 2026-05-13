@@ -61,8 +61,8 @@ PYBIND11_MODULE(_native, m) {
     py::class_<ProfilerConfig>(m, "GpuProfilerConfig",
         "Configuration for GpuProfiler — CUPTI PM Sampling.")
         .def(py::init<>())
-        .def_readwrite("device_index",          &ProfilerConfig::deviceIndex,
-            "CUDA device ordinal to profile.")
+        .def_readwrite("device_indices",        &ProfilerConfig::deviceIndices,
+            "List of CUDA device ordinals to profile (empty = [0]).")
         .def_readwrite("sampling_frequency_hz", &ProfilerConfig::samplingFrequencyHz,
             "PM sampling rate in Hz (default 10000).")
         .def_readwrite("hw_buffer_size",        &ProfilerConfig::hwBufferSize,
@@ -163,7 +163,7 @@ PYBIND11_MODULE(_native, m) {
         "Records GPU PM samples via CUPTI. Constructed by ProfilerSuite.")
         .def("configure",  &GpuProfiler::Configure, py::arg("config"),
             "Initialize the profiler with the given GpuProfilerConfig. "
-            "Caller must have an active CUDA context on config.device_index.",
+            "Caller must have active CUDA contexts on every index in config.device_indices.",
             py::call_guard<py::gil_scoped_release>())
         .def("start",      &GpuProfiler::Start,
             "Start PM sampling, decode thread, and optional flush thread.",

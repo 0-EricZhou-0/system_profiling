@@ -14,7 +14,6 @@ namespace internal {
 
 namespace {
 
-// Fill a TraceHeader with the constant per-run fields.
 void PopulateHeader(GPUMetricsTrace& trace,
                     const std::string& hostname,
                     uint64_t samplingFrequencyHz,
@@ -38,13 +37,8 @@ void PopulateHeader(GPUMetricsTrace& trace,
 GPUMetricsTrace BuildTrace(const std::string& hostname,
                            uint64_t samplingFrequencyHz,
                            uint32_t hostCpuCount,
-                           const std::string& deviceName,
-                           const std::string& chipName,
                            const std::vector<const char*>& metricNames,
-                           const std::vector<SamplerRange>& samples,
-                           double peakDramBwBytesPerSec,
-                           double peakPcieBwBytesPerSec,
-                           double peakNvlinkBwBytesPerSec,
+                           const std::vector<GpuDevicePayload>& devices,
                            uint64_t steadyClockRefNs,
                            uint64_t cuptiRefNs,
                            uint64_t wallClockEpochNs)
@@ -53,31 +47,28 @@ GPUMetricsTrace BuildTrace(const std::string& hostname,
     PopulateHeader(trace, hostname, samplingFrequencyHz, hostCpuCount,
                    steadyClockRefNs, cuptiRefNs, wallClockEpochNs);
 
-    // FQN registry — one entry covering SCOPE_GPU.
     auto* smn = trace.add_scope_metric_names();
     smn->set_scope(SCOPE_GPU);
     for (const auto& name : metricNames) {
         smn->add_fqns(name);
     }
 
-    // Single-device for now (gpu_index = 0). Multi-device wiring lands
-    // in the GPU-probe rewire commit (commit 6).
-    auto* dev = trace.add_tracked_gpus();
-    dev->set_device_index(0);
-    dev->set_device_name(deviceName);
-    dev->set_chip_name(chipName);
-    dev->set_peak_dram_bw_bytes_per_s(peakDramBwBytesPerSec);
-    dev->set_peak_pcie_bw_bytes_per_s(peakPcieBwBytesPerSec);
-    dev->set_peak_nvlink_bw_bytes_per_s(peakNvlinkBwBytesPerSec);
+    for (const auto& d : devices) {
+        auto* dev = trace.add_tracked_gpus();
+        dev->set_device_index(d.gpu_index);
+        dev->set_device_name(d.device_name);
+        dev->set_chip_name(d.chip_name);
+        dev->set_peak_dram_bw_bytes_per_s(d.peak_dram_bw_bytes_per_s);
+        dev->set_peak_pcie_bw_bytes_per_s(d.peak_pcie_bw_bytes_per_s);
+        dev->set_peak_nvlink_bw_bytes_per_s(d.peak_nvlink_bw_bytes_per_s);
 
-    for (const auto& s : samples) {
-        auto* sample = trace.add_samples();
-        // Use end timestamp — visualizers anchor each data point at one x
-        // coordinate; sample window width is 1/sampling_frequency_hz.
-        sample->set_timestamp_ns(s.endTimestamp);
-        sample->set_gpu_index(0);
-        for (double v : s.metricValues) {
-            sample->add_values(v);
+        for (const auto& s : d.samples) {
+            auto* sample = trace.add_samples();
+            sample->set_timestamp_ns(s.endTimestamp);
+            sample->set_gpu_index(d.gpu_index);
+            for (double v : s.metricValues) {
+                sample->add_values(v);
+            }
         }
     }
 
@@ -97,18 +88,13 @@ size_t WriteDelimitedToSized(const GPUMetricsTrace& trace, std::ofstream& out) {
     return serialized.size();
 }
 
-void FlushThreadFunc(CuptiProfilerHost& host,
+void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
                      std::ofstream& outFile,
                      std::mutex& outMutex,
                      const std::string& hostname,
                      uint64_t samplingFrequencyHz,
                      uint32_t hostCpuCount,
-                     const std::string& deviceName,
-                     const std::string& chipName,
                      const std::vector<const char*>& metricNames,
-                     double* pPeakDramBwBytesPerSec,
-                     double* pPeakPcieBwBytesPerSec,
-                     double* pPeakNvlinkBwBytesPerSec,
                      std::atomic<bool>& stop,
                      uint64_t flushIntervalMs,
                      uint64_t steadyClockRefNs,
@@ -123,17 +109,31 @@ void FlushThreadFunc(CuptiProfilerHost& host,
         std::this_thread::sleep_for(std::chrono::milliseconds(flushIntervalMs));
         if (stop) break;
 
-        auto samples = host.DrainSamples();
-        if (samples.empty()) continue;
+        // Drain every device. Skip the flush if no device produced
+        // anything this cycle.
+        std::vector<GpuDevicePayload> payloads;
+        payloads.reserve(devices.size());
+        size_t totalSamples = 0;
+        for (auto& slot : devices) {
+            GpuDevicePayload p;
+            p.gpu_index                  = slot.gpu_index;
+            p.device_name                = slot.device_name;
+            p.chip_name                  = slot.chip_name;
+            p.peak_dram_bw_bytes_per_s   = *slot.peak_dram_bw_bytes_per_s;
+            p.peak_pcie_bw_bytes_per_s   = *slot.peak_pcie_bw_bytes_per_s;
+            p.peak_nvlink_bw_bytes_per_s = *slot.peak_nvlink_bw_bytes_per_s;
+            p.samples                    = slot.host->DrainSamples();
+            totalSamples += p.samples.size();
+            payloads.push_back(std::move(p));
+        }
+        if (totalSamples == 0) continue;
 
         GPUMetricsTrace trace = BuildTrace(
             hostname, samplingFrequencyHz, hostCpuCount,
-            deviceName, chipName, metricNames, samples,
-            *pPeakDramBwBytesPerSec, *pPeakPcieBwBytesPerSec,
-            *pPeakNvlinkBwBytesPerSec,
+            metricNames, payloads,
             steadyClockRefNs, cuptiRefNs, wallClockEpochNs);
 
-        // Attach previous flush's stats (known only in hindsight)
+        // Attach previous flush's stats (known only in hindsight).
         {
             std::lock_guard<std::mutex> lock(pendingMutex);
             if (pending.valid) {
@@ -162,10 +162,11 @@ void FlushThreadFunc(CuptiProfilerHost& host,
             pending.valid        = true;
         }
 
-        totalFlushed += samples.size();
+        totalFlushed += totalSamples;
         double mibPerSec = (intervalNs > 0)
             ? (double)bytes * 1e9 / ((double)intervalNs * 1024.0 * 1024.0) : 0.0;
-        std::cout << "[GPU] Flushed " << samples.size() << " samples, "
+        std::cout << "[GPU] Flushed " << totalSamples
+                  << " samples across " << devices.size() << " device(s), "
                   << bytes << " bytes in "
                   << (intervalNs / 1000000) << " ms ("
                   << mibPerSec << " MiB/s), " << totalFlushed << " total\n";
