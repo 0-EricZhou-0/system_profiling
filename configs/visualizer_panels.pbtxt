@@ -1,0 +1,112 @@
+# Default panel layout for visualize_all.py / visualize_interactive.py.
+#
+# Format: proto/panels.proto :: PanelLayout. Each `panels` entry
+# declares one subplot whose series are every (FQN, scope_key) tuple
+# in the projected data where the descriptor's FQN matches
+# `series_glob` and the scope matches `scope`.
+#
+# Override path via `--panel-layout PATH` on either visualizer.
+
+# ============================================================
+# GPU panels (SCOPE_GPU)
+# ============================================================
+
+panels {
+    title: "SM Utilization (%)"
+    series_glob: "sm__cycles_active.avg*"
+    scope: SCOPE_GPU
+    y_min: 0  y_max: 105
+    peak_constant: 100.0
+}
+panels {
+    title: "Active Warps / Cycle"
+    series_glob: "sm__warps_active.avg*"
+    scope: SCOPE_GPU
+    y_min: 0  y_max: 66
+    peak_constant: 64.0
+}
+panels {
+    title: "DRAM Bandwidth"
+    series_glob: "dram__*_throughput.*"
+    scope: SCOPE_GPU
+    unit_override: UNIT_BYTES_PER_SEC
+    peak_from_gpu_info: "peak_dram_bw_bytes_per_s"
+}
+panels {
+    title: "PCIe Bandwidth"
+    series_glob: "pcie__*_throughput.*"
+    scope: SCOPE_GPU
+    unit_override: UNIT_BYTES_PER_SEC
+    peak_from_gpu_info: "peak_pcie_bw_bytes_per_s"
+}
+panels {
+    title: "NVLink Bandwidth"
+    series_glob: "nvl*__*_throughput.*"
+    scope: SCOPE_GPU
+    unit_override: UNIT_BYTES_PER_SEC
+    peak_from_gpu_info: "peak_nvlink_bw_bytes_per_s"
+}
+
+# ============================================================
+# CPU panels (SCOPE_SYSTEM)
+# ============================================================
+
+panels {
+    title: "CPU Utilization (%)"
+    series_glob: "cpu__cycles_*"
+    scope: SCOPE_SYSTEM
+    y_min: 0  y_max: 105
+    peak_constant: 100.0
+}
+
+# ============================================================
+# Memory panels (SCOPE_SYSTEM)
+# ============================================================
+
+panels {
+    title: "System Memory"
+    series_glob: "mem__*_bytes"
+    scope: SCOPE_SYSTEM
+    unit_override: UNIT_BYTES
+    peak_from_descriptor_ref: "mem__capacity_bytes"
+}
+
+# ============================================================
+# Per-PID panels (SCOPE_PROCESS) — one series per tracked PID
+# ============================================================
+
+panels {
+    title: "Per-PID CPU (% of core)"
+    series_glob: "proc__cycles_*"
+    scope: SCOPE_PROCESS
+    peak_from_expr: "ncpus_x_100"
+}
+panels {
+    title: "Per-PID Resident Memory"
+    series_glob: "proc__rss_bytes"
+    scope: SCOPE_PROCESS
+    unit_override: UNIT_BYTES
+    peak_from_descriptor_ref: "mem__capacity_bytes"
+}
+panels {
+    title: "Per-PID I/O"
+    series_glob: "proc__io_*"
+    scope: SCOPE_PROCESS
+    unit_override: UNIT_BYTES_PER_SEC
+}
+
+# ============================================================
+# Disk panels (SCOPE_DEVICE) — one series per tracked device
+# ============================================================
+
+panels {
+    title: "Disk Bandwidth"
+    series_glob: "disk__*_bytes.*"
+    scope: SCOPE_DEVICE
+    unit_override: UNIT_BYTES_PER_SEC
+}
+panels {
+    title: "Disk Queue Depth"
+    series_glob: "disk__*_inflight"
+    scope: SCOPE_DEVICE
+}

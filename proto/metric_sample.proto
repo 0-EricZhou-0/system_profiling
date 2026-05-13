@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+import "metric_catalog.proto";
+
+// Shared substructures for the per-domain *MetricsTrace types.
+//
+// Each domain trace (GPU / system / disk) declares a per-scope FQN
+// registry via `repeated ScopeMetricNames` and emits samples whose
+// `values[]` array is ordered to match. The registry is replayed on
+// every flush so each trace message is self-contained for mid-stream
+// join.
+
+// Per-scope FQN registry. The order of `fqns` defines the column
+// order of any same-scope sample's `values[]`.
+message ScopeMetricNames {
+    Scope scope          = 1;
+    repeated string fqns = 2;
+}
+
+// Sample for SCOPE_SYSTEM (singleton, no key).
+message Sample {
+    uint64 timestamp_ns       = 1;
+    repeated double values    = 2;
+}
+
+// Sample for SCOPE_PROCESS, keyed by PID.
+message ProcessSample {
+    uint64 timestamp_ns       = 1;
+    uint32 pid                = 2;
+    repeated double values    = 3;
+}
+
+// Sample for SCOPE_DEVICE, keyed by block device name.
+message DeviceSample {
+    uint64 timestamp_ns       = 1;
+    string device_name        = 2;
+    repeated double values    = 3;
+}
+
+// Sample for SCOPE_GPU, keyed by GPU device index.
+message GPUSample {
+    uint64 timestamp_ns       = 1;
+    uint32 gpu_index          = 2;
+    repeated double values    = 3;
+}
+
+// Tracked process with a removal marker. After RemoveTrackedProcess()
+// is called, the next flush emits the PID with removed=true once,
+// then the PID is dropped from subsequent flushes.
+message TrackedProcessV2 {
+    uint32 pid    = 1;
+    string alias  = 2;
+    bool   removed = 3;
+}
+
+// GPU device-specific information. Includes peaks that are
+// chip-dependent and therefore can't live as constants in the catalog.
+// Replayed on every flush (cheap; one entry per active device).
+message GPUDeviceInfo {
+    uint32 device_index             = 1;
+    string device_name              = 2;
+    string chip_name                = 3;
+    double peak_dram_bw_bytes_per_s = 4;
+    double peak_pcie_bw_bytes_per_s = 5;
+    double peak_nvlink_bw_bytes_per_s = 6;
+}
+
+// Clock anchors used to convert sample timestamps between domains.
+message ClockAnchors {
+    uint64 steady_clock_reference_ns = 1;
+    uint64 wall_clock_epoch_ns       = 2;
+    // GPU-only: CUPTI's own clock domain reference. Zero for non-GPU
+    // traces.
+    uint64 cupti_reference_ns        = 3;
+}
+
+// Common header replicated on every trace message of every domain.
+message TraceHeader {
+    string hostname              = 1;
+    uint64 sampling_frequency_hz = 2;
+    // Captured at sample time on the host that's emitting — resolves
+    // UNIT_PCT_OF_CORE peaks correctly even when visualized on a
+    // different machine.
+    uint32 host_cpu_count        = 3;
+    ClockAnchors anchors         = 4;
+}
+
+// Per-flush diagnostics. Each flush attaches the PREVIOUS flush's
+// stats (a flush cannot include its own size).
+message FlushStats {
+    uint64 flush_byte_size       = 1;
+    uint64 flush_interval_ns     = 2;
+}

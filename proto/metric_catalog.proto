@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+// Metric catalog — the authoritative type system that classifies every
+// metric the profiler can emit. Modelled on CUPTI PerfWorks
+// (Counter / Ratio / Throughput, with FQN
+// <entity>__<counter>[.<rollup>][.<submetric>]) and extended to cover
+// the CPU/memory/disk metrics this profiler samples from /proc and /sys.
+//
+// See docs/metric-model.md for the design rationale and the full
+// FQN mapping table.
+
+// What kind of value a metric represents. Drives suffix-validation
+// semantics + plot-time interpretation.
+enum MetricType {
+    METRIC_TYPE_UNSPECIFIED = 0;
+    // Raw event count per sample window.
+    // Rollups: .sum .avg .min .max
+    // Submetrics: .per_second .per_cycle_active .per_cycle_elapsed
+    //   .peak_sustained{,_active,_elapsed} .peak_burst
+    //   .pct_of_peak_sustained_{active,elapsed} .pct_of_peak_burst_{active,elapsed}
+    METRIC_TYPE_COUNTER     = 1;
+    // Pre-normalized dimensionless quantity (no rollup-across-instances step).
+    // Submetrics: .ratio .pct .max_rate
+    METRIC_TYPE_RATIO       = 2;
+    // Pre-built (counter / peak). Encodes both numerator and denominator.
+    // Suffixes: .{avg,max}.pct_of_peak_{sustained,burst}_{active,elapsed}
+    METRIC_TYPE_THROUGHPUT  = 3;
+}
+
+// Display / plot-time unit. Determines y-axis label, scale factor,
+// and whether a 0-100 ceiling applies.
+enum Unit {
+    UNIT_UNSPECIFIED   = 0;
+    UNIT_COUNT         = 1;   // dimensionless integer count
+    UNIT_BYTES         = 2;   // KiB/MiB/GiB-scaled at plot time
+    UNIT_BYTES_PER_SEC = 3;
+    UNIT_PCT           = 4;   // 0-100, capped
+    UNIT_PCT_OF_CORE   = 5;   // 0-100*ncpus (per-PID CPU)
+    UNIT_RATIO         = 6;   // 0-1
+    UNIT_HZ            = 7;
+    UNIT_CYCLES        = 8;
+    UNIT_REQUESTS      = 9;   // in-flight I/O depth
+}
+
+// Which dimension a metric value is keyed by.
+enum Scope {
+    SCOPE_UNSPECIFIED = 0;
+    SCOPE_SYSTEM      = 1;   // singleton — no key
+    SCOPE_DEVICE      = 2;   // key = block device name (e.g. "nvme0n1")
+    SCOPE_PROCESS     = 3;   // key = PID
+    SCOPE_GPU         = 4;   // key = GPU device index
+}
+
+message MetricDescriptor {
+    // Fully-qualified metric name. Globally unique within the catalog.
+    string     fqn        = 1;
+    MetricType type       = 2;
+
+    // Parsed pieces of the FQN — populated for clarity even though they
+    // are derivable from `fqn`. Tools may rely on these.
+    string     entity     = 3;   // "cpu" / "mem" / "proc" / "disk" / "sm" / "dram" / ...
+    string     counter    = 4;
+    string     rollup     = 5;   // "" if absent
+    string     submetric  = 6;   // "" if absent
+
+    Unit       unit       = 7;
+    Scope      scope      = 8;
+
+    // Peak value used as the denominator for normalization + as the
+    // dashed reference line on plots. Exactly one of these (or neither).
+    oneof peak {
+        // Compile-time constant peak (e.g. 100.0 for UNIT_PCT).
+        double peak_constant = 9;
+        // FQN of another metric whose latest sample value is the peak
+        // (e.g. mem__used_bytes references mem__capacity_bytes).
+        string peak_ref      = 10;
+        // Named formula evaluated at plot time against the trace's
+        // TraceHeader (e.g. "ncpus_x_100"). The evaluator is an
+        // allow-list — no string-eval.
+        string peak_expr     = 11;
+    }
+
+    // False for metrics that should render as steps (e.g. queue depth).
+    // True is the default; the field is explicit so the catalog is
+    // self-describing.
+    bool   smoothable  = 12;
+
+    string description = 13;
+}
+
+message MetricCatalog {
+    repeated MetricDescriptor metrics = 1;
+}

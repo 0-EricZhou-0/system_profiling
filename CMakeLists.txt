@@ -40,6 +40,9 @@ endif()
 # protobuf runtime, since system protoc may be too old.
 set(PROTO_FILES
     "${CMAKE_SOURCE_DIR}/proto/tracked_process.proto"
+    "${CMAKE_SOURCE_DIR}/proto/metric_catalog.proto"
+    "${CMAKE_SOURCE_DIR}/proto/metric_sample.proto"
+    "${CMAKE_SOURCE_DIR}/proto/panels.proto"
     "${CMAKE_SOURCE_DIR}/proto/gpu_metrics.proto"
     "${CMAKE_SOURCE_DIR}/proto/system_metrics.proto"
     "${CMAKE_SOURCE_DIR}/proto/disk_metrics.proto"
@@ -50,6 +53,9 @@ set(PROTO_FILES
 set(GENERATED_PROTO_DIR "${CMAKE_SOURCE_DIR}/generated/proto")
 set(PY_PB2_FILES
     "${GENERATED_PROTO_DIR}/tracked_process_pb2.py"
+    "${GENERATED_PROTO_DIR}/metric_catalog_pb2.py"
+    "${GENERATED_PROTO_DIR}/metric_sample_pb2.py"
+    "${GENERATED_PROTO_DIR}/panels_pb2.py"
     "${GENERATED_PROTO_DIR}/gpu_metrics_pb2.py"
     "${GENERATED_PROTO_DIR}/system_metrics_pb2.py"
     "${GENERATED_PROTO_DIR}/disk_metrics_pb2.py"
