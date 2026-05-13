@@ -137,11 +137,23 @@ rate-vs-peak comparison).
 
 ---
 
-## Part 2 — Generalizing to non-GPU metrics
+## Part 2 — Generalization, as implemented
 
-`SystemMetricsTrace` and `DiskMetricsTrace` use hand-rolled field names
-that look nothing like CUPTI's `<entity>__<counter>.<suffix>` scheme.
-Aligning them lets a single post-processor handle every probe.
+> [!NOTE]
+> The original draft of this section was a design proposal; the
+> repository now implements it. The wire format, the catalog, the
+> renderer pipeline, and the suite-level mid-run PID API are all
+> live as of branch `feature/unified-metric-model`. Subsection
+> bodies still read as "what we adopt" — they describe the current
+> behavior, not a future plan.
+
+`SystemMetricsTrace` and `DiskMetricsTrace` previously used hand-rolled
+field names that looked nothing like CUPTI's `<entity>__<counter>.<suffix>`
+scheme. They've been redesigned to share substructures
+(`Sample`, `ProcessSample`, `DeviceSample`, `GPUSample`,
+`TrackedProcessV2`, `TraceHeader`, `FlushStats`,
+`ScopeMetricNames`) defined in `proto/metric_sample.proto`, so a single
+post-processor handles every probe.
 
 ### 2.1 — Goal
 
@@ -171,11 +183,11 @@ This is everything the renderer (`visualize_all.py`,
   over a ratio is also fine; over a peak-normalized throughput needs
   the same kernel size — uniform across types)
 
-### 2.2 — Proposed FQN scheme for non-CUPTI metrics
+### 2.2 — FQN scheme for non-CUPTI metrics
 
-Adopt the same `<entity>__<counter>[.<rollup>][.<submetric>]` grammar.
-Where the existing CUPTI suffixes already fit, reuse them verbatim. Where
-they don't, extend with the same orthography.
+Same `<entity>__<counter>[.<rollup>][.<submetric>]` grammar as CUPTI.
+Where the existing CUPTI suffixes fit, they're reused verbatim. Where
+they don't, the orthography is extended.
 
 **Entities** (new namespace, doesn't collide with CUPTI's `sm`/`dram`/…):
 
@@ -195,7 +207,7 @@ disambiguates. This keeps the FQN catalog small.
 
 Today's `CPUSystemSample`:
 
-| Today's field | Proposed FQN | Type | Unit | Peak |
+| Legacy field | Catalog FQN | Type | Unit | Peak |
 | ------------- | ------------ | ---- | ---- | ---- |
 | `total_utilization_pct` | `cpu__cycles_busy.avg.pct_of_peak_sustained_elapsed` | Throughput | PCT | 100 |
 | `user_pct` | `cpu__cycles_user.avg.pct_of_peak_sustained_elapsed` | Throughput | PCT | 100 |
@@ -204,7 +216,7 @@ Today's `CPUSystemSample`:
 
 Today's `MemorySystemSample`:
 
-| Today's field | Proposed FQN | Type | Unit | Peak |
+| Legacy field | Catalog FQN | Type | Unit | Peak |
 | ------------- | ------------ | ---- | ---- | ---- |
 | `total_bytes` | `mem__capacity_bytes` | Counter | BYTES | — *(this **is** the peak for `used_bytes`)* |
 | `used_bytes` | `mem__used_bytes` | Counter | BYTES | `total_bytes` |
@@ -214,7 +226,7 @@ Today's `MemorySystemSample`:
 
 Today's `CPUProcessSample` and `MemoryProcessSample`:
 
-| Today's field | Proposed FQN | Type | Unit | Peak | Scope |
+| Legacy field | Catalog FQN | Type | Unit | Peak | Scope |
 | ------------- | ------------ | ---- | ---- | ---- | ----- |
 | `user_pct` | `proc__cycles_user.sum.per_second` | Counter | PCT (of one core) | `100 × ncpus` | `PROCESS(pid)` |
 | `system_pct` | `proc__cycles_kernel.sum.per_second` | Counter | PCT (of one core) | `100 × ncpus` | `PROCESS(pid)` |
@@ -232,7 +244,7 @@ Today's `CPUProcessSample` and `MemoryProcessSample`:
 
 Today's `DiskDeviceSample`:
 
-| Today's field | Proposed FQN | Type | Unit | Peak | Scope |
+| Legacy field | Catalog FQN | Type | Unit | Peak | Scope |
 | ------------- | ------------ | ---- | ---- | ---- | ----- |
 | `read_bytes_per_sec` | `disk__read_bytes.sum.per_second` | Counter | BYTES_PER_SEC | device max-rated read BW (if discoverable) | `DEVICE("nvme0n1")` |
 | `write_bytes_per_sec` | `disk__write_bytes.sum.per_second` | Counter | BYTES_PER_SEC | device max-rated write BW | `DEVICE("nvme0n1")` |
@@ -241,7 +253,7 @@ Today's `DiskDeviceSample`:
 
 Today's `DiskProcessSample`:
 
-| Today's field | Proposed FQN | Type | Unit | Peak | Scope |
+| Legacy field | Catalog FQN | Type | Unit | Peak | Scope |
 | ------------- | ------------ | ---- | ---- | ---- | ----- |
 | `read_bytes_per_sec` | `proc__io_rchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
 | `write_bytes_per_sec` | `proc__io_wchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |

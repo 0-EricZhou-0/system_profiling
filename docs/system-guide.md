@@ -341,9 +341,14 @@ public:
     DiskProfiler&   GetDiskProfiler();
     EventProfiler&  GetEventProfiler();
 
-    void Configure();    // configure all enabled profilers
-    void Start();        // start all enabled profilers
-    void Stop();         // stop, flush, and write session_metadata.pb
+    void Configure();    // load catalog + configure all enabled probes
+    void Start();        // start all enabled probes + emit session_metadata.pb
+    void Stop();         // stop, flush, re-emit session_metadata.pb
+
+    // Mid-run PID tracking. Fans out to every probe that supports
+    // per-PID sampling (currently System + Disk).
+    void AddTrackedProcess(uint32_t pid, std::string alias = {});
+    void RemoveTrackedProcess(uint32_t pid);
 };
 ```
 
@@ -352,15 +357,17 @@ public:
 | `LoadConfig(path)` | Parse a protobuf text-format `.pbtxt` (`ProfilerSuiteConfig` schema) and apply it to all sub-profilers. Resolves `pid: 0` to the calling process. |
 | `LoadConfigFromBytes(buf)` | Same as above but takes a serialized binary `ProfilerSuiteConfig`. Used by language bindings. |
 | `Get*Profiler()` | Access individual sub-profilers — needed to grab `EventTracker` references for region annotation. |
-| `Configure()` | Calls `Configure()` on every sub-profiler whose `enabled = true`. Disabled profilers are no-ops. |
-| `Start()` / `Stop()` | Lifecycle fan-out. `Stop()` also writes `session_metadata.pb` listing the active probes. |
+| `Configure()` | Loads `MetricCatalog` (from `metric_catalog_path` in the config, or a default path next to the binary) and then calls `Configure()` on every sub-profiler whose `enabled = true`. |
+| `Start()` / `Stop()` | Lifecycle fan-out. Both write `session_metadata.pb` (atomically — `.tmp` + `rename(2)`); the manifest carries the inlined `MetricCatalog` so visualizers don't need a separate catalog file. |
+| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage). Thread-safe. |
+| `RemoveTrackedProcess(pid)` | Stop tracking a PID. The PID appears one more time in the next flush of each affected probe with `TrackedProcessV2.removed=true` (visualizer renders a removal marker), then is dropped. Thread-safe. |
 
 ### `ProfilerConfig` (GPU)
 
 ```cpp title:"lib/include/cupti_profiler/gpu_profiler.h"
 struct ProfilerConfig {
-    int deviceIndex = 0;
-    uint64_t samplingIntervalNs = 100000;       // 0.1 ms = 10 kHz
+    std::vector<int> deviceIndices;             // empty = {0}
+    uint64_t samplingFrequencyHz = 10000;       // 10 kHz
     size_t hwBufferSize = 512 * 1024 * 1024;    // 512 MB
     uint64_t maxSamples = 50000;
     std::vector<std::string> metrics;
@@ -372,11 +379,11 @@ struct ProfilerConfig {
 
 | Field | Description |
 | ----- | ----------- |
-| `deviceIndex` | CUDA device to profile |
-| `samplingIntervalNs` | HW counter sampling period in nanoseconds |
+| `deviceIndices` | CUDA device ordinals to profile. One CUPTI PM-Sampling session is opened per index; samples from every device are funneled into a single trace and tagged with `gpu_index`. Empty defaults to `{0}` (device 0). |
+| `samplingFrequencyHz` | HW counter sampling rate in Hz |
 | `hwBufferSize` | GPU-side ring buffer size. 512 MB prevents overflow at 10 kHz |
 | `maxSamples` | Decode buffer capacity (per decode cycle, not total) |
-| `metrics` | CUPTI metric names to collect. Must fit in a single pass |
+| `metrics` | CUPTI metric names to collect. Must fit in a single pass. The same set is applied to every device in `deviceIndices`. |
 | `flushIntervalMs` | How often to write accumulated samples to disk. 0 disables periodic flush |
 | `outputFile` | Path to the output `.pb` file. Empty disables file output |
 
@@ -395,14 +402,13 @@ profiler.Stop();               // stop sampling, join threads, write remaining d
 
 | Method | Description |
 | ------ | ----------- |
-| `Configure(config)` | Initialize CUPTI subsystems. Requires active CUDA context on `config.deviceIndex` |
-| `Start()` | Begin PM sampling and background threads |
-| `Stop()` | Stop sampling, join threads, resolve regions, write final data to file |
-| `DrainSamples()` | Atomically drain all accumulated samples. Safe to call during or after profiling |
-| `GetRegionTracker()` | Access the `RegionTracker` for annotating workload phases |
-| `GetDeviceName()` | e.g. `"NVIDIA H100 NVL"` |
-| `GetChipName()` | e.g. `"GH100"` |
-| `GetPeakDramBwGbps()` | Theoretical peak DRAM bandwidth in GB/s |
+| `Configure(config)` | Initialize one CUPTI PM-Sampling session per device in `config.deviceIndices` |
+| `Start()` | Begin PM sampling on every device + spawn one decode thread per device + one flush thread that merges across devices |
+| `Stop()` | Stop sampling, join all decode threads + the flush thread, write final merged data |
+| `DrainSamples()` | Atomically drain accumulated samples for the FIRST configured device. Multi-device readers should consume the on-disk trace. |
+| `GetDeviceName()` | First configured device's name, e.g. `"NVIDIA H100 NVL"` |
+| `GetChipName()` | First configured device's chip, e.g. `"GH100"` |
+| `GetPeakDramBwGbps()` | First configured device's theoretical peak DRAM bandwidth in GB/s |
 
 > [!WARNING]
 > `Configure()` calls `cuInit(0)` internally. The caller must have already set the CUDA device (e.g., `cudaSetDevice()`). If you are using CUDA before calling `Configure()`, this is already satisfied.
@@ -480,23 +486,28 @@ struct SystemProfilerConfig {
     std::string outputFile;                      // e.g. "system_metrics.pb"
 };
 
-class SystemProfiler {
+class SystemProfiler : public ProcessTrackingProbe {
 public:
     void Configure(const SystemProfilerConfig& config);
     void Start();
     void SignalStop();   // non-blocking
     void Stop();         // join + flush + close
+
+    // Inherited from ProcessTrackingProbe — call between Start() and
+    // Stop() to adjust the tracked PID set mid-run. Thread-safe.
+    void AddTrackedProcess(uint32_t pid, std::string alias);
+    void RemoveTrackedProcess(uint32_t pid);
 };
 ```
 
 | Field | Description |
 | ----- | ----------- |
 | `samplingFrequencyHz` | How often `/proc/stat` and friends are polled. 100 Hz is a good default for second-scale workloads; 1000 Hz captures sub-second spikes. |
-| `Processes` | PIDs (with optional aliases) to sample per-process. See `TrackedProcess`. |
+| `Processes` | Initial PIDs (with optional aliases) to sample per-process. `Add/RemoveTrackedProcess` may grow or shrink this set mid-run. See `TrackedProcess`. |
 | `flushIntervalMs` | How often the in-memory sample buffer is serialized to `outputFile`. |
 | `outputFile` | Path to the system trace `.pb`. Resolved against `output_dir` when driven by `ProfilerSuite`. |
 
-`SystemProfiler` writes one `SystemMetricsTrace` per flush, each containing a slice of `cpu_system_samples`, `cpu_process_samples`, `memory_system_samples`, and `memory_process_samples`.
+`SystemProfiler` writes one `SystemMetricsTrace` per flush. CPU and memory readings at one tick are combined into a single `Sample` (system-wide) or `ProcessSample` (per-PID); `values[]` is ordered to match the per-scope FQN registry in `scope_metric_names[]` of the same trace. See the [Output format](#output-format) section for the schema.
 
 ### `DiskProfilerConfig` & `DiskProfiler`
 
@@ -509,12 +520,16 @@ struct DiskProfilerConfig {
     std::string outputFile;                      // e.g. "disk_metrics.pb"
 };
 
-class DiskProfiler {
+class DiskProfiler : public ProcessTrackingProbe {
 public:
     void Configure(const DiskProfilerConfig& config);
     void Start();
     void SignalStop();
     void Stop();
+
+    // Inherited from ProcessTrackingProbe.
+    void AddTrackedProcess(uint32_t pid, std::string alias);
+    void RemoveTrackedProcess(uint32_t pid);
 };
 ```
 
@@ -639,12 +654,16 @@ A reference config lives in `configs/example.pbtxt`. The minimal shape:
 
 ```protobuf title:"config.pbtxt"
 output_dir: "profiling_output"
+# Optional: path to a MetricCatalog pbtxt. Empty = "configs/metric_catalog.pbtxt"
+# next to the binary.
+metric_catalog_path: ""
 
 gpu {
     enabled: true
-    device_index: 0
+    # One CUPTI session is opened per index. Empty = [0].
+    device_indices: 0
     sampling_frequency_hz: 10000
-    metrics: "sm__cycles_active.avg"
+    metrics: "sm__cycles_active.avg.pct_of_peak_sustained_elapsed"
     metrics: "dram__read_throughput.avg.pct_of_peak_sustained_elapsed"
     output_file: "gpu_metrics.pb"
 }
@@ -670,7 +689,7 @@ events {
 }
 ```
 
-Each block can be omitted or set `enabled: false` to skip that profiler. Each `processes { ... }` entry is independent — `pid` only, or `pid` + `alias`. Empty `processes` = system-wide samples only.
+Each block can be omitted or set `enabled: false` to skip that profiler. Each `processes { ... }` entry is independent — `pid` only, or `pid` + `alias`. Empty `processes` = system-wide samples only. The PID set may grow or shrink mid-run via `ProfilerSuite::AddTrackedProcess()` / `RemoveTrackedProcess()`.
 
 #### Option B — GPU-only with `GpuProfiler`
 
@@ -684,13 +703,13 @@ int main() {
     cudaSetDevice(0);
 
     cupti_profiler::ProfilerConfig config;
-    config.deviceIndex = 0;
-    config.samplingIntervalNs = 100000;  // 10 kHz
+    config.deviceIndices = {0};            // multi-device: {0, 1, ...}
+    config.samplingFrequencyHz = 10000;    // 10 kHz
     config.outputFile = "my_trace.pb";
     config.flushIntervalMs = 5000;
     config.metrics = {
-        "sm__cycles_active.avg",
-        "sm__cycles_elapsed.avg",
+        "sm__cycles_active.avg.pct_of_peak_sustained_elapsed",
+        "sm__warps_active.avg.per_cycle_active",
         "dram__read_throughput.avg.pct_of_peak_sustained_elapsed",
     };
 
@@ -736,31 +755,31 @@ A full-suite run produces five `.pb` files under `output_dir`:
 
 | File | Schema | Contents |
 | ---- | ------ | -------- |
-| `gpu_metrics.pb` | `GpuMetricsTrace` (length-delimited) | GPU PM counter samples (regions live in `events.pb`) |
+| `gpu_metrics.pb` | `GPUMetricsTrace` (length-delimited) | GPU PM counter samples — combined across every `device_indices` entry |
 | `system_metrics.pb` | `SystemMetricsTrace` (length-delimited) | CPU + memory samples (system + per-PID) |
 | `disk_metrics.pb` | `DiskMetricsTrace` (length-delimited) | Disk device + per-PID I/O samples |
 | `events.pb` | `EventTrace` (length-delimited) | Regions + events, Generic + GPU domains |
-| `session_metadata.pb` | `SessionMetadata` (single message, **not** length-delimited) | Manifest of probes, hostname, wall-clock anchor |
+| `session_metadata.pb` | `SessionMetadata` (single message, **not** length-delimited) | Manifest of probes, hostname, wall-clock anchor, **inlined `MetricCatalog`** |
+
+The three per-domain trace types share substructures (`TraceHeader`,
+`ScopeMetricNames`, `Sample` / `ProcessSample` / `DeviceSample` /
+`GPUSample`, `TrackedProcessV2`, `FlushStats`) defined in
+`proto/metric_sample.proto`. Every sample is `(timestamp, [scope_key],
+values[])` with `values[]` ordered to match the per-scope FQN list in
+the same trace's `scope_metric_names[]`. See
+[`docs/metric-model.md`](metric-model.md) for the full type system.
 
 ### GPU schema
 
 ```protobuf title:"proto/gpu_metrics.proto"
-message GpuMetricsTrace {
-    string device_name = 1;
-    string chip_name = 2;
-    uint64 sampling_frequency_hz = 3;
-    repeated string metric_names = 4;
-    repeated GpuMetricSample samples = 5;
-    // Field 6 (regions) and field 8 (region_timing_method) were removed —
-    // regions now live in events.pb (see proto/events.proto).
-    reserved 6, 8;
-    double peak_dram_bw_gbps = 7;
-    double peak_pcie_bw_bytes_per_sec = 13;
-    double peak_nvlink_bw_bytes_per_sec = 14;
-    uint64 steady_clock_reference_ns = 9;
-    uint64 cupti_reference_ns = 10;
-    uint64 wall_clock_epoch_ns = 11;
-    repeated GpuFlushStats flush_stats = 12;
+message GPUMetricsTrace {
+    TraceHeader header                           = 1;
+    // SCOPE_GPU FQNs — every GPUSample.values[i] aligns with this list.
+    repeated ScopeMetricNames scope_metric_names = 2;
+    // One entry per index in GPUProfilerConfig.device_indices.
+    repeated GPUDeviceInfo tracked_gpus          = 3;
+    repeated GPUSample samples                   = 4;
+    repeated FlushStats flush_stats              = 5;
 }
 ```
 
@@ -768,41 +787,56 @@ message GpuMetricsTrace {
 
 ```protobuf title:"proto/system_metrics.proto"
 message SystemMetricsTrace {
-    string hostname = 1;
-    uint64 sampling_frequency_hz = 2;
-    repeated TrackedProcess tracked_processes = 3;   // PIDs + aliases
-    repeated CPUSystemSample    cpu_system_samples    = 4;
-    repeated CPUProcessSample   cpu_process_samples   = 5;
-    repeated MemorySystemSample memory_system_samples = 6;
-    repeated MemoryProcessSample memory_process_samples = 7;
-    uint64 steady_clock_reference_ns = 8;
-    uint64 wall_clock_epoch_ns       = 9;
-    repeated SystemFlushStats flush_stats = 10;
+    TraceHeader header                           = 1;
+    // Two entries: SCOPE_SYSTEM (CPU + memory FQNs combined) and
+    // SCOPE_PROCESS (per-PID CPU + memory FQNs combined).
+    repeated ScopeMetricNames scope_metric_names = 2;
+    // Grows mid-run via ProfilerSuite::AddTrackedProcess(). Entries
+    // with removed=true appear in exactly one flush as a removal
+    // marker before being dropped.
+    repeated TrackedProcessV2 tracked_processes  = 3;
+    // One Sample per tick — values[] combines CPU% + mem bytes.
+    repeated Sample        system_samples        = 4;
+    // One ProcessSample per (tick × tracked PID).
+    repeated ProcessSample process_samples       = 5;
+    repeated FlushStats    flush_stats           = 6;
 }
-
-message CPUSystemSample  { uint64 timestamp_ns; double total_utilization_pct, user_pct, system_pct, iowait_pct; }
-message CPUProcessSample { uint64 timestamp_ns; uint32 pid; double user_pct, system_pct, iowait_pct; }
-message MemorySystemSample { uint64 timestamp_ns; uint64 total_bytes, used_bytes, available_bytes, buffers_bytes, cached_bytes; }
-message MemoryProcessSample{ uint64 timestamp_ns; uint32 pid; uint64 rss_bytes, vms_bytes, shared_bytes; }
 ```
 
 ### Disk schema
 
 ```protobuf title:"proto/disk_metrics.proto"
 message DiskMetricsTrace {
-    string hostname = 1;
-    uint64 sampling_frequency_hz = 2;
-    repeated string tracked_devices = 3;
-    repeated TrackedProcess tracked_processes = 4;
-    repeated DiskDeviceSample  device_samples  = 5;
-    repeated DiskProcessSample process_samples = 6;
-    uint64 steady_clock_reference_ns = 7;
-    uint64 wall_clock_epoch_ns       = 8;
-    repeated DiskFlushStats flush_stats = 9;
+    TraceHeader header                           = 1;
+    // Two entries: SCOPE_DEVICE (BW + inflight) and SCOPE_PROCESS (per-PID rchar/wchar).
+    repeated ScopeMetricNames scope_metric_names = 2;
+    repeated TrackedProcessV2 tracked_processes  = 3;
+    repeated string  tracked_devices             = 4;
+    repeated DeviceSample  device_samples        = 5;
+    repeated ProcessSample process_samples       = 6;
+    repeated FlushStats    flush_stats           = 7;
 }
+```
 
-message DiskDeviceSample  { uint64 timestamp_ns; string device_name; double read_bytes_per_sec, write_bytes_per_sec; uint32 read_queue_depth, write_queue_depth; }
-message DiskProcessSample { uint64 timestamp_ns; uint32 pid; double read_bytes_per_sec, write_bytes_per_sec; }
+### Shared sample shape
+
+```protobuf title:"proto/metric_sample.proto (excerpt)"
+message ScopeMetricNames { Scope scope; repeated string fqns; }
+message Sample           { uint64 timestamp_ns; repeated double values; }
+message ProcessSample    { uint64 timestamp_ns; uint32 pid; repeated double values; }
+message DeviceSample     { uint64 timestamp_ns; string device_name; repeated double values; }
+message GPUSample        { uint64 timestamp_ns; uint32 gpu_index;   repeated double values; }
+
+message TrackedProcessV2 { uint32 pid; string alias; bool removed; }
+message GPUDeviceInfo    { uint32 device_index; string device_name; string chip_name;
+                           double peak_dram_bw_bytes_per_s, peak_pcie_bw_bytes_per_s,
+                                  peak_nvlink_bw_bytes_per_s; }
+
+message TraceHeader {
+    string hostname; uint64 sampling_frequency_hz; uint32 host_cpu_count;
+    ClockAnchors anchors;  // steady_clock + wall_clock_epoch + cupti_reference
+}
+message FlushStats { uint64 flush_byte_size; uint64 flush_interval_ns; }
 ```
 
 ### Events schema
@@ -835,10 +869,15 @@ message SessionMetadata {
     uint64 wall_clock_epoch_ns = 2;
     string start_iso8601 = 3;
     repeated ActiveProbe probes = 4;
+    // Inlined active catalog (proto/metric_catalog.proto) so the
+    // visualizer reads only ONE file to bootstrap.
+    MetricCatalog catalog = 5;
 }
 ```
 
-`session_metadata.pb` holds a single, **non**-length-delimited `SessionMetadata` message — `visualize_all.py` reads it first to discover which sibling `.pb` files to load.
+`session_metadata.pb` is written atomically (`.tmp` + `rename(2)`) at
+`ProfilerSuite::Start()` AND `Stop()` — tailers (live visualizer) never
+observe a torn file.
 
 ### Length-delimited streaming format
 
@@ -851,11 +890,10 @@ Each per-probe `.pb` file contains one or more length-delimited messages of its 
 [varint: message_size][serialized Trace]  ← final chunk
 ```
 
-- Periodic flushes write incremental messages (a slice of samples for that window)
-- For GPU traces: regions only appear in the final message (resolved at `Stop()`)
-- For system/disk traces: every message contains complete `tracked_processes` so each is interpretable in isolation
-- `flush_stats` carry the **previous** flush's byte size and interval (a flush can't include its own size)
-- All visualization tools read and merge messages automatically
+- Periodic flushes write incremental messages (a slice of samples for that window).
+- Every message is **self-contained**: it carries the full `TraceHeader`, `scope_metric_names[]`, and (where applicable) `tracked_processes[]` / `tracked_gpus[]`. A live tailer joining mid-stream has everything it needs to plot.
+- `flush_stats` carry the **previous** flush's byte size and interval (a flush can't include its own size).
+- All visualization tools read and merge messages automatically.
 
 ### Reading in Python
 
