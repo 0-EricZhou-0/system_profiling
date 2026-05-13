@@ -9,6 +9,8 @@ Each trace type uses its own clock domain — timestamps are normalized to
 import argparse
 import os
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import numpy as np
 import matplotlib.pyplot as plt
@@ -21,7 +23,11 @@ sys.path.insert(0, os.path.join(_project_root, "generated", "proto"))
 
 YLIM_HEADROOM = 1.1
 MAX_LABEL_X_OFFSET = 0.02
-SMOOTH_WINDOW_US = 100
+# Default smoothing window in seconds. 0.0 = no smoothing. Override via
+# --smooth-window-s; the per-panel kernel size is derived as
+# round(smooth_window_s / sample_interval_s) so the window holds the same
+# wall time on every panel regardless of its sampling rate.
+DEFAULT_SMOOTH_WINDOW_S = 0.0
 REGION_COLORS = [
     "#d62728", "#2ca02c", "#1f77b4", "#ff7f0e",
     "#9467bd", "#8c564b", "#e377c2", "#17becf",
@@ -170,28 +176,187 @@ def merge_disk_traces(traces):
     return merged
 
 
+# Tunable: target samples processed per parallel task. Large enough that
+# numpy's per-task setup overhead is amortized; small enough that the
+# scheduler has lots of tasks to balance across cores. 1M samples ≈ a few
+# tens of ms of work — a comfortable granule.
+_SMOOTH_CHUNK_SAMPLES = 1_000_000
+
+# Lazy module-level pool. Reused across every smooth() call so the threads
+# stay warm and pool-construction cost (~1 ms) is paid only once per process.
+_smooth_pool: ThreadPoolExecutor | None = None
+_smooth_pool_workers: int = 0   # cached worker count for diagnostic prints
+
+
+def _get_smooth_pool() -> ThreadPoolExecutor:
+    global _smooth_pool, _smooth_pool_workers
+    if _smooth_pool is None:
+        _smooth_pool_workers = max(1, os.cpu_count() or 1)
+        _smooth_pool = ThreadPoolExecutor(
+            max_workers=_smooth_pool_workers, thread_name_prefix="smooth")
+    return _smooth_pool
+
+
+def _smooth_chunk(src, k: int, n: int, a: int, b: int, dst) -> None:
+    """Boxcar-smooth output positions [a, b) of one 1-D series.
+
+    `src` is the full series of length n (read-only). `dst` is the full
+    output buffer; the worker writes only `dst[a:b]`. The input slice is
+    expanded by half_l samples on the left and half_r on the right (a
+    "halo"), clamped at the array boundaries, so every output position
+    in [a, b) sees its full global window — chunk boundaries produce
+    bit-identical results to a single-shot sequential pass.
+
+    Each call is pure numpy (GIL is released throughout), so the pool
+    runs N of these in parallel limited only by memory bandwidth.
+    """
+    half_l = (k - 1) // 2
+    half_r = k - half_l
+    in_start = max(0, a - half_l)
+    in_end   = min(n,  b + half_r)
+
+    sub = src[in_start:in_end]
+    cs = np.empty(len(sub) + 1, dtype=np.float64)
+    cs[0] = 0.0
+    np.cumsum(sub, out=cs[1:])
+
+    i = np.arange(a, b)
+    g_lo = np.maximum(0, i - half_l)
+    g_hi = np.minimum(n, i + half_r)
+    l_lo = g_lo - in_start
+    l_hi = g_hi - in_start
+    dst[a:b] = (cs[l_hi] - cs[l_lo]) / (g_hi - g_lo)
+
+
+# ---------------------------------------------------------------------------
+# Progress-timing harness — module-level so panel builders can call it too.
+# `_log_reset_anchor()` is called at the top of main() so deltas are reported
+# from the start of "real" work (post-argparse). Each `_log("stage")` line
+# prints "[<HH:MM:SS.mmm>] (+<delta>s) <stage>" to stdout.
+# ---------------------------------------------------------------------------
+_T_START_MONO: float | None = None
+
+
+def _log_reset_anchor() -> None:
+    global _T_START_MONO
+    _T_START_MONO = time.monotonic()
+
+
+def _log(stage: str) -> None:
+    global _T_START_MONO
+    if _T_START_MONO is None:
+        _T_START_MONO = time.monotonic()
+    now = time.time()
+    secs = int(now)
+    msecs = int((now - secs) * 1000)
+    abs_str = time.strftime("%H:%M:%S", time.localtime(secs)) + f".{msecs:03d}"
+    delta = time.monotonic() - _T_START_MONO
+    print(f"[{abs_str}] (+{delta:7.3f}s) {stage}")
+
+
 def smooth(data, k):
+    """Boxcar moving average of width `k`, edge-aware, chunked-parallel.
+
+    Splits the work into `_SMOOTH_CHUNK_SAMPLES`-wide tasks and dispatches
+    them to a module-level `ThreadPoolExecutor`. Each task is the
+    cumsum-based O(window) boxcar in `_smooth_chunk`, applied to a halo-
+    padded input slice so chunk boundaries are seamless.
+
+    Inputs below the chunk threshold run inline on the calling thread to
+    avoid submit overhead; large inputs scale with `os.cpu_count()` up to
+    the memory-bandwidth ceiling.
+
+    Numerics: same algorithm as the single-shot cumsum boxcar — relative
+    error stays at ~ε·N for series with large DC offsets, far below visual
+    precision for the metrics we plot. See the smoothing discussion in
+    docs/tools/README.md (TODO) if you ever need tighter bounds.
+    """
     if k <= 1:
         return data
-    kernel = np.ones(k) / k
+
     if data.ndim == 1:
-        return np.convolve(data, kernel, mode="same")
-    out = np.empty_like(data)
-    for col in range(data.shape[1]):
-        out[:, col] = np.convolve(data[:, col], kernel, mode="same")
+        n = len(data)
+        if n == 0:
+            return data.astype(np.float64, copy=True)
+        out = np.empty(n, dtype=np.float64)
+        if n >= _SMOOTH_CHUNK_SAMPLES:
+            n_tasks = (n + _SMOOTH_CHUNK_SAMPLES - 1) // _SMOOTH_CHUNK_SAMPLES
+            _get_smooth_pool()  # warm the pool so the worker count is known
+            _log(f"  smooth shape=({n:,},) k={k:,} → "
+                 f"{n_tasks} tasks across {_smooth_pool_workers} workers")
+        else:
+            _log(f"  smooth shape=({n:,},) k={k:,} → inline (below {_SMOOTH_CHUNK_SAMPLES:,})")
+        _dispatch_1d(data, k, n, out)
+        return out
+
+    # 2-D: every column is an independent 1-D problem.
+    n, m = data.shape
+    if n == 0:
+        return data.astype(np.float64, copy=True)
+    out = np.empty_like(data, dtype=np.float64)
+
+    if n * m < _SMOOTH_CHUNK_SAMPLES:
+        # Whole matrix is below the task budget — skip the pool entirely.
+        _log(f"  smooth shape=({n:,}, {m}) k={k:,} → inline "
+             f"(n*m below {_SMOOTH_CHUNK_SAMPLES:,})")
+        for c in range(m):
+            _smooth_chunk(data[:, c], k, n, 0, n, out[:, c])
+        return out
+
+    pool = _get_smooth_pool()
+    if n < _SMOOTH_CHUNK_SAMPLES:
+        n_tasks = m
+    else:
+        chunks_per_col = (n + _SMOOTH_CHUNK_SAMPLES - 1) // _SMOOTH_CHUNK_SAMPLES
+        n_tasks = m * chunks_per_col
+    _log(f"  smooth shape=({n:,}, {m}) k={k:,} → "
+         f"{n_tasks} tasks across {_smooth_pool_workers} workers")
+
+    futures = []
+    for c in range(m):
+        col_in  = data[:, c]
+        col_out = out[:, c]
+        if n < _SMOOTH_CHUNK_SAMPLES:
+            futures.append(pool.submit(
+                _smooth_chunk, col_in, k, n, 0, n, col_out))
+        else:
+            for a in range(0, n, _SMOOTH_CHUNK_SAMPLES):
+                b = min(n, a + _SMOOTH_CHUNK_SAMPLES)
+                futures.append(pool.submit(
+                    _smooth_chunk, col_in, k, n, a, b, col_out))
+    for f in futures:
+        f.result()
     return out
+
+
+def _dispatch_1d(src, k, n, dst) -> None:
+    """1-D dispatch: inline if below threshold, parallel chunks otherwise."""
+    if n < _SMOOTH_CHUNK_SAMPLES:
+        _smooth_chunk(src, k, n, 0, n, dst)
+        return
+    pool = _get_smooth_pool()
+    futures = []
+    for a in range(0, n, _SMOOTH_CHUNK_SAMPLES):
+        b = min(n, a + _SMOOTH_CHUNK_SAMPLES)
+        futures.append(pool.submit(_smooth_chunk, src, k, n, a, b, dst))
+    for f in futures:
+        f.result()
 
 
 # ---------------------------------------------------------------------------
 # GPU panels (matches quality of original visualize_single.py)
 # ---------------------------------------------------------------------------
 
-def pid_label(trace, pid):
-    """Return "<alias> (PID xxx)" if the trace has an alias for this PID,
-    else "PID xxx". Aliases come from the optional `alias` field on each
-    TrackedProcess entry in `tracked_processes`."""
+def pid_label(tracked_processes, pid):
+    """Return "<alias> (PID xxx)" if `tracked_processes` carries an alias
+    for this PID, else "PID xxx". Aliases come from the optional `alias`
+    field on each TrackedProcess entry.
+
+    Accepts either a `repeated TrackedProcess` proto field or any iterable
+    of TrackedProcess-shaped objects (e.g. the list snapshot taken inside
+    a prepare_* worker)."""
     pid = int(pid)
-    for tp in getattr(trace, "tracked_processes", []) or []:
+    for tp in tracked_processes or []:
         if int(tp.pid) == pid and tp.alias:
             return f"{tp.alias} (PID {pid})"
     return f"PID {pid}"
@@ -202,37 +367,91 @@ def gpu_to_steady(cupti_ts, cupti_ref, steady_ref):
     return cupti_ts - cupti_ref + steady_ref
 
 
-def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
-    """Add GPU panels. Returns the new panel_idx."""
-    samples = list(gpu_trace.samples)
-    if len(samples) > 1:
-        samples = samples[1:]  # skip initialization artifact
+def _smooth_kernel_size(smooth_window_s, sampling_freq_hz):
+    """How many samples are in a `smooth_window_s` window for a series sampled
+    at `sampling_freq_hz` Hz. Returns 1 (no-op) when smoothing is disabled
+    or the window is shorter than one sample."""
+    if smooth_window_s <= 0 or sampling_freq_hz <= 0:
+        return 1
+    return max(1, int(round(smooth_window_s * sampling_freq_hz)))
 
-    n = len(samples)
-    if n == 0:
-        return panel_idx
 
-    cupti_ref = gpu_trace.cupti_reference_ns
-    steady_ref = gpu_trace.steady_clock_reference_ns
+def prepare_gpu_data(gpu_traces, global_t0, smooth_window_s=0.0):
+    """Extract proto samples to a flat numpy buffer, smoothed, returned
+    as a dict that `build_gpu_panels` can plot from.
 
-    metric_names = list(gpu_trace.metric_names)
-    idx = {name: i for i, name in enumerate(metric_names)}
+    `gpu_traces` is the list of GpuMetricsTrace chunks as parsed directly
+    from gpu_metrics.pb (no `merge_gpu_traces` step needed). We walk
+    samples across chunks via `itertools.chain.from_iterable` rather than
+    extending one big protobuf `repeated` — saves the ~3 s the merge step
+    costs on multi-chunk files. The "init artifact" (very first sample,
+    which CUPTI emits with bogus values) is skipped from the very first
+    chunk.
 
-    # Convert GPU timestamps to steady_clock space, then to ms from global_t0
-    ts_cupti = np.array([s.start_timestamp_ns for s in samples], dtype=np.float64)
-    ts_steady = gpu_to_steady(ts_cupti, cupti_ref, steady_ref)
-    time_ms = (ts_steady - global_t0) / 1e6
+    No matplotlib here — safe to run in a worker thread alongside other
+    prepare_*.
+    """
+    import itertools
 
-    vals = np.zeros((n, len(metric_names)))
-    for i, s in enumerate(samples):
-        for j, v in enumerate(s.values):
-            vals[i, j] = v
+    if not gpu_traces:
+        return None
+    total = sum(len(t.samples) for t in gpu_traces)
+    if total <= 1:
+        return None
+    n = total - 1   # one global init artifact gets dropped
 
-    # Smoothing
-    freq_hz = gpu_trace.sampling_frequency_hz
-    interval_us = 1e6 / freq_hz if freq_hz > 0 else 100
-    k = max(1, int(round(SMOOTH_WINDOW_US / interval_us))) if SMOOTH_WINDOW_US else 1
+    head = gpu_traces[0]
+    metric_names = list(head.metric_names)
+    metric_idx = {name: i for i, name in enumerate(metric_names)}
+    n_metrics = len(metric_names)
+
+    _log(f"  gpu prep: extracting {n:,} timestamps across {len(gpu_traces)} chunks")
+    sample_iter = itertools.chain.from_iterable(t.samples for t in gpu_traces)
+    next(sample_iter, None)   # discard init artifact
+    ts_cupti = np.fromiter((s.start_timestamp_ns for s in sample_iter),
+                            dtype=np.float64, count=n)
+    ts_steady = gpu_to_steady(ts_cupti,
+                                head.cupti_reference_ns,
+                                head.steady_clock_reference_ns)
+    time_s = (ts_steady - global_t0) / 1e9
+
+    _log(f"  gpu prep: extracting {n:,}×{n_metrics} metric values across {len(gpu_traces)} chunks")
+    sample_iter = itertools.chain.from_iterable(t.samples for t in gpu_traces)
+    next(sample_iter, None)   # discard init artifact
+    vals = np.empty((n, n_metrics), dtype=np.float64)
+    for i, s in enumerate(sample_iter):
+        vals[i] = s.values
+
+    k = _smooth_kernel_size(smooth_window_s, head.sampling_frequency_hz)
+    _log(f"  gpu prep: smoothing (k={k:,})")
     vals = smooth(vals, k)
+    _log("  gpu prep: done")
+
+    return {
+        "time_s": time_s,
+        "vals": vals,
+        "metric_idx": metric_idx,
+        "metric_names": metric_names,
+        "peak_dram_bw_gbps": head.peak_dram_bw_gbps,
+        "peak_pcie_bw_bytes_per_sec": head.peak_pcie_bw_bytes_per_sec,
+        "peak_nvlink_bw_bytes_per_sec": head.peak_nvlink_bw_bytes_per_sec,
+        "device_name": head.device_name,
+        "chip_name": head.chip_name,
+    }
+
+
+def build_gpu_panels(prepared, axes, panel_idx):
+    """Render GPU panels from a `prepare_gpu_data` dict. Matplotlib calls
+    only — must run on the main thread."""
+    if prepared is None:
+        return panel_idx
+    _log("  gpu plot: panels")
+    time_s = prepared["time_s"]
+    vals = prepared["vals"]
+    idx = prepared["metric_idx"]
+    peak_dram_bw_gbps = prepared["peak_dram_bw_gbps"]
+    peak_pcie_bw_bytes_per_sec = prepared["peak_pcie_bw_bytes_per_sec"]
+    peak_nvlink_bw_bytes_per_sec = prepared["peak_nvlink_bw_bytes_per_sec"]
 
     # Panel: SM Utilization
     if "sm__cycles_active.avg" in idx and "sm__cycles_elapsed.avg" in idx:
@@ -241,8 +460,8 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         util_avg = np.where(elapsed > 0, vals[:, idx["sm__cycles_active.avg"]] / elapsed * 100, 0)
         if "sm__cycles_active.max" in idx:
             util_max = np.where(elapsed > 0, vals[:, idx["sm__cycles_active.max"]] / elapsed * 100, 0)
-            ax.plot(time_ms, util_max, lw=1.0, color="C0", label="max (busiest SM)")
-        ax.plot(time_ms, util_avg, lw=0.8, color="C0", alpha=0.45, label="avg (across all SMs)")
+            ax.plot(time_s, util_max, lw=1.0, color="C0", label="max (busiest SM)")
+        ax.plot(time_s, util_avg, lw=0.8, color="C0", alpha=0.45, label="avg (across all SMs)")
         ax.axhline(100, color="black", lw=1.2, ls=":", alpha=0.7)
         ax.text(MAX_LABEL_X_OFFSET, 100, "Max SM Util: 100%",
                 transform=ax.get_yaxis_transform(),
@@ -251,7 +470,7 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         ax.set_ylim(0, 100 * YLIM_HEADROOM)
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=10, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        ax.set_xlim(left=0, right=time_s[-1] * 1.02)
         panel_idx += 1
 
     # Panel: Active Warps / Cycle
@@ -261,8 +480,8 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         occ_avg = np.where(elapsed > 0, vals[:, idx["sm__warps_active.avg"]] / elapsed, 0)
         if "sm__warps_active.max" in idx:
             occ_max = np.where(elapsed > 0, vals[:, idx["sm__warps_active.max"]] / elapsed, 0)
-            ax.plot(time_ms, occ_max, lw=1.0, color="C1", label="max (busiest SM)")
-        ax.plot(time_ms, occ_avg, lw=0.8, color="C1", alpha=0.45, label="avg (across all SMs)")
+            ax.plot(time_s, occ_max, lw=1.0, color="C1", label="max (busiest SM)")
+        ax.plot(time_s, occ_avg, lw=0.8, color="C1", alpha=0.45, label="avg (across all SMs)")
         max_warps = 64
         ax.axhline(max_warps, color="black", lw=1.2, ls=":", alpha=0.7)
         ax.text(MAX_LABEL_X_OFFSET, max_warps, f"Max Active Warps: {max_warps}",
@@ -272,13 +491,13 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         ax.set_ylim(0, max_warps * YLIM_HEADROOM)
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=10, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        ax.set_xlim(left=0, right=time_s[-1] * 1.02)
         panel_idx += 1
 
     # Panel: DRAM Bandwidth (binary GiB/s)
     if "dram__read_throughput.avg.pct_of_peak_sustained_elapsed" in idx:
         ax = axes[panel_idx]
-        peak_gib = gpu_trace.peak_dram_bw_gbps * 1e9 / (1024 ** 3)
+        peak_gib = peak_dram_bw_gbps * 1e9 / (1024 ** 3)
         pct_to_gibps = peak_gib / 100.0
 
         rd_avg = vals[:, idx["dram__read_throughput.avg.pct_of_peak_sustained_elapsed"]] * pct_to_gibps
@@ -287,11 +506,11 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         if "dram__read_throughput.max.pct_of_peak_sustained_elapsed" in idx:
             rd_max = vals[:, idx["dram__read_throughput.max.pct_of_peak_sustained_elapsed"]] * pct_to_gibps
             wr_max = vals[:, idx["dram__write_throughput.max.pct_of_peak_sustained_elapsed"]] * pct_to_gibps
-            ax.plot(time_ms, rd_max, lw=1.0, color="C2", label="Read max")
-            ax.plot(time_ms, wr_max, lw=1.0, color="C3", label="Write max")
+            ax.plot(time_s, rd_max, lw=1.0, color="C2", label="Read max")
+            ax.plot(time_s, wr_max, lw=1.0, color="C3", label="Write max")
 
-        ax.plot(time_ms, rd_avg, lw=0.8, color="C2", alpha=0.45, label="Read avg")
-        ax.plot(time_ms, wr_avg, lw=0.8, color="C3", alpha=0.45, label="Write avg")
+        ax.plot(time_s, rd_avg, lw=0.8, color="C2", alpha=0.45, label="Read avg")
+        ax.plot(time_s, wr_avg, lw=0.8, color="C3", alpha=0.45, label="Write avg")
 
         ax.axhline(peak_gib, color="black", lw=1.2, ls=":", alpha=0.7)
         ax.text(MAX_LABEL_X_OFFSET, peak_gib, f"Max DRAM BW: {peak_gib:.0f} GiB/s",
@@ -302,7 +521,7 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         ax.set_ylabel("DRAM Bandwidth\n(GiB/s)")
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=10, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        ax.set_xlim(left=0, right=time_s[-1] * 1.02)
         panel_idx += 1
 
     # Panel: PCIe Bandwidth (bytes/sec → GiB/s)
@@ -310,12 +529,12 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         ax = axes[panel_idx]
         rd_gibps = vals[:, idx["pcie__read_bytes.sum.per_second"]] / (1024 ** 3)
         wr_gibps = vals[:, idx["pcie__write_bytes.sum.per_second"]] / (1024 ** 3)
-        ax.plot(time_ms, rd_gibps, lw=1.0, color="C4", label="H→D (read)")
-        ax.plot(time_ms, wr_gibps, lw=1.0, color="C5", label="D→H (write)")
+        ax.plot(time_s, rd_gibps, lw=1.0, color="C4", label="H→D (read)")
+        ax.plot(time_s, wr_gibps, lw=1.0, color="C5", label="D→H (write)")
         ax.set_ylabel("PCIe Bandwidth\n(GiB/s)")
 
         # Stored value is per-direction; display as bi-directional (×2 for full-duplex sum).
-        peak_pcie_gibps_bidi = gpu_trace.peak_pcie_bw_bytes_per_sec * 2 / (1024 ** 3)
+        peak_pcie_gibps_bidi = peak_pcie_bw_bytes_per_sec * 2 / (1024 ** 3)
         ax.axhline(peak_pcie_gibps_bidi, color="black", lw=1.2, ls=":", alpha=0.7)
         ax.text(MAX_LABEL_X_OFFSET, peak_pcie_gibps_bidi,
                 f"Max PCIe BW: {peak_pcie_gibps_bidi:.1f} GiB/s (Bi-directional)",
@@ -325,7 +544,7 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
 
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=10, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        ax.set_xlim(left=0, right=time_s[-1] * 1.02)
         panel_idx += 1
 
     # Panel: Cumulative PCIe Bytes (each sample's pcie__*_bytes.sum is bytes
@@ -340,8 +559,8 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
                            (1024 ** 2, "MiB"), (1024, "KiB"), (1, "B")]:
             if max_bytes >= div:
                 break
-        ax.plot(time_ms, rd_cum / div, lw=1.0, color="C4", label="H→D cumulative")
-        ax.plot(time_ms, wr_cum / div, lw=1.0, color="C5", label="D→H cumulative")
+        ax.plot(time_s, rd_cum / div, lw=1.0, color="C4", label="H→D cumulative")
+        ax.plot(time_s, wr_cum / div, lw=1.0, color="C5", label="D→H cumulative")
         ax.text(0.995, rd_cum[-1] / div, f"  {rd_cum[-1] / div:.2f} {unit}",
                 transform=ax.get_yaxis_transform(),
                 va="center", ha="left", fontsize=7, color="C4", fontweight="bold")
@@ -352,7 +571,7 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         ax.set_ylim(bottom=0)
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=10, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        ax.set_xlim(left=0, right=time_s[-1] * 1.02)
         panel_idx += 1
 
     # Panel: NVLink Bandwidth (bytes/sec → GiB/s)
@@ -360,12 +579,12 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
         ax = axes[panel_idx]
         rx_gibps = vals[:, idx["nvlrx__bytes.sum.per_second"]] / (1024 ** 3)
         tx_gibps = vals[:, idx["nvltx__bytes.sum.per_second"]] / (1024 ** 3)
-        ax.plot(time_ms, rx_gibps, lw=1.0, color="C6", label="RX")
-        ax.plot(time_ms, tx_gibps, lw=1.0, color="C7", label="TX")
+        ax.plot(time_s, rx_gibps, lw=1.0, color="C6", label="RX")
+        ax.plot(time_s, tx_gibps, lw=1.0, color="C7", label="TX")
         ax.set_ylabel("NVLink Bandwidth\n(GiB/s)")
 
         # Stored value is per-direction; display as bi-directional (×2).
-        peak_nvl_gibps_bidi = gpu_trace.peak_nvlink_bw_bytes_per_sec * 2 / (1024 ** 3)
+        peak_nvl_gibps_bidi = peak_nvlink_bw_bytes_per_sec * 2 / (1024 ** 3)
         ax.axhline(peak_nvl_gibps_bidi, color="black", lw=1.2, ls=":", alpha=0.7)
         ax.text(MAX_LABEL_X_OFFSET, peak_nvl_gibps_bidi,
                 f"Max NVLink BW: {peak_nvl_gibps_bidi:.1f} GiB/s (Bi-directional)",
@@ -375,7 +594,7 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
 
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=10, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        ax.set_xlim(left=0, right=time_s[-1] * 1.02)
         panel_idx += 1
 
     # Convert regions to steady_clock space
@@ -386,24 +605,88 @@ def build_gpu_panels(gpu_trace, axes, panel_idx, global_t0):
 # System panels (CPU + Memory)
 # ---------------------------------------------------------------------------
 
-def build_system_panels(sys_trace, axes, panel_idx, global_t0):
-    """Add CPU and memory panels. Returns new panel_idx."""
+def prepare_system_data(sys_trace, global_t0, smooth_window_s=0.0):
+    """Extract + smooth CPU/memory samples into a dict that `build_system_panels`
+    can plot from. Safe to run from a worker thread."""
+    if not sys_trace:
+        return None
+    _log("  sys prep")
+    k = _smooth_kernel_size(smooth_window_s, sys_trace.sampling_frequency_hz)
+    out = {"tracked_processes": list(sys_trace.tracked_processes)}
 
-    # CPU system-wide
     cpu_sys = list(sys_trace.cpu_system_samples)
     if cpu_sys:
-        ax = axes[panel_idx]
         ts = np.array([s.timestamp_ns for s in cpu_sys], dtype=np.float64)
-        time_ms = (ts - global_t0) / 1e6
-        user = np.array([s.user_pct for s in cpu_sys])
-        system = np.array([s.system_pct for s in cpu_sys])
-        iowait = np.array([s.iowait_pct for s in cpu_sys])
-        total = np.array([s.total_utilization_pct for s in cpu_sys])
+        out["cpu_sys"] = {
+            "time_s": (ts - global_t0) / 1e9,
+            "user":   smooth(np.array([s.user_pct for s in cpu_sys]), k),
+            "sysp":   smooth(np.array([s.system_pct for s in cpu_sys]), k),
+            "iowait": smooth(np.array([s.iowait_pct for s in cpu_sys]), k),
+            "total":  smooth(np.array([s.total_utilization_pct for s in cpu_sys]), k),
+        }
 
-        ax.stackplot(time_ms, user, system, iowait,
+    cpu_proc = list(sys_trace.cpu_process_samples)
+    if cpu_proc:
+        pids = sorted(set(s.pid for s in cpu_proc))
+        per_pid = {}
+        for pid in pids:
+            ps = [s for s in cpu_proc if s.pid == pid]
+            ts = np.array([s.timestamp_ns for s in ps], dtype=np.float64)
+            user = smooth(np.array([s.user_pct for s in ps]), k)
+            sysp = smooth(np.array([s.system_pct for s in ps]), k)
+            per_pid[pid] = {
+                "time_s":  (ts - global_t0) / 1e9,
+                "user":    user,
+                "sysp":    sysp,
+                "combined": user + sysp,
+            }
+        out["cpu_proc"] = {"pids": pids, "per_pid": per_pid}
+
+    mem_sys = list(sys_trace.memory_system_samples)
+    if mem_sys:
+        ts = np.array([s.timestamp_ns for s in mem_sys], dtype=np.float64)
+        GB = 1024 ** 3
+        out["mem_sys"] = {
+            "time_s":    (ts - global_t0) / 1e9,
+            "used":      smooth(np.array([s.used_bytes    for s in mem_sys]) / GB, k),
+            "buffers":   smooth(np.array([s.buffers_bytes for s in mem_sys]) / GB, k),
+            "cached":    smooth(np.array([s.cached_bytes  for s in mem_sys]) / GB, k),
+            "total_gib": mem_sys[0].total_bytes / GB if mem_sys[0].total_bytes else 0,
+        }
+
+    mem_proc = list(sys_trace.memory_process_samples)
+    if mem_proc:
+        pids = sorted(set(s.pid for s in mem_proc))
+        per_pid = {}
+        for pid in pids:
+            ps = [s for s in mem_proc if s.pid == pid]
+            ts = np.array([s.timestamp_ns for s in ps], dtype=np.float64)
+            per_pid[pid] = {
+                "time_s": (ts - global_t0) / 1e9,
+                "rss":    smooth(np.array([s.rss_bytes for s in ps]) / (1024 ** 3), k),
+            }
+        out["mem_proc"] = {"pids": pids, "per_pid": per_pid}
+
+    _log("  sys prep: done")
+    return out
+
+
+def build_system_panels(prepared, axes, panel_idx):
+    """Render CPU + memory panels from a `prepare_system_data` dict. Main thread only."""
+    if prepared is None:
+        return panel_idx
+    _log("  sys plot: panels")
+    tracked = prepared.get("tracked_processes", [])
+
+    # CPU system-wide
+    if "cpu_sys" in prepared:
+        d = prepared["cpu_sys"]
+        ax = axes[panel_idx]
+        time_s = d["time_s"]
+        ax.stackplot(time_s, d["user"], d["sysp"], d["iowait"],
                      labels=["User", "System", "IOWait"],
                      colors=["#4c72b0", "#dd8452", "#c44e52"], alpha=0.7)
-        ax.plot(time_ms, total, lw=1.0, color="black", label="Total")
+        ax.plot(time_s, d["total"], lw=1.0, color="black", label="Total")
         ax.axhline(100, color="black", lw=1.2, ls=":", alpha=0.7)
         ax.text(MAX_LABEL_X_OFFSET, 100, "Max CPU: 100%",
                 transform=ax.get_yaxis_transform(),
@@ -412,50 +695,44 @@ def build_system_panels(sys_trace, axes, panel_idx, global_t0):
         ax.set_ylim(0, 100 * YLIM_HEADROOM)
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=5, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        if len(time_ms) > 0:
-            ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        if len(time_s) > 0:
+            ax.set_xlim(left=0, right=time_s[-1] * 1.02)
         panel_idx += 1
 
     # CPU per-process
-    cpu_proc = list(sys_trace.cpu_process_samples)
-    if cpu_proc:
+    if "cpu_proc" in prepared:
+        c = prepared["cpu_proc"]
         ax = axes[panel_idx]
-        pids = sorted(set(s.pid for s in cpu_proc))
         max_val = 0
-        for i, pid in enumerate(pids):
-            samples = [s for s in cpu_proc if s.pid == pid]
-            ts = np.array([s.timestamp_ns for s in samples], dtype=np.float64)
-            time_ms = (ts - global_t0) / 1e6
-            user = np.array([s.user_pct for s in samples])
-            sys_pct = np.array([s.system_pct for s in samples])
-            combined = user + sys_pct
-            max_val = max(max_val, np.max(combined) if len(combined) > 0 else 0)
-            label = pid_label(sys_trace, pid)
-            ax.plot(time_ms, combined, lw=1.0, color=f"C{i}", label=f"{label} (usr+sys)")
-            ax.plot(time_ms, user, lw=0.8, color=f"C{i}", alpha=0.5, ls="--", label=f"{label} (usr)")
+        last_time_s = None
+        for i, pid in enumerate(c["pids"]):
+            d = c["per_pid"][pid]
+            time_s = d["time_s"]
+            last_time_s = time_s
+            max_val = max(max_val,
+                           float(np.max(d["combined"])) if len(d["combined"]) > 0 else 0)
+            label = pid_label(tracked, pid)
+            ax.plot(time_s, d["combined"], lw=1.0, color=f"C{i}",
+                    label=f"{label} (usr+sys)")
+            ax.plot(time_s, d["user"], lw=0.8, color=f"C{i}",
+                    alpha=0.5, ls="--", label=f"{label} (usr)")
         ax.set_ylabel("Process CPU\n(%)")
         ax.set_ylim(0, max(1, max_val) * YLIM_HEADROOM)
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=5, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        if len(time_ms) > 0:
-            ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        if last_time_s is not None and len(last_time_s) > 0:
+            ax.set_xlim(left=0, right=last_time_s[-1] * 1.02)
         panel_idx += 1
 
     # Memory system-wide
-    mem_sys = list(sys_trace.memory_system_samples)
-    if mem_sys:
+    if "mem_sys" in prepared:
+        d = prepared["mem_sys"]
         ax = axes[panel_idx]
-        ts = np.array([s.timestamp_ns for s in mem_sys], dtype=np.float64)
-        time_ms = (ts - global_t0) / 1e6
-        _BYTES_PER_GIB = 1024 ** 3
-        used = np.array([s.used_bytes for s in mem_sys]) / _BYTES_PER_GIB
-        buffers = np.array([s.buffers_bytes for s in mem_sys]) / _BYTES_PER_GIB
-        cached = np.array([s.cached_bytes for s in mem_sys]) / _BYTES_PER_GIB
-        total_gib = mem_sys[0].total_bytes / _BYTES_PER_GIB if mem_sys else 0
-
-        ax.stackplot(time_ms, used, buffers, cached,
+        time_s = d["time_s"]
+        ax.stackplot(time_s, d["used"], d["buffers"], d["cached"],
                      labels=["Used", "Buffers", "Cached"],
                      colors=["#c44e52", "#dd8452", "#4c72b0"], alpha=0.7)
+        total_gib = d["total_gib"]
         if total_gib > 0:
             ax.axhline(total_gib, color="black", lw=1.2, ls=":", alpha=0.7)
             ax.text(MAX_LABEL_X_OFFSET, total_gib, f"Total: {total_gib:.0f} GiB",
@@ -465,29 +742,29 @@ def build_system_panels(sys_trace, axes, panel_idx, global_t0):
         ax.set_ylabel("System Memory\n(GiB)")
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=5, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        if len(time_ms) > 0:
-            ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        if len(time_s) > 0:
+            ax.set_xlim(left=0, right=time_s[-1] * 1.02)
         panel_idx += 1
 
     # Memory per-process
-    mem_proc = list(sys_trace.memory_process_samples)
-    if mem_proc:
+    if "mem_proc" in prepared:
+        c = prepared["mem_proc"]
         ax = axes[panel_idx]
-        pids = sorted(set(s.pid for s in mem_proc))
         max_val = 0
-        for i, pid in enumerate(pids):
-            samples = [s for s in mem_proc if s.pid == pid]
-            ts = np.array([s.timestamp_ns for s in samples], dtype=np.float64)
-            time_ms = (ts - global_t0) / 1e6
-            rss = np.array([s.rss_bytes for s in samples]) / (1024 ** 3)
-            max_val = max(max_val, np.max(rss) if len(rss) > 0 else 0)
-            ax.plot(time_ms, rss, lw=1.0, color=f"C{i}", label=f"{pid_label(sys_trace, pid)} RSS")
+        last_time_s = None
+        for i, pid in enumerate(c["pids"]):
+            d = c["per_pid"][pid]
+            time_s = d["time_s"]
+            last_time_s = time_s
+            max_val = max(max_val, float(np.max(d["rss"])) if len(d["rss"]) > 0 else 0)
+            ax.plot(time_s, d["rss"], lw=1.0, color=f"C{i}",
+                    label=f"{pid_label(tracked, pid)} RSS")
         ax.set_ylabel("Process Memory\n(GiB)")
         ax.set_ylim(0, max(0.01, max_val) * YLIM_HEADROOM)
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=5, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        if len(time_ms) > 0:
-            ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        if last_time_s is not None and len(last_time_s) > 0:
+            ax.set_xlim(left=0, right=last_time_s[-1] * 1.02)
         panel_idx += 1
 
     return panel_idx
@@ -497,73 +774,118 @@ def build_system_panels(sys_trace, axes, panel_idx, global_t0):
 # Disk panels
 # ---------------------------------------------------------------------------
 
-def build_disk_panels(disk_trace, axes, panel_idx, global_t0):
-    """Add disk panels. Returns new panel_idx."""
+def prepare_disk_data(disk_trace, global_t0, smooth_window_s=0.0):
+    """Extract + smooth disk samples into a dict that `build_disk_panels` can plot from.
+    Safe to run from a worker thread."""
+    if not disk_trace:
+        return None
+    _log("  disk prep")
+    k = _smooth_kernel_size(smooth_window_s, disk_trace.sampling_frequency_hz)
     dev_samples = list(disk_trace.device_samples)
     proc_samples = list(disk_trace.process_samples)
-
     if not dev_samples and not proc_samples:
-        return panel_idx
+        return None
 
+    out = {"tracked_processes": list(disk_trace.tracked_processes)}
     devices = sorted(set(s.device_name for s in dev_samples)) if dev_samples else []
+    out["devices"] = devices
+    MB = 1024 ** 2
+
+    if dev_samples:
+        per_dev = {}
+        for dev in devices:
+            ds = [s for s in dev_samples if s.device_name == dev]
+            ts = np.array([s.timestamp_ns for s in ds], dtype=np.float64)
+            per_dev[dev] = {
+                "time_s": (ts - global_t0) / 1e9,
+                "rd":     smooth(np.array([s.read_bytes_per_sec  for s in ds]) / MB, k),
+                "wr":     smooth(np.array([s.write_bytes_per_sec for s in ds]) / MB, k),
+                "rdq":    smooth(np.array([s.read_queue_depth   for s in ds], dtype=np.float64), k),
+                "wrq":    smooth(np.array([s.write_queue_depth  for s in ds], dtype=np.float64), k),
+            }
+        out["dev"] = per_dev
+
+    if proc_samples:
+        pids = sorted(set(s.pid for s in proc_samples))
+        per_pid = {}
+        for pid in pids:
+            ps = [s for s in proc_samples if s.pid == pid]
+            ts = np.array([s.timestamp_ns for s in ps], dtype=np.float64)
+            rd = smooth(np.array([s.read_bytes_per_sec  for s in ps]) / MB, k)
+            wr = smooth(np.array([s.write_bytes_per_sec for s in ps]) / MB, k)
+            per_pid[pid] = {
+                "time_s": (ts - global_t0) / 1e9,
+                "rd":     rd,
+                "wr":     wr,
+            }
+        out["proc"] = {"pids": pids, "per_pid": per_pid}
+
+    _log("  disk prep: done")
+    return out
+
+
+def build_disk_panels(prepared, axes, panel_idx):
+    """Render disk panels from a `prepare_disk_data` dict. Main thread only."""
+    if prepared is None:
+        return panel_idx
+    _log("  disk plot: panels")
+    tracked = prepared.get("tracked_processes", [])
+    devices = prepared.get("devices", [])
+    dev_data = prepared.get("dev")
+    proc_data = prepared.get("proc")
 
     # Per-device bandwidth
-    if dev_samples:
+    if dev_data:
         ax = axes[panel_idx]
+        last_time_s = None
         for i, dev in enumerate(devices):
-            samples = [s for s in dev_samples if s.device_name == dev]
-            ts = np.array([s.timestamp_ns for s in samples], dtype=np.float64)
-            time_ms = (ts - global_t0) / 1e6
-            rd = np.array([s.read_bytes_per_sec for s in samples]) / (1024 ** 2)  # MiB/s
-            wr = np.array([s.write_bytes_per_sec for s in samples]) / (1024 ** 2)
-            ax.plot(time_ms, rd, lw=1.0, color=f"C{i*2}", label=f"{dev} read")
-            ax.plot(time_ms, wr, lw=1.0, color=f"C{i*2+1}", ls="--", label=f"{dev} write")
+            d = dev_data[dev]
+            last_time_s = d["time_s"]
+            ax.plot(d["time_s"], d["rd"], lw=1.0, color=f"C{i*2}", label=f"{dev} read")
+            ax.plot(d["time_s"], d["wr"], lw=1.0, color=f"C{i*2+1}", ls="--", label=f"{dev} write")
         ax.set_ylabel("Disk Bandwidth\n(MiB/s)")
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=6, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        if len(time_ms) > 0:
-            ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        if last_time_s is not None and len(last_time_s) > 0:
+            ax.set_xlim(left=0, right=last_time_s[-1] * 1.02)
         panel_idx += 1
 
-    # Per-process disk IO (before queue depth)
-    if proc_samples:
+    # Per-process disk IO
+    if proc_data:
         ax = axes[panel_idx]
-        pids = sorted(set(s.pid for s in proc_samples))
         max_val = 0
-        for i, pid in enumerate(pids):
-            samples = [s for s in proc_samples if s.pid == pid]
-            ts = np.array([s.timestamp_ns for s in samples], dtype=np.float64)
-            time_ms = (ts - global_t0) / 1e6
-            rd = np.array([s.read_bytes_per_sec for s in samples]) / (1024 ** 2)
-            wr = np.array([s.write_bytes_per_sec for s in samples]) / (1024 ** 2)
-            max_val = max(max_val, np.max(rd) if len(rd) > 0 else 0, np.max(wr) if len(wr) > 0 else 0)
-            label = pid_label(disk_trace, pid)
-            ax.plot(time_ms, rd, lw=1.0, color=f"C{i*2}", label=f"{label} read")
-            ax.plot(time_ms, wr, lw=1.0, color=f"C{i*2+1}", ls="--", label=f"{label} write")
+        last_time_s = None
+        for i, pid in enumerate(proc_data["pids"]):
+            d = proc_data["per_pid"][pid]
+            last_time_s = d["time_s"]
+            max_val = max(max_val,
+                           float(np.max(d["rd"])) if len(d["rd"]) > 0 else 0,
+                           float(np.max(d["wr"])) if len(d["wr"]) > 0 else 0)
+            label = pid_label(tracked, pid)
+            ax.plot(d["time_s"], d["rd"], lw=1.0, color=f"C{i*2}", label=f"{label} read")
+            ax.plot(d["time_s"], d["wr"], lw=1.0, color=f"C{i*2+1}", ls="--", label=f"{label} write")
         ax.set_ylabel("Process Disk IO\n(MiB/s)")
         ax.set_ylim(0, max(0.01, max_val) * YLIM_HEADROOM)
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=6, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        if len(time_ms) > 0:
-            ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        if last_time_s is not None and len(last_time_s) > 0:
+            ax.set_xlim(left=0, right=last_time_s[-1] * 1.02)
         panel_idx += 1
 
-    # Queue depth (last disk panel)
-    if dev_samples:
+    # Queue depth (per-device)
+    if dev_data:
         ax = axes[panel_idx]
+        last_time_s = None
         for i, dev in enumerate(devices):
-            samples = [s for s in dev_samples if s.device_name == dev]
-            ts = np.array([s.timestamp_ns for s in samples], dtype=np.float64)
-            time_ms = (ts - global_t0) / 1e6
-            rdq = np.array([s.read_queue_depth for s in samples])
-            wrq = np.array([s.write_queue_depth for s in samples])
-            ax.plot(time_ms, rdq, lw=1.0, color=f"C{i*2}", label=f"{dev} read Q")
-            ax.plot(time_ms, wrq, lw=1.0, color=f"C{i*2+1}", ls="--", label=f"{dev} write Q")
+            d = dev_data[dev]
+            last_time_s = d["time_s"]
+            ax.plot(d["time_s"], d["rdq"], lw=1.0, color=f"C{i*2}", label=f"{dev} read Q")
+            ax.plot(d["time_s"], d["wrq"], lw=1.0, color=f"C{i*2+1}", ls="--", label=f"{dev} write Q")
         ax.set_ylabel("Queue Depth")
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=6, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        if len(time_ms) > 0:
-            ax.set_xlim(left=0, right=time_ms[-1] * 1.02)
+        if last_time_s is not None and len(last_time_s) > 0:
+            ax.set_xlim(left=0, right=last_time_s[-1] * 1.02)
         panel_idx += 1
 
     return panel_idx
@@ -574,7 +896,7 @@ def build_disk_panels(disk_trace, axes, panel_idx, global_t0):
 # ---------------------------------------------------------------------------
 
 def _flush_stats_series(trace, global_t0):
-    """Extract (time_ms, bytes_per_sec) arrays from a trace's flush_stats.
+    """Extract (time_s, bytes_per_sec) arrays from a trace's flush_stats.
     Returns (None, None) if nothing usable is present."""
     if not trace or not hasattr(trace, "flush_stats"):
         return None, None
@@ -583,7 +905,7 @@ def _flush_stats_series(trace, global_t0):
         return None, None
     ts = np.array([s.timestamp_ns for s in stats], dtype=np.float64)
     bps = np.array([s.bytes_written * 1e9 / s.interval_ns for s in stats], dtype=np.float64)
-    return (ts - global_t0) / 1e6, bps
+    return (ts - global_t0) / 1e9, bps
 
 
 def build_flush_panels(traces_with_labels, axes, panel_idx, global_t0):
@@ -591,8 +913,8 @@ def build_flush_panels(traces_with_labels, axes, panel_idx, global_t0):
     traces_with_labels: list of (trace, label_prefix, color) tuples.
     Returns new panel_idx."""
     for trace, label, color in traces_with_labels:
-        time_ms, bps = _flush_stats_series(trace, global_t0)
-        if time_ms is None or len(time_ms) == 0:
+        time_s, bps = _flush_stats_series(trace, global_t0)
+        if time_s is None or len(time_s) == 0:
             continue
 
         ax = axes[panel_idx]
@@ -604,9 +926,9 @@ def build_flush_panels(traces_with_labels, axes, panel_idx, global_t0):
         else:
             y = bps / 1024
             unit = "KiB/s"
-        ax.step(time_ms, y, where="post", lw=1.1, color=color,
+        ax.step(time_s, y, where="post", lw=1.1, color=color,
                 label=f"{label} actual write rate")
-        ax.fill_between(time_ms, 0, y, step="post", alpha=0.15, color=color)
+        ax.fill_between(time_s, 0, y, step="post", alpha=0.15, color=color)
         mean_y = float(np.mean(y)) if len(y) > 0 else 0.0
         ax.axhline(mean_y, color=color, lw=0.8, ls=":", alpha=0.7)
         ax.text(0.995, mean_y, f"mean {mean_y:.2f} {unit}",
@@ -616,8 +938,8 @@ def build_flush_panels(traces_with_labels, axes, panel_idx, global_t0):
         ax.set_ylim(bottom=0)
         ax.legend(loc="lower left", bbox_to_anchor=(0, 1.0), ncol=4, fontsize=7, framealpha=0.7)
         ax.grid(True, alpha=0.3)
-        if len(time_ms) > 0:
-            ax.set_xlim(left=0, right=float(time_ms[-1]) * 1.02)
+        if len(time_s) > 0:
+            ax.set_xlim(left=0, right=float(time_s[-1]) * 1.02)
         panel_idx += 1
 
     return panel_idx
@@ -631,7 +953,18 @@ def main():
     parser = argparse.ArgumentParser(description="Unified profiler visualization")
     parser.add_argument("metadata", help="session_metadata.pb (per-probe files are discovered from the manifest)")
     parser.add_argument("-o", "--output", default="full_profile.png", help="Output image")
+    parser.add_argument("--smooth-window-s", type=float, default=DEFAULT_SMOOTH_WINDOW_S,
+                        help="Boxcar-smooth every per-sample series within a window of "
+                             "this many seconds (default: %(default)s = no smoothing). "
+                             "Per-panel kernel sizes are derived from each probe's "
+                             "sampling_frequency_hz so the wall-time width is uniform "
+                             "across panels.")
     args = parser.parse_args()
+
+    # Anchor the timing log at the start of "real" work (post-argparse).
+    # `_log` is module-level so panel builders can use it too.
+    _log_reset_anchor()
+    _log("reading data")
 
     gpu_trace = sys_trace = disk_trace = None
     events = None
@@ -667,12 +1000,29 @@ def main():
     disk_path   = probe_paths.get(session_metadata_pb2.PROBE_KIND_DISK)
     events_path = probe_paths.get(session_metadata_pb2.PROBE_KIND_EVENTS)
 
+    gpu_traces = []           # list-of-chunks; used directly by prepare_gpu_data
+    total_gpu_samples = 0     # cached sum across chunks (replaces len(gpu_trace.samples))
+    gpu_duration_s = 0.0      # full-stream timestamp span; used by the footer's write-rate stat
     if gpu_path:
         import gpu_metrics_pb2
         with open(gpu_path, "rb") as f:
             data = f.read()
-        gpu_trace = merge_gpu_traces(read_delimited_messages(data, gpu_metrics_pb2.GpuMetricsTrace))
-        print(f"GPU: {len(gpu_trace.samples)} samples")
+        gpu_traces = read_delimited_messages(data, gpu_metrics_pb2.GpuMetricsTrace)
+        total_gpu_samples = sum(len(t.samples) for t in gpu_traces)
+        # `gpu_trace` retained as a metadata handle for the title, footer,
+        # flush-rate panel, and wall-clock anchor — all of which only need
+        # the constant header fields (device_name, peak_*, sampling_freq_hz,
+        # wall_clock_epoch_ns, …) that are identical across chunks. Sample
+        # iteration goes through `gpu_traces` directly so we never have to
+        # do the multi-second proto-level extend that `merge_gpu_traces`
+        # used to perform.
+        gpu_trace = gpu_traces[0] if gpu_traces else None
+        if total_gpu_samples >= 2:
+            t0_ns = gpu_traces[0].samples[0].start_timestamp_ns
+            t1_ns = gpu_traces[-1].samples[-1].start_timestamp_ns
+            if t1_ns > t0_ns:
+                gpu_duration_s = (t1_ns - t0_ns) / 1e9
+        print(f"GPU: {total_gpu_samples} samples ({len(gpu_traces)} chunks)")
 
     if events_path:
         import events_pb2
@@ -702,10 +1052,12 @@ def main():
         print(f"Disk: {len(disk_trace.device_samples)} device samples, "
               f"{len(disk_trace.process_samples)} process samples")
 
+    _log("processing data")
+
     # Count panels: GPU gets a region timeline strip + a metric panel per metric group present
     n_gpu_panels = 0
     has_gpu_regions = False
-    if gpu_trace and len(gpu_trace.samples) > 1:
+    if gpu_trace and total_gpu_samples > 1:
         gpu_metric_set = set(gpu_trace.metric_names)
         if {"sm__cycles_active.avg", "sm__cycles_elapsed.avg"}.issubset(gpu_metric_set):
             n_gpu_panels += 1  # SM Utilization
@@ -874,10 +1226,19 @@ def main():
     # CPU/Disk rates: sample[1] (sample[0] is delta baseline)
     # Memory: sample[0] (absolute values, no delta)
     first_data_ns = []
-    if gpu_trace and len(gpu_trace.samples) > 1:
+    if gpu_trace and total_gpu_samples > 1:
         cupti_ref = gpu_trace.cupti_reference_ns
         steady_ref = gpu_trace.steady_clock_reference_ns
-        first_data_ns.append(gpu_to_steady(gpu_trace.samples[1].start_timestamp_ns, cupti_ref, steady_ref))
+        # The init artifact lives at sample[0] of the very first chunk;
+        # the first *real* sample is whichever sample is at global index 1.
+        # In practice the first chunk has thousands of samples, so this is
+        # always gpu_traces[0].samples[1]; we add a guard for the corner
+        # case where the first chunk had only the artifact in it.
+        if len(gpu_traces[0].samples) > 1:
+            first_real_ts = gpu_traces[0].samples[1].start_timestamp_ns
+        else:
+            first_real_ts = gpu_traces[1].samples[0].start_timestamp_ns
+        first_data_ns.append(gpu_to_steady(first_real_ts, cupti_ref, steady_ref))
     if sys_trace:
         if len(sys_trace.cpu_system_samples) > 0:
             first_data_ns.append(sys_trace.cpu_system_samples[0].timestamp_ns)
@@ -888,16 +1249,39 @@ def main():
             first_data_ns.append(disk_trace.device_samples[0].timestamp_ns)
     global_t0 = min(first_data_ns) if first_data_ns else 0
 
-    # Populate each pre-allocated panel by group (axes were created above
-    # by the layout block; gpu_axes / sys_axes / disk_axes / flush_axes are
-    # already correct slices of metric_axes).
+    # ----- Preprocessing (parallel) ---------------------------------------
+    # Each prepare_* task does proto → numpy + smoothing for one panel group
+    # and returns a plain dict. They run concurrently in a small thread pool
+    # (separate from _get_smooth_pool() to avoid nested-deadlock; the inner
+    # smoothing uses the big smooth pool). Matplotlib calls happen
+    # afterwards on the main thread.
+    prep_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="prep")
+    prep_futures = {}
+    if gpu_trace and n_gpu_panels > 0:
+        prep_futures["gpu"] = prep_pool.submit(
+            prepare_gpu_data, gpu_traces, global_t0, args.smooth_window_s)
+    if sys_trace and n_sys_panels > 0:
+        prep_futures["sys"] = prep_pool.submit(
+            prepare_system_data, sys_trace, global_t0, args.smooth_window_s)
+    if disk_trace and n_disk_panels > 0:
+        prep_futures["disk"] = prep_pool.submit(
+            prepare_disk_data, disk_trace, global_t0, args.smooth_window_s)
+    n_prep_tasks = len(prep_futures)
+    if n_prep_tasks:
+        _log(f"  submitted {n_prep_tasks} preprocess tasks on a 4-worker pool")
+    prepared = {k: f.result() for k, f in prep_futures.items()}
+    prep_pool.shutdown(wait=True)
+    if n_prep_tasks:
+        _log("  preprocess: all tasks done")
+
+    # ----- Plotting (sequential, main thread only) ------------------------
     panel_idx = 0
     if n_gpu_panels > 0:
-        panel_idx = build_gpu_panels(gpu_trace, metric_axes, panel_idx, global_t0)
+        panel_idx = build_gpu_panels(prepared.get("gpu"), metric_axes, panel_idx)
     if n_sys_panels > 0:
-        panel_idx = build_system_panels(sys_trace, metric_axes, panel_idx, global_t0)
+        panel_idx = build_system_panels(prepared.get("sys"), metric_axes, panel_idx)
     if n_disk_panels > 0:
-        panel_idx = build_disk_panels(disk_trace, metric_axes, panel_idx, global_t0)
+        panel_idx = build_disk_panels(prepared.get("disk"), metric_axes, panel_idx)
     if n_flush_panels > 0:
         panel_idx = build_flush_panels(flush_sources, metric_axes, panel_idx, global_t0)
 
@@ -973,37 +1357,43 @@ def main():
                     e.name,
                     int(gpu_to_steady(e.timestamp_ns, cupti_ref, steady_ref))))
 
+    def _fmt_dur(s):
+        """Adaptive duration formatter: ms for sub-second, seconds otherwise."""
+        if s < 1.0:
+            return f"{s * 1000:.1f} ms"
+        return f"{s:.3f} s"
+
     if timeline_regions:
         for ri, (name, start_ns, end_ns) in enumerate(timeline_regions):
-            r_start_ms = (start_ns - global_t0) / 1e6
-            r_end_ms = (end_ns - global_t0) / 1e6
-            dur_ms = r_end_ms - r_start_ms
+            r_start_s = (start_ns - global_t0) / 1e9
+            r_end_s = (end_ns - global_t0) / 1e9
+            dur_s = r_end_s - r_start_s
             color = REGION_COLORS[ri % len(REGION_COLORS)]
 
             # Shaded spans on ALL panels (kept very light so the line plots
             # remain dominant; full saturation lives on the timeline strip).
             for ax in all_metric_axes:
-                ax.axvspan(r_start_ms, r_end_ms, alpha=0.08, color=color)
-                ax.axvline(r_start_ms, color=color, lw=0.6, ls="--", alpha=0.4)
-                ax.axvline(r_end_ms, color=color, lw=0.6, ls="--", alpha=0.4)
+                ax.axvspan(r_start_s, r_end_s, alpha=0.08, color=color)
+                ax.axvline(r_start_s, color=color, lw=0.6, ls="--", alpha=0.4)
+                ax.axvline(r_end_s, color=color, lw=0.6, ls="--", alpha=0.4)
 
             # Timeline strip
             if timeline_ax is not None:
-                timeline_ax.barh(0, dur_ms, left=r_start_ms, height=1.0,
+                timeline_ax.barh(0, dur_s, left=r_start_s, height=1.0,
                                  color=color, alpha=1, edgecolor=color, linewidth=0.8)
 
             # Vertical name above the timeline strip
             top_ax = timeline_ax if timeline_ax is not None else all_metric_axes[0]
             top_ax.annotate(name,
-                            xy=(r_start_ms, 1.0), xycoords=("data", "axes fraction"),
+                            xy=(r_start_s, 1.0), xycoords=("data", "axes fraction"),
                             xytext=(0, 4), textcoords="offset points",
                             fontsize=7, color=color, fontweight="bold",
                             rotation=90, rotation_mode="anchor",
                             ha="left", va="center",
                             annotation_clip=False)
             # Vertical duration below the timeline strip
-            top_ax.annotate(f"{dur_ms:.1f} ms",
-                            xy=(r_start_ms, 0.0), xycoords=("data", "axes fraction"),
+            top_ax.annotate(_fmt_dur(dur_s),
+                            xy=(r_start_s, 0.0), xycoords=("data", "axes fraction"),
                             xytext=(0, -4), textcoords="offset points",
                             fontsize=7, color=color, fontweight="bold",
                             rotation=90, rotation_mode="anchor",
@@ -1012,8 +1402,8 @@ def main():
 
         print(f"Regions: {len(timeline_regions)}")
         for name, start_ns, end_ns in timeline_regions:
-            dur_ms = (end_ns - start_ns) / 1e6
-            print(f"  {name}: {dur_ms:.1f} ms")
+            dur_s = (end_ns - start_ns) / 1e9
+            print(f"  {name}: {_fmt_dur(dur_s)}")
 
     # Instantaneous events render on their own dedicated strip (event_ax).
     # Kept off the metric panels and the region strip so the two annotation
@@ -1025,18 +1415,18 @@ def main():
         wall_ref_ns = events_meta.wall_clock_epoch_ns if events_meta else 0
         steady_ref_ns = events_meta.steady_clock_reference_ns if events_meta else 0
         for ei, (name, ts) in enumerate(timeline_events):
-            t_ms = (ts - global_t0) / 1e6
+            t_s = (ts - global_t0) / 1e9
             color = EVENT_COLORS[ei % len(EVENT_COLORS)]
             # Vertical line spanning the event strip
-            event_ax.axvline(t_ms, color=color, lw=1.2, ls="-", alpha=0.85)
+            event_ax.axvline(t_s, color=color, lw=1.2, ls="-", alpha=0.85)
             # Marker at center of strip
-            event_ax.plot(t_ms, 0, marker="v", markersize=8,
+            event_ax.plot(t_s, 0, marker="v", markersize=8,
                           color=color, markeredgecolor="black", markeredgewidth=0.5)
             # Vertical name above the strip, left-aligned at the line so the
             # text reads upward from the strip top — same convention as the
             # region annotations.
             event_ax.annotate(name,
-                              xy=(t_ms, 1.0), xycoords=("data", "axes fraction"),
+                              xy=(t_s, 1.0), xycoords=("data", "axes fraction"),
                               xytext=(0, 4), textcoords="offset points",
                               fontsize=7, color=color, fontweight="bold",
                               rotation=90, rotation_mode="anchor",
@@ -1052,7 +1442,7 @@ def main():
                 delta_s = (ts - global_t0) / 1e9
                 delta_str = f"{delta_s:+.3f}s"
                 event_ax.annotate(f"{abs_str}  ({delta_str})",
-                                  xy=(t_ms, 0.0), xycoords=("data", "axes fraction"),
+                                  xy=(t_s, 0.0), xycoords=("data", "axes fraction"),
                                   xytext=(0, -4), textcoords="offset points",
                                   fontsize=7, color=color, fontweight="bold",
                                   rotation=90, rotation_mode="anchor",
@@ -1083,11 +1473,12 @@ def main():
 
     # X-axis label on every panel
     for ax in all_metric_axes:
-        ax.set_xlabel("Time (ms)")
+        ax.set_xlabel("Time (s)")
 
     # Compute duration (s) from the plotted data span and derive the end
-    # wall-clock by adding it to the manifest's start.
-    duration_s = global_xmax / 1000.0 if global_xmax > 0 else 0.0
+    # wall-clock by adding it to the manifest's start. global_xmax is now
+    # in seconds (axis units), so this is just a passthrough.
+    duration_s = global_xmax if global_xmax > 0 else 0.0
 
     def _fmt_duration_human(s):
         if s < 60:
@@ -1170,11 +1561,12 @@ def main():
         bytes_per_sample = 2 * 10 + n_metrics * 9 + 3
         est = gpu_trace.sampling_frequency_hz * bytes_per_sample
         meas = 0.0
-        if gpu_path:
-            dur = _trace_duration_s(gpu_trace)
-            if dur > 0:
-                meas = os.path.getsize(gpu_path) / dur
-        n_samp = max(0, len(gpu_trace.samples) - 1)
+        # GPU duration spans all chunks; precomputed at read time so we
+        # don't have to fall back to `_trace_duration_s` (which would look
+        # only at gpu_trace.samples = chunk 0, since merge was dropped).
+        if gpu_path and gpu_duration_s > 0:
+            meas = os.path.getsize(gpu_path) / gpu_duration_s
+        n_samp = max(0, total_gpu_samples - 1)
         footer_rows.append(("GPU", est, meas, n_samp))
         total_est += est
         total_meas += meas
@@ -1266,8 +1658,10 @@ def main():
             transform=fig.transFigure, color="#888888", lw=1.5,
             linestyle=(0, (5, 3)), clip_on=False))
 
+    _log("plotting")
     fig.savefig(args.output, dpi=150)
     print(f"Saved plot to {args.output}")
+    _log("done")
 
 
 if __name__ == "__main__":
