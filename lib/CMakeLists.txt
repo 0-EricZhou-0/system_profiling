@@ -33,6 +33,9 @@ add_library(cupti_profiler SHARED
     src/event_profiler.cpp
     # Session manifest writer
     src/session_metadata_writer.cpp
+    # Shared infrastructure
+    src/metric_catalog.cpp
+    src/process_tracking_probe.cpp
     # Orchestrator
     src/profiler_suite.cpp
     # Generated protobuf sources
