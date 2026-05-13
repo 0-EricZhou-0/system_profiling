@@ -16,11 +16,29 @@ Default total runtime: ~50 seconds. Override with `--duration-s`.
 
 import argparse
 import os
+import subprocess
+import sys
 import time
 
 import torch
 
 import cupti_profiler as cp
+
+
+# A self-contained child workload — pegs one CPU core in a tight Python
+# loop for `duration` seconds. Spawned mid-run to demonstrate
+# suite.add_tracked_process() picking up a new PID dynamically.
+_CHILD_SCRIPT = """
+import sys, time
+duration = float(sys.argv[1])
+end = time.monotonic() + duration
+x = 0.0
+while time.monotonic() < end:
+    # Busy-spin so the per-PID CPU% panel shows ~100% of one core.
+    for _ in range(100_000):
+        x += 1.0
+print(f"child: {x:.0f} iterations done", flush=True)
+"""
 
 
 # Sibling layout: examples/live_demo.py → ../configs/example.pbtxt
@@ -56,7 +74,8 @@ def _busy_vecadd(stream, A, B, C, vec_n: int, deadline: float):
     return iters
 
 
-def run_paced_workload(gpu_tracker: cp.EventTracker,
+def run_paced_workload(suite: cp.ProfilerSuite,
+                        gpu_tracker: cp.EventTracker,
                         host_tracker: cp.EventTracker,
                         device_index: int,
                         total_duration_s: float) -> None:
@@ -105,6 +124,14 @@ def run_paced_workload(gpu_tracker: cp.EventTracker,
 
     overall_t0 = time.monotonic()
 
+    # Mid-run PID demo: a child process is spawned partway through and
+    # registered via suite.add_tracked_process(). After a few seconds it
+    # is removed via suite.remove_tracked_process(); the live visualizer
+    # renders a removal marker on the series and stops appending rows.
+    child: subprocess.Popen | None = None
+    child_spawn_after_phase = "peak 4096"
+    child_remove_after_phase = "vecAdd (mem-bound)"
+
     for label, kind, N, share, idle_after in plan:
         phase_secs = compute_budget * (share / total_share) if share > 0 else 0.0
         deadline = time.monotonic() + phase_secs
@@ -135,6 +162,37 @@ def run_paced_workload(gpu_tracker: cp.EventTracker,
         if idle_after > 0:
             host_tracker.mark_event(f"{label} done; sleeping {idle_after:.1f}s")
             time.sleep(idle_after)
+
+        # Spawn the demo child after the "peak 4096" phase finishes.
+        # Its CPU% will start appearing on the per-PID panel one
+        # sample-tick after add_tracked_process() returns.
+        if label == child_spawn_after_phase and child is None:
+            child = subprocess.Popen(
+                [sys.executable, "-c", _CHILD_SCRIPT, "20.0"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            suite.add_tracked_process(child.pid, alias="demo_child")
+            host_tracker.mark_event(f"child PID {child.pid} joined")
+            print(f"  {time.monotonic() - overall_t0:6.1f}s  "
+                  f"[+] spawned child PID {child.pid}, registered with suite")
+
+        # Pull the rug out from under the child after the next phase
+        # finishes — the visualizer should render a removal marker at
+        # the PID's last sample and stop adding new rows.
+        if label == child_remove_after_phase and child is not None:
+            suite.remove_tracked_process(child.pid)
+            host_tracker.mark_event(f"child PID {child.pid} left")
+            print(f"  {time.monotonic() - overall_t0:6.1f}s  "
+                  f"[-] removed child PID {child.pid} from suite "
+                  f"(child still running in background)")
+
+    if child is not None:
+        # Don't leak the child past the end of the run.
+        try:
+            child.wait(timeout=30.0)
+        except subprocess.TimeoutExpired:
+            child.terminate()
+            child.wait()
 
     stream.synchronize()
     del A, B, C
@@ -168,6 +226,7 @@ def main() -> None:
 
     t0 = time.monotonic()
     run_paced_workload(
+        suite,
         suite.get_event_profiler().get_gpu_tracker(),
         suite.get_event_profiler().get_generic_tracker(),
         args.device,
