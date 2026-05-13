@@ -49,12 +49,15 @@ import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
+from bokeh.application import Application  # noqa: E402
+from bokeh.application.handlers.function import FunctionHandler  # noqa: E402
 from bokeh.embed import file_html  # noqa: E402
 from bokeh.layouts import column  # noqa: E402
 from bokeh.models import ColumnDataSource, HoverTool, Span  # noqa: E402
 from bokeh.palettes import Category10  # noqa: E402
 from bokeh.plotting import figure  # noqa: E402
 from bokeh.resources import INLINE  # noqa: E402
+from bokeh.server.server import Server  # noqa: E402
 
 
 _T0 = time.perf_counter()
@@ -363,16 +366,22 @@ def main() -> int:
     parser.add_argument("--no-browser", action="store_true",
                         help="Don't auto-open a browser tab.")
     parser.add_argument("--live", action="store_true",
-                        help="(coming in commit 10) Stream new samples "
-                             "as the suite writes them.")
+                        help="Stream new samples as the suite writes them.")
+    parser.add_argument("--poll-interval-ms", type=int, default=1000,
+                        help="Live mode: tail-poll interval in ms (default: 1000)")
+    parser.add_argument("--live-bootstrap-timeout-s", type=float, default=30.0,
+                        help="Live mode: how long to wait for session_metadata.pb "
+                             "to appear (default: 30.0)")
+    parser.add_argument("--allow-websocket-origin", action="append", default=None,
+                        help="Live mode: extra origin allowed for the Bokeh "
+                             "WebSocket. Repeatable. Default: '*' (any).")
     args = parser.parse_args()
 
-    if args.live:
-        print("--live mode wiring lands in commit 10 — coming up next.",
-              file=sys.stderr)
-        return 2
-
     metadata_path = Path(args.metadata).resolve()
+    if args.live:
+        return _run_live(args, metadata_path)
+
+
     _log(f"loading session metadata from {metadata_path}")
     meta = _load_session_metadata(metadata_path)
 
@@ -400,6 +409,197 @@ def main() -> int:
     if not args.no_serve:
         _serve(out_path, args.host, args.port, not args.no_browser)
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Live mode
+# ---------------------------------------------------------------------------
+
+def _run_live(args, metadata_path: Path) -> int:
+    """Spin up a Bokeh server that tails the .pb files and streams
+    new samples into the document on every periodic callback."""
+    import live_tail  # local import — only needed in --live mode
+
+    _log(f"--live  waiting for {metadata_path} (timeout {args.live_bootstrap_timeout_s}s)")
+    try:
+        meta = live_tail.wait_for_metadata(
+            metadata_path, args.live_bootstrap_timeout_s, _log)
+    except TimeoutError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    if args.catalog:
+        catalog = metric_catalog.load_catalog(args.catalog)
+    else:
+        catalog = metric_catalog.load_catalog_from_session_metadata(meta)
+    _log(f"catalog: {len(catalog.metrics)} descriptors")
+
+    layout_path = Path(args.panel_layout) if args.panel_layout \
+        else _HERE.parent / "configs" / "visualizer_panels.pbtxt"
+    layout = metric_layout.load_panel_layout(layout_path)
+    _log(f"layout: {len(layout.panels)} panels")
+
+    def make_doc(doc):
+        """One coordinator + one document per browser session."""
+        # Each browser session gets its own coordinator + projector
+        # state. Multiple browser tabs see independent live updates
+        # but each tails the same files.
+        coordinator = live_tail.LiveCoordinator(
+            catalog=catalog, layout=layout,
+            metadata_path=metadata_path, meta=meta,
+            log=_log,
+            series_factory=_live_series_factory,
+            panel_factory=None,  # built inline below
+            t0_ns=None,
+        )
+
+        # Initial paint — read everything currently on disk.
+        coordinator.tick()
+
+        # If we still have no samples, that's OK; an empty layout will
+        # populate as the workload runs. Build panels eagerly.
+        catalog_index = coordinator.catalog_index
+        proj = coordinator.projector.project()
+        for (fqn, _) in proj.keys():
+            if fqn not in catalog_index:
+                catalog_index[fqn] = metric_layout.synthesize_descriptor(fqn)
+
+        series_keys = list(proj.keys())
+        figs = []
+        shared_x = None
+        for panel in layout.panels:
+            series = metric_layout.resolve_panel_series(panel, catalog_index, series_keys)
+            if not series and not _panel_should_eagerly_exist(panel, layout):
+                continue
+            fig, cds_by_key, scale_fn = _build_live_panel(
+                panel, series, coordinator.projector, proj,
+                coordinator.t0_ns or 0, x_range=shared_x,
+            )
+            if shared_x is None:
+                shared_x = fig.x_range
+            entry = live_tail._PanelEntry(
+                panel=panel, figure=fig, scale_fn=scale_fn,
+                palette_idx=len(series),
+            )
+            coordinator.register_panel(entry)
+            for series_key, cds in cds_by_key.items():
+                coordinator.register_series(series_key, cds)
+            figs.append(fig)
+
+        doc.add_root(column(figs, sizing_mode="stretch_width"))
+        doc.title = f"Live profile — {meta.hostname}"
+        doc.add_periodic_callback(coordinator.tick, args.poll_interval_ms)
+
+    origins = args.allow_websocket_origin or ["*"]
+    app = Application(FunctionHandler(make_doc))
+    server = Server({"/": app},
+                    address=args.host, port=args.port,
+                    allow_websocket_origin=origins)
+    server.start()
+    url = f"http://{args.host if args.host != '0.0.0.0' else 'localhost'}:{args.port}/"
+    _log(f"live server at {url}  (poll every {args.poll_interval_ms} ms)")
+    _log("Ctrl-C to stop")
+    try:
+        server.io_loop.start()
+    except KeyboardInterrupt:
+        _log("stopping")
+    return 0
+
+
+def _panel_should_eagerly_exist(panel, layout) -> bool:
+    """Whether to build a panel that currently has no matching series.
+    Eagerly build SYSTEM/DEVICE/GPU panels (those scopes don't grow
+    mid-run), but defer PROCESS panels until at least one PID joins."""
+    return panel.scope != mc_pb.SCOPE_PROCESS
+
+
+def _build_live_panel(panel, series_list, projector, projection, t0_ns,
+                       x_range=None):
+    """Like _build_panel but also returns the scale_fn so the
+    coordinator can apply it consistently to streamed deltas."""
+    unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
+        else (series_list[0].descriptor.unit if series_list else mc_pb.UNIT_COUNT)
+    peak_hint = _resolve_panel_peak(
+        panel,
+        series_list[0].descriptor if series_list else metric_catalog.MetricDescriptor(),
+        projector,
+    )
+    scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
+
+    fig_kwargs = dict(
+        title=panel.title, x_axis_label="time (s)", y_axis_label=ylabel,
+        width=1200, height=240,
+        tools="xpan,xwheel_zoom,box_zoom,reset,save",
+        active_drag="xpan", active_scroll="xwheel_zoom",
+        output_backend="webgl",
+    )
+    if x_range is not None:
+        fig_kwargs["x_range"] = x_range
+    fig = figure(**fig_kwargs)
+
+    cds_by_key: dict[tuple, ColumnDataSource] = {}
+    for i, series in enumerate(series_list):
+        color = _PALETTE[i % len(_PALETTE)]
+        ts_ns, vals = projection[(series.fqn, series.scope_key)]
+        time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
+        cds = ColumnDataSource(data=dict(
+            x=list(time_s), y=list(scale_fn(vals.astype(np.float64))),
+        ))
+        cds_by_key[(series.fqn, series.scope_key)] = cds
+        fig.line("x", "y", source=cds, color=color, line_width=1.2,
+                 legend_label=_series_label(series, projector))
+
+    if peak_hint is not None and peak_hint > 0:
+        fig.add_layout(Span(location=scale_fn(peak_hint),
+                            dimension="width", line_color="red",
+                            line_dash="dashed", line_alpha=0.6,
+                            line_width=1.5))
+
+    if panel.y_min != 0.0:
+        fig.y_range.start = panel.y_min
+    if panel.y_max != 0.0:
+        fig.y_range.end = panel.y_max
+
+    fig.add_tools(HoverTool(
+        tooltips=[("t", "@x{0.000}s"), ("y", "@y{0.000}")],
+        mode="vline",
+    ))
+    if fig.legend:
+        fig.legend.click_policy = "hide"
+        fig.legend.location = "top_right"
+        fig.legend.label_text_font_size = "8pt"
+
+    return fig, cds_by_key, scale_fn
+
+
+def _live_series_factory(entry, fqn, scope_key, color, ts_s, vals,
+                          descriptor, projector) -> ColumnDataSource:
+    """Called by LiveCoordinator when a new (Scope, key) joins
+    mid-run. Allocates a CDS, attaches it to the panel's figure, and
+    returns the CDS so the coordinator can stream subsequent rows in."""
+    cds = ColumnDataSource(data=dict(x=list(ts_s), y=list(vals)))
+    # Bokeh re-evaluates the legend after add_layout; using
+    # legend_label directly on .line attaches it cleanly.
+    label = f"{fqn}  [scope_key={scope_key}]"
+    if descriptor.scope == mc_pb.SCOPE_PROCESS:
+        tp = projector.tracked_processes.get(int(scope_key))
+        if tp and tp.alias:
+            label = f"{fqn}  [{tp.alias} (PID {scope_key})]"
+        else:
+            label = f"{fqn}  [PID {scope_key}]"
+    elif descriptor.scope == mc_pb.SCOPE_GPU:
+        info = projector.gpu_info.get(int(scope_key))
+        if info and info.device_name:
+            label = f"{fqn}  [GPU {scope_key}: {info.device_name}]"
+        else:
+            label = f"{fqn}  [GPU {scope_key}]"
+    elif descriptor.scope == mc_pb.SCOPE_DEVICE:
+        label = f"{fqn}  [{scope_key}]"
+    elif descriptor.scope == mc_pb.SCOPE_SYSTEM:
+        label = fqn
+    entry.figure.line("x", "y", source=cds, color=color, line_width=1.2,
+                       legend_label=label)
+    return cds
 
 
 if __name__ == "__main__":
