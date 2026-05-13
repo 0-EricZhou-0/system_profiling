@@ -57,8 +57,6 @@ DiskProfiler::DiskProfiler() : m_impl(std::make_unique<Impl>()) {}
 DiskProfiler::~DiskProfiler() {
     if (m_impl && m_impl->running) Stop();
 }
-DiskProfiler::DiskProfiler(DiskProfiler&&) noexcept = default;
-DiskProfiler& DiskProfiler::operator=(DiskProfiler&&) noexcept = default;
 
 void DiskProfiler::Configure(const DiskProfilerConfig& config) {
     m_impl->config = config;
@@ -68,6 +66,14 @@ void DiskProfiler::Configure(const DiskProfilerConfig& config) {
     m_impl->hostname = buf;
     long nproc = sysconf(_SC_NPROCESSORS_ONLN);
     m_impl->hostCpuCount = (nproc > 0) ? static_cast<uint32_t>(nproc) : 0;
+
+    // Seed the ProcessTrackingProbe with the configured PIDs.
+    std::vector<ProcessTrackingProbe::ProcessEntry> seed;
+    seed.reserve(config.Processes.size());
+    for (const auto& p : config.Processes) {
+        seed.push_back({p.pid, p.alias, /*pending_removal=*/false});
+    }
+    SetInitialProcesses(std::move(seed));
 
     std::cout << "[Disk] Tracking " << config.devices.size() << " device(s): ";
     for (const auto& d : config.devices) std::cout << d << " ";
@@ -97,22 +103,11 @@ void DiskProfiler::Start() {
     m_impl->wallClockEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    // Initial snapshots
+    // Initial disk snapshot. Per-PID I/O baselines are seeded lazily
+    // on the first iteration each PID appears in SnapshotProcesses() —
+    // that way mid-run AddTrackedProcess() works.
     auto initDisk = internal::ReadDiskStats(m_impl->config.devices);
     for (auto& ds : initDisk) m_impl->prevDisk[ds.device] = ds;
-    for (const auto& proc : m_impl->config.Processes) {
-        uint32_t pid = proc.pid;
-        auto io = internal::ReadPIDIO(pid);
-        if (!io.accessible) {
-            std::cerr << "[Disk] Warning: cannot read /proc/" << pid << "/io (permission denied).\n"
-                      << "  Per-process disk IO will be skipped for this PID.\n"
-                      << "  To fix, either:\n"
-                      << "    sudo setcap cap_sys_ptrace=ep <your_binary>\n"
-                      << "    sudo sysctl -w kernel.yama.ptrace_scope=0\n";
-            m_impl->warnedPIDs.insert(pid);
-        }
-        m_impl->prevPIDIO[pid] = io;
-    }
 
     m_impl->stopSample = false;
     m_impl->sampleThread = std::thread([this]() {
@@ -151,13 +146,24 @@ void DiskProfiler::Start() {
                 impl.batch.deviceTicks.push_back(std::move(t));
             }
 
-            // Per-process I/O
-            for (const auto& proc : impl.config.Processes) {
-                uint32_t pid = proc.pid;
+            // Per-process I/O — the tracked set is whatever
+            // ProcessTrackingProbe holds right now. Entries with
+            // pending_removal=true are skipped (they're awaiting the
+            // next flush's removal marker).
+            auto snapshot = this->SnapshotProcesses();
+            std::unordered_set<uint32_t> snapshotPids;
+            snapshotPids.reserve(snapshot.size());
+
+            for (const auto& entry : snapshot) {
+                uint32_t pid = entry.pid;
+                snapshotPids.insert(pid);
+                if (entry.pending_removal) continue;
+
                 auto curIO = internal::ReadPIDIO(pid);
                 if (!curIO.accessible) {
                     if (impl.warnedPIDs.find(pid) == impl.warnedPIDs.end()) {
-                        std::cerr << "[Disk] Warning: cannot read /proc/" << pid << "/io (permission denied). "
+                        std::cerr << "[Disk] Warning: cannot read /proc/" << pid
+                                  << "/io (permission denied). "
                                   << "Skipping per-process disk IO for this PID.\n";
                         impl.warnedPIDs.insert(pid);
                     }
@@ -166,6 +172,7 @@ void DiskProfiler::Start() {
 
                 auto it = impl.prevPIDIO.find(pid);
                 if (it == impl.prevPIDIO.end()) {
+                    // Mid-run add — seed baseline, skip this tick.
                     impl.prevPIDIO[pid] = curIO;
                     continue;
                 }
@@ -180,6 +187,15 @@ void DiskProfiler::Start() {
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.processTicks.push_back(std::move(t));
+            }
+
+            // Drop baselines for PIDs no longer tracked.
+            for (auto it = impl.prevPIDIO.begin(); it != impl.prevPIDIO.end(); ) {
+                if (snapshotPids.find(it->first) == snapshotPids.end()) {
+                    it = impl.prevPIDIO.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
     });
@@ -196,7 +212,7 @@ void DiskProfiler::Start() {
                                            m_impl->config.samplingFrequencyHz,
                                            m_impl->hostCpuCount,
                                            std::cref(m_impl->config.devices),
-                                           std::cref(m_impl->config.Processes),
+                                           std::ref(static_cast<ProcessTrackingProbe&>(*this)),
                                            std::ref(m_impl->stopFlush),
                                            m_impl->config.flushIntervalMs,
                                            m_impl->steadyClockRefNs,
@@ -233,13 +249,14 @@ void DiskProfiler::Stop() {
             drained.processTicks.swap(m_impl->batch.processTicks);
         }
 
+        auto processSnapshot = SnapshotProcesses();
         if (!drained.deviceTicks.empty() || !drained.processTicks.empty() ||
             m_impl->flushStatsPending.valid) {
             DiskMetricsTrace trace = internal::BuildDiskTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz,
                 m_impl->hostCpuCount,
                 m_impl->steadyClockRefNs, m_impl->wallClockEpochNs,
-                m_impl->config.devices, m_impl->config.Processes, drained);
+                m_impl->config.devices, processSnapshot, drained);
             if (m_impl->flushStatsPending.valid) {
                 auto* fs = trace.add_flush_stats();
                 fs->set_flush_byte_size(m_impl->flushStatsPending.bytesWritten);
@@ -249,6 +266,7 @@ void DiskProfiler::Stop() {
 
             internal::WriteDelimitedDiskTraceSized(trace, m_impl->outFile);
             m_impl->outFile.flush();
+            CommitPendingRemovals();
         }
         m_impl->outFile.close();
         std::cout << "[Disk] Wrote trace to " << m_impl->config.outputFile << "\n";

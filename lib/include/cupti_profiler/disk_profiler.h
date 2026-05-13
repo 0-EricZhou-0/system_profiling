@@ -1,6 +1,7 @@
 // Disk Profiler — per-device throughput/queue depth + per-process I/O.
 #pragma once
 
+#include <cupti_profiler/process_tracking_probe.h>
 #include <cupti_profiler/tracked_process.h>
 
 #include <cstdint>
@@ -34,12 +35,13 @@ struct CUPTI_PROFILER_API DiskProfilerConfig {
     std::string outputFile;
 };
 
-class CUPTI_PROFILER_API DiskProfiler {
+class CUPTI_PROFILER_API DiskProfiler : public ProcessTrackingProbe {
 public:
     DiskProfiler();
     ~DiskProfiler();
-    DiskProfiler(DiskProfiler&&) noexcept;
-    DiskProfiler& operator=(DiskProfiler&&) noexcept;
+    // Non-movable (see SystemProfiler — same shared_mutex constraint).
+    DiskProfiler(DiskProfiler&&) = delete;
+    DiskProfiler& operator=(DiskProfiler&&) = delete;
 
     void Configure(const DiskProfilerConfig& config);
     void Start();

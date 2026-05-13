@@ -1,7 +1,12 @@
 // Internal: Flush thread for the disk probe.
+//
+// Each flush snapshots ProcessTrackingProbe — pending_removal entries
+// are emitted with TrackedProcessV2.removed=true, then dropped via
+// CommitPendingRemovals().
 #pragma once
 
 #include <cupti_profiler/disk_profiler.h>
+#include <cupti_profiler/process_tracking_probe.h>
 
 #include <atomic>
 #include <cstdint>
@@ -44,14 +49,15 @@ struct DiskPendingFlushStats {
     bool     valid        = false;
 };
 
-DiskMetricsTrace BuildDiskTrace(const std::string& hostname,
-                                uint64_t samplingFrequencyHz,
-                                uint32_t hostCpuCount,
-                                uint64_t steadyClockRefNs,
-                                uint64_t wallClockEpochNs,
-                                const std::vector<std::string>& devices,
-                                const std::vector<TrackedProcess>& processes,
-                                const DiskSampleBatch& drained);
+DiskMetricsTrace BuildDiskTrace(
+    const std::string& hostname,
+    uint64_t samplingFrequencyHz,
+    uint32_t hostCpuCount,
+    uint64_t steadyClockRefNs,
+    uint64_t wallClockEpochNs,
+    const std::vector<std::string>& devices,
+    const std::vector<ProcessTrackingProbe::ProcessEntry>& processes,
+    const DiskSampleBatch& drained);
 
 size_t WriteDelimitedDiskTraceSized(const DiskMetricsTrace& trace,
                                     std::ofstream& out);
@@ -64,7 +70,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
                          uint64_t samplingFrequencyHz,
                          uint32_t hostCpuCount,
                          const std::vector<std::string>& devices,
-                         const std::vector<TrackedProcess>& Processes,
+                         ProcessTrackingProbe& probe,
                          std::atomic<bool>& stop,
                          uint64_t flushIntervalMs,
                          uint64_t steadyClockRefNs,

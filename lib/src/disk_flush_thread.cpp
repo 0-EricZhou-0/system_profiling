@@ -71,14 +71,15 @@ void AppendProcessSample(DiskMetricsTrace& trace, const DiskProcessTick& t) {
 
 } // namespace
 
-DiskMetricsTrace BuildDiskTrace(const std::string& hostname,
-                                uint64_t samplingFrequencyHz,
-                                uint32_t hostCpuCount,
-                                uint64_t steadyClockRefNs,
-                                uint64_t wallClockEpochNs,
-                                const std::vector<std::string>& devices,
-                                const std::vector<TrackedProcess>& processes,
-                                const DiskSampleBatch& drained)
+DiskMetricsTrace BuildDiskTrace(
+    const std::string& hostname,
+    uint64_t samplingFrequencyHz,
+    uint32_t hostCpuCount,
+    uint64_t steadyClockRefNs,
+    uint64_t wallClockEpochNs,
+    const std::vector<std::string>& devices,
+    const std::vector<ProcessTrackingProbe::ProcessEntry>& processes,
+    const DiskSampleBatch& drained)
 {
     DiskMetricsTrace trace;
     PopulateHeader(trace, hostname, samplingFrequencyHz, hostCpuCount,
@@ -89,6 +90,7 @@ DiskMetricsTrace BuildDiskTrace(const std::string& hostname,
         auto* tp = trace.add_tracked_processes();
         tp->set_pid(p.pid);
         tp->set_alias(p.alias);
+        tp->set_removed(p.pending_removal);
     }
     for (const auto& t : drained.deviceTicks)  AppendDeviceSample(trace, t);
     for (const auto& t : drained.processTicks) AppendProcessSample(trace, t);
@@ -118,7 +120,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
                          uint64_t samplingFrequencyHz,
                          uint32_t hostCpuCount,
                          const std::vector<std::string>& devices,
-                         const std::vector<TrackedProcess>& Processes,
+                         ProcessTrackingProbe& probe,
                          std::atomic<bool>& stop,
                          uint64_t flushIntervalMs,
                          uint64_t steadyClockRefNs,
@@ -139,12 +141,13 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
             drained.processTicks.swap(batch.processTicks);
         }
 
+        auto processSnapshot = probe.SnapshotProcesses();
         if (drained.deviceTicks.empty() && drained.processTicks.empty()) continue;
 
         DiskMetricsTrace trace = BuildDiskTrace(
             hostname, samplingFrequencyHz, hostCpuCount,
             steadyClockRefNs, wallClockEpochNs,
-            devices, Processes, drained);
+            devices, processSnapshot, drained);
 
         {
             std::lock_guard<std::mutex> lock(pendingMutex);
@@ -162,6 +165,8 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
             bytes = WriteDelimitedDiskTraceSized(trace, outFile);
             outFile.flush();
         }
+        probe.CommitPendingRemovals();
+
         uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         uint64_t intervalNs = (prevFlushNs == 0) ? 0 : (nowNs - prevFlushNs);
