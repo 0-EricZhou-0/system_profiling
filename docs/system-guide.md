@@ -900,6 +900,13 @@ def load_trace(path):
 
 ## GPU metrics reference
 
+> [!TIP]
+> The full type system (Counter / Ratio / Throughput, every legal rollup
+> and submetric suffix, and the proposed extension that lets the same
+> abstraction cover CPU/memory/disk for a generic post-processing scheme)
+> is documented in [`metric-model.md`](metric-model.md). This section is
+> the operational view — what to put in the `metrics:` list.
+
 ### Metric naming and types
 
 CUPTI PM Sampling inherits the PerfWorks metric model. A fully-qualified metric name has the form:
