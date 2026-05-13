@@ -101,10 +101,20 @@ class TraceTail:
         return os.path.exists(self.path)
 
     def read_new_messages(self) -> list:
-        """Read bytes from `self.offset` to EOF, append `self._pending`,
-        parse as many complete delimited messages as fit, and advance the
-        offset past them. Any leftover (partial) trailing bytes are kept
-        in `_pending` for next time.
+        """Read bytes from `self.offset` to EOF, prepend any retained
+        partial-trailing bytes from `self._pending`, parse as many complete
+        delimited messages as fit, and remember the unparsed tail for next
+        time.
+
+        Invariants:
+        * `self.offset` is the file position we've already read up to —
+          i.e. `f.tell()` after the last successful `read()`. It only
+          advances by the number of bytes pulled off disk.
+        * `self._pending` is the unparsed *suffix* of the last `buf` we
+          examined. Those bytes come from a contiguous tail at the
+          high-address end of the read window, so prepending them to the
+          next `chunk` reconstructs the original byte sequence with no
+          gaps and no overlaps.
         """
         if not os.path.exists(self.path):
             return []
@@ -118,13 +128,14 @@ class TraceTail:
         with open(self.path, "rb") as f:
             f.seek(self.offset)
             chunk = f.read()
+        # Bookkeeping: file is now positioned at offset+len(chunk). Update
+        # immediately — `_pending` tracks unparsed bytes within the window
+        # we've already read off disk, so the offset must reflect everything
+        # we just pulled regardless of how much the parser consumes.
+        self.offset += len(chunk)
 
         buf = self._pending + chunk
         msgs, consumed = parse_delimited_strict(buf, self.proto_class)
-        # Advance the file offset by however much of `chunk` was consumed
-        # (anything before that came from `_pending`, which we already
-        # accounted for when it was added).
-        self.offset += len(chunk) - (len(buf) - consumed)
         self._pending = buf[consumed:]
         return msgs
 
@@ -581,6 +592,23 @@ class LiveState:
         # Most recent projection result, kept so tick() can also push
         # axis-bound updates if we ever wire those up.
         self.last_meta: dict[str, dict] = {}
+        # ---- Numpy caches (populated incrementally) -----------------
+        # Each new proto sample is extracted to numpy exactly once, when
+        # it's first seen. Subsequent ticks read directly from these
+        # arrays, so projection cost is O(numpy vectorize over total)
+        # rather than O(walk-every-proto-message) per tick. Without this
+        # 30 s of 10 kHz GPU at 1 Hz polling = ~5M Python attribute
+        # accesses per tick — the dominant lag.
+        self._gpu_ts_ns: np.ndarray = np.zeros(0, dtype=np.float64)
+        self._gpu_vals: np.ndarray | None = None    # (N, n_metrics)
+        self._gpu_metric_idx: dict[str, int] = {}
+        self._sys_cpu_total_cache: dict[str, np.ndarray] = {}    # cpu_system_samples
+        self._sys_cpu_proc_cache: dict[int, dict[str, np.ndarray]] = {}  # by pid
+        self._sys_mem_total_cache: dict[str, np.ndarray] = {}
+        self._sys_mem_proc_cache: dict[int, dict[str, np.ndarray]] = {}
+        self._sys_total_bytes: int = 0
+        self._disk_dev_cache: dict[str, dict[str, np.ndarray]] = {}    # by device
+        self._disk_proc_cache: dict[int, dict[str, np.ndarray]] = {}    # by pid
 
     # -- one-shot setup ----------------------------------------------------
 
@@ -658,10 +686,17 @@ class LiveState:
                     self.gpu_trace = new[0].__class__()
                     self.gpu_trace.CopyFrom(new[0])
                     self.gpu_trace.ClearField("samples")
+                # Extract just the new samples to numpy (one-time cost
+                # per sample), then append to gpu_trace.samples so any
+                # legacy code path that still walks the proto works.
+                self._extend_gpu_cache(new)
                 for t in new:
                     self.gpu_trace.samples.extend(t.samples)
-                    if len(t.regions):    # only the final flush carries them
-                        self.gpu_trace.regions.extend(t.regions)
+                # GPU regions used to live on GpuMetricsTrace.regions and
+                # were resolved only at Stop(); they now live in events.pb
+                # via EventBuffer (TIME_DOMAIN_GPU) and stream periodically
+                # like everything else, so there's nothing GPU-specific to
+                # do here.
 
         if self.sys_tail is not None:
             new = self.sys_tail.read_new_messages()
@@ -674,6 +709,7 @@ class LiveState:
                     self.sys_trace.ClearField("cpu_process_samples")
                     self.sys_trace.ClearField("memory_system_samples")
                     self.sys_trace.ClearField("memory_process_samples")
+                self._extend_sys_cache(new)
                 for t in new:
                     self.sys_trace.cpu_system_samples.extend(t.cpu_system_samples)
                     self.sys_trace.cpu_process_samples.extend(t.cpu_process_samples)
@@ -689,6 +725,7 @@ class LiveState:
                     self.disk_trace.CopyFrom(new[0])
                     self.disk_trace.ClearField("device_samples")
                     self.disk_trace.ClearField("process_samples")
+                self._extend_disk_cache(new)
                 for t in new:
                     self.disk_trace.device_samples.extend(t.device_samples)
                     self.disk_trace.process_samples.extend(t.process_samples)
@@ -715,20 +752,395 @@ class LiveState:
 
         return changed
 
+    # -- numpy-cache extension helpers ------------------------------------
+
+    def _extend_gpu_cache(self, new_msgs):
+        """Walk each new GPU message's samples once, extracting timestamps
+        and the per-metric values matrix into numpy. Skips the first ever
+        sample (CUPTI init artifact) the first time it sees one — same
+        rule visualize_all applies via `samples[1:]`."""
+        new_samples = []
+        for t in new_msgs:
+            new_samples.extend(t.samples)
+        # Drop the init artifact once. _gpu_metric_idx being empty is the
+        # signal that no batch has been ingested yet, so we're seeing the
+        # very first sample of the run.
+        if not self._gpu_metric_idx and new_samples:
+            metric_names = list(self.gpu_trace.metric_names)
+            n_metrics = len(metric_names)
+            self._gpu_metric_idx = {n: i for i, n in enumerate(metric_names)}
+            self._gpu_vals = np.zeros((0, n_metrics), dtype=np.float64)
+            new_samples = new_samples[1:]
+        if not new_samples:
+            return
+        n_new = len(new_samples)
+        n_metrics = self._gpu_vals.shape[1]
+        new_ts = np.fromiter((s.start_timestamp_ns for s in new_samples),
+                              dtype=np.float64, count=n_new)
+        # One Python loop over new_samples (small per tick), then bulk
+        # numpy reshape — same content as the old per-tick full-trace loop.
+        flat = np.empty(n_new * n_metrics, dtype=np.float64)
+        for i, s in enumerate(new_samples):
+            flat[i * n_metrics:(i + 1) * n_metrics] = s.values
+        new_vals = flat.reshape(n_new, n_metrics)
+        self._gpu_ts_ns = np.concatenate([self._gpu_ts_ns, new_ts])
+        self._gpu_vals = np.vstack([self._gpu_vals, new_vals])
+
+    def _extend_sys_cache(self, new_msgs):
+        """Extract CPU + memory samples (system-wide and per-PID) from the
+        new SystemMetricsTrace messages into numpy arrays."""
+        for t in new_msgs:
+            if t.cpu_system_samples:
+                self._append_cols(self._sys_cpu_total_cache,
+                    {"ts": [x.timestamp_ns for x in t.cpu_system_samples],
+                     "user": [x.user_pct for x in t.cpu_system_samples],
+                     "sys":  [x.system_pct for x in t.cpu_system_samples],
+                     "iow":  [x.iowait_pct for x in t.cpu_system_samples],
+                     "total":[x.total_utilization_pct for x in t.cpu_system_samples]})
+            if t.cpu_process_samples:
+                # Group by pid before append so each PID's cache is one column set.
+                by_pid: dict[int, list] = {}
+                for s in t.cpu_process_samples:
+                    by_pid.setdefault(s.pid, []).append(s)
+                for pid, samps in by_pid.items():
+                    cache = self._sys_cpu_proc_cache.setdefault(pid, {})
+                    self._append_cols(cache,
+                        {"ts":   [x.timestamp_ns for x in samps],
+                         "user": [x.user_pct    for x in samps],
+                         "sys":  [x.system_pct  for x in samps]})
+            if t.memory_system_samples:
+                if not self._sys_total_bytes and t.memory_system_samples[0].total_bytes:
+                    self._sys_total_bytes = t.memory_system_samples[0].total_bytes
+                self._append_cols(self._sys_mem_total_cache,
+                    {"ts":      [x.timestamp_ns   for x in t.memory_system_samples],
+                     "used":    [x.used_bytes     for x in t.memory_system_samples],
+                     "buffers": [x.buffers_bytes  for x in t.memory_system_samples],
+                     "cached":  [x.cached_bytes   for x in t.memory_system_samples]})
+            if t.memory_process_samples:
+                by_pid_mem: dict[int, list] = {}
+                for s in t.memory_process_samples:
+                    by_pid_mem.setdefault(s.pid, []).append(s)
+                for pid, samps in by_pid_mem.items():
+                    cache = self._sys_mem_proc_cache.setdefault(pid, {})
+                    self._append_cols(cache,
+                        {"ts":  [x.timestamp_ns for x in samps],
+                         "rss": [x.rss_bytes    for x in samps]})
+
+    def _extend_disk_cache(self, new_msgs):
+        """Extract per-device + per-PID disk samples into numpy arrays."""
+        for t in new_msgs:
+            if t.device_samples:
+                by_dev: dict[str, list] = {}
+                for s in t.device_samples:
+                    by_dev.setdefault(s.device_name, []).append(s)
+                for dev, samps in by_dev.items():
+                    cache = self._disk_dev_cache.setdefault(dev, {})
+                    self._append_cols(cache,
+                        {"ts":  [x.timestamp_ns        for x in samps],
+                         "rd":  [x.read_bytes_per_sec  for x in samps],
+                         "wr":  [x.write_bytes_per_sec for x in samps],
+                         "rdq": [x.read_queue_depth    for x in samps],
+                         "wrq": [x.write_queue_depth   for x in samps]})
+            if t.process_samples:
+                by_pid: dict[int, list] = {}
+                for s in t.process_samples:
+                    by_pid.setdefault(s.pid, []).append(s)
+                for pid, samps in by_pid.items():
+                    cache = self._disk_proc_cache.setdefault(pid, {})
+                    self._append_cols(cache,
+                        {"ts": [x.timestamp_ns        for x in samps],
+                         "rd": [x.read_bytes_per_sec  for x in samps],
+                         "wr": [x.write_bytes_per_sec for x in samps]})
+
+    @staticmethod
+    def _append_cols(cache: dict[str, np.ndarray], new: dict[str, list]) -> None:
+        for k, vals in new.items():
+            arr = np.asarray(vals, dtype=np.float64)
+            if k in cache:
+                cache[k] = np.concatenate([cache[k], arr])
+            else:
+                cache[k] = arr
+
+    # -- projection from the numpy caches ---------------------------------
+
     def project_all(self) -> dict[str, Any]:
-        """Re-project every panel from the current accumulated traces."""
-        gpu = project_gpu(self.gpu_trace, self.t0)
-        sysm = project_system(self.sys_trace, self.t0)
-        diskm = project_disk(self.disk_trace, self.t0)
-        annot = project_events(self.events, self.gpu_trace, self.t0,
-                                self.region_colors, self.event_colors)
-        merged_data = {**gpu["data"], **sysm["data"],
-                        **diskm["data"], **annot["data"]}
-        merged_meta = {"gpu":  gpu["meta"],
-                        "sys":  sysm["meta"],
-                        "disk": diskm["meta"]}
-        self.last_meta = merged_meta
-        return {"data": merged_data, "meta": merged_meta}
+        """Re-project every panel from the live numpy caches.
+
+        Reads only from cached arrays (no per-tick proto walks), so the
+        per-tick cost is O(numpy ops over total samples) rather than
+        O(walk every proto sample). On long live runs this is ~50-100x
+        faster than the proto-walking path used by the static loader.
+        """
+        return {"data": {**self._project_gpu_cached(),
+                          **self._project_sys_cached(),
+                          **self._project_disk_cached(),
+                          **self._project_events_cached()},
+                 "meta": {"gpu":  self._gpu_meta(),
+                          "sys":  self._sys_meta(),
+                          "disk": self._disk_meta()}}
+
+    # ---- GPU --------------------------------------------------------------
+
+    def _gpu_meta(self) -> dict:
+        meta: dict = {"device_name": "", "chip_name": "",
+                       "peak_dram_gibps": None,
+                       "peak_pcie_bidi_gibps": None,
+                       "peak_nvlink_bidi_gibps": None,
+                       "pcie_cum_unit": "B", "pcie_cum_div": 1}
+        if self.gpu_trace is None:
+            return meta
+        meta["device_name"] = self.gpu_trace.device_name
+        meta["chip_name"]   = self.gpu_trace.chip_name
+        if self.gpu_trace.peak_dram_bw_gbps > 0:
+            meta["peak_dram_gibps"] = self.gpu_trace.peak_dram_bw_gbps * 1e9 / (1024 ** 3)
+        if self.gpu_trace.peak_pcie_bw_bytes_per_sec > 0:
+            meta["peak_pcie_bidi_gibps"] = (
+                self.gpu_trace.peak_pcie_bw_bytes_per_sec * 2 / (1024 ** 3))
+        if self.gpu_trace.peak_nvlink_bw_bytes_per_sec > 0:
+            meta["peak_nvlink_bidi_gibps"] = (
+                self.gpu_trace.peak_nvlink_bw_bytes_per_sec * 2 / (1024 ** 3))
+        # Pick the unit for the cumulative-PCIe panel from the current max.
+        if self._gpu_vals is not None and self._gpu_vals.shape[0] > 0 \
+                and "pcie__read_bytes.sum" in self._gpu_metric_idx:
+            rd_sum = float(self._gpu_vals[:, self._gpu_metric_idx["pcie__read_bytes.sum"]].sum())
+            wr_sum = (float(self._gpu_vals[:, self._gpu_metric_idx["pcie__write_bytes.sum"]].sum())
+                       if "pcie__write_bytes.sum" in self._gpu_metric_idx else 0.0)
+            max_bytes = max(rd_sum, wr_sum)
+            for div, unit in [(1024 ** 4, "TiB"), (1024 ** 3, "GiB"),
+                              (1024 ** 2, "MiB"), (1024, "KiB"), (1, "B")]:
+                if max_bytes >= div:
+                    meta["pcie_cum_unit"] = unit
+                    meta["pcie_cum_div"] = div
+                    break
+        return meta
+
+    def _project_gpu_cached(self) -> dict:
+        keys = ("gpu_sm_util", "gpu_warps", "gpu_dram",
+                 "gpu_pcie", "gpu_pcie_cum", "gpu_nvlink")
+        out: dict = {k: None for k in keys}
+        if self._gpu_vals is None or self._gpu_vals.shape[0] == 0:
+            return out
+        idx = self._gpu_metric_idx
+        vals = self._gpu_vals
+        cref = self.gpu_trace.cupti_reference_ns
+        sref = self.gpu_trace.steady_clock_reference_ns
+        time_ms = (gpu_to_steady(self._gpu_ts_ns, cref, sref) - self.t0) / 1e6
+
+        if "sm__cycles_active.avg" in idx and "sm__cycles_elapsed.avg" in idx:
+            elapsed = vals[:, idx["sm__cycles_elapsed.avg"]]
+            d = {"t": time_ms,
+                 "avg": np.where(elapsed > 0,
+                                  vals[:, idx["sm__cycles_active.avg"]] / elapsed * 100, 0)}
+            if "sm__cycles_active.max" in idx:
+                d["max"] = np.where(elapsed > 0,
+                                     vals[:, idx["sm__cycles_active.max"]] / elapsed * 100, 0)
+            out["gpu_sm_util"] = d
+
+        if "sm__warps_active.avg" in idx and "sm__cycles_elapsed.avg" in idx:
+            elapsed = vals[:, idx["sm__cycles_elapsed.avg"]]
+            d = {"t": time_ms,
+                 "avg": np.where(elapsed > 0,
+                                  vals[:, idx["sm__warps_active.avg"]] / elapsed, 0)}
+            if "sm__warps_active.max" in idx:
+                d["max"] = np.where(elapsed > 0,
+                                     vals[:, idx["sm__warps_active.max"]] / elapsed, 0)
+            out["gpu_warps"] = d
+
+        drum = "dram__read_throughput.avg.pct_of_peak_sustained_elapsed"
+        if drum in idx:
+            peak = self._gpu_meta().get("peak_dram_gibps")
+            scale = (peak / 100.0) if peak else 1.0
+            d = {"t": time_ms, "rd": vals[:, idx[drum]] * scale}
+            wr_key = "dram__write_throughput.avg.pct_of_peak_sustained_elapsed"
+            if wr_key in idx:
+                d["wr"] = vals[:, idx[wr_key]] * scale
+            out["gpu_dram"] = d
+
+        if "pcie__read_bytes.sum.per_second" in idx:
+            d = {"t": time_ms,
+                 "rd": vals[:, idx["pcie__read_bytes.sum.per_second"]] / (1024 ** 3)}
+            if "pcie__write_bytes.sum.per_second" in idx:
+                d["wr"] = vals[:, idx["pcie__write_bytes.sum.per_second"]] / (1024 ** 3)
+            out["gpu_pcie"] = d
+
+        if "pcie__read_bytes.sum" in idx and "pcie__write_bytes.sum" in idx:
+            div = self._gpu_meta()["pcie_cum_div"]
+            rd_cum = np.cumsum(vals[:, idx["pcie__read_bytes.sum"]])
+            wr_cum = np.cumsum(vals[:, idx["pcie__write_bytes.sum"]])
+            out["gpu_pcie_cum"] = {"t": time_ms,
+                                     "rd": rd_cum / div, "wr": wr_cum / div}
+
+        if "nvlrx__bytes.sum.per_second" in idx and "nvltx__bytes.sum.per_second" in idx:
+            out["gpu_nvlink"] = {"t":  time_ms,
+                                  "rx": vals[:, idx["nvlrx__bytes.sum.per_second"]] / (1024 ** 3),
+                                  "tx": vals[:, idx["nvltx__bytes.sum.per_second"]] / (1024 ** 3)}
+        return out
+
+    # ---- System -----------------------------------------------------------
+
+    def _sys_meta(self) -> dict:
+        pids = sorted(set(list(self._sys_cpu_proc_cache.keys())
+                           + list(self._sys_mem_proc_cache.keys())))
+        cpu_max = 0.0
+        for c in self._sys_cpu_proc_cache.values():
+            if "user" in c and "sys" in c and c["user"].size:
+                cpu_max = max(cpu_max, float((c["user"] + c["sys"]).max()))
+        mem_max_gib = 0.0
+        for c in self._sys_mem_proc_cache.values():
+            if "rss" in c and c["rss"].size:
+                mem_max_gib = max(mem_max_gib, float(c["rss"].max() / (1024 ** 3)))
+        return {"pids": pids,
+                 "tracked_processes": (list(self.sys_trace.tracked_processes)
+                                        if self.sys_trace is not None else []),
+                 "total_ram_gib": (self._sys_total_bytes / (1024 ** 3)
+                                    if self._sys_total_bytes else 0.0),
+                 "cpu_proc_max": cpu_max,
+                 "mem_proc_max_gib": mem_max_gib}
+
+    def _project_sys_cached(self) -> dict:
+        out: dict = {"sys_cpu_total": None, "sys_cpu_proc": None,
+                      "sys_mem_total": None, "sys_mem_proc": None}
+        c = self._sys_cpu_total_cache
+        if c.get("ts") is not None and c["ts"].size:
+            time_ms = (c["ts"] - self.t0) / 1e6
+            user, sysp, iow = c["user"], c["sys"], c["iow"]
+            out["sys_cpu_total"] = {
+                "t": time_ms,
+                "user": user, "sys": sysp, "iow": iow, "total": c["total"],
+                "y_user_top": user,
+                "y_sys_top":  user + sysp,
+                "y_iow_top":  user + sysp + iow,
+            }
+
+        if self._sys_cpu_proc_cache:
+            pids = sorted(self._sys_cpu_proc_cache.keys())
+            base = self._sys_cpu_proc_cache[pids[0]]
+            time_ms = (base["ts"] - self.t0) / 1e6
+            d: dict = {"t": time_ms}
+            n = len(time_ms)
+            for pid in pids:
+                cache = self._sys_cpu_proc_cache[pid]
+                user = cache.get("user", np.zeros(n))
+                sysp = cache.get("sys",  np.zeros(n))
+                if user.size != n: user = np.resize(user, n)
+                if sysp.size != n: sysp = np.resize(sysp, n)
+                d[f"pid_{pid}_user"] = user
+                d[f"pid_{pid}_sum"]  = user + sysp
+            out["sys_cpu_proc"] = d
+
+        c = self._sys_mem_total_cache
+        if c.get("ts") is not None and c["ts"].size:
+            time_ms = (c["ts"] - self.t0) / 1e6
+            used    = c["used"]    / (1024 ** 3)
+            buffers = c["buffers"] / (1024 ** 3)
+            cached  = c["cached"]  / (1024 ** 3)
+            out["sys_mem_total"] = {
+                "t": time_ms,
+                "used": used, "buffers": buffers, "cached": cached,
+                "y_used_top":    used,
+                "y_buffers_top": used + buffers,
+                "y_cached_top":  used + buffers + cached,
+            }
+
+        if self._sys_mem_proc_cache:
+            pids = sorted(self._sys_mem_proc_cache.keys())
+            base = self._sys_mem_proc_cache[pids[0]]
+            time_ms = (base["ts"] - self.t0) / 1e6
+            d = {"t": time_ms}
+            n = len(time_ms)
+            for pid in pids:
+                rss = self._sys_mem_proc_cache[pid].get("rss", np.zeros(n)) / (1024 ** 3)
+                if rss.size != n: rss = np.resize(rss, n)
+                d[f"pid_{pid}_rss"] = rss
+            out["sys_mem_proc"] = d
+        return out
+
+    # ---- Disk -------------------------------------------------------------
+
+    def _disk_meta(self) -> dict:
+        devs = list(self._disk_dev_cache.keys())
+        pids = sorted(self._disk_proc_cache.keys())
+        bw_max = 0.0
+        for c in self._disk_dev_cache.values():
+            if "rd" in c and c["rd"].size:
+                bw_max = max(bw_max, float(c["rd"].max() / (1024 ** 2)),
+                                       float(c["wr"].max() / (1024 ** 2)))
+        proc_bw_max = 0.0
+        for c in self._disk_proc_cache.values():
+            if "rd" in c and c["rd"].size:
+                proc_bw_max = max(proc_bw_max,
+                                    float(c["rd"].max() / (1024 ** 2)),
+                                    float(c["wr"].max() / (1024 ** 2)))
+        q_max = 0.0
+        for c in self._disk_dev_cache.values():
+            if "rdq" in c and c["rdq"].size:
+                q_max = max(q_max, float(c["rdq"].max()),
+                                    float(c["wrq"].max()))
+        return {"devs": devs, "pids": pids,
+                 "tracked_processes": (list(self.disk_trace.tracked_processes)
+                                        if self.disk_trace is not None else []),
+                 "dev_bw_max_mibps": bw_max,
+                 "proc_bw_max_mibps": proc_bw_max,
+                 "q_max": q_max}
+
+    def _project_disk_cached(self) -> dict:
+        out: dict = {"disk_dev_bw": None, "disk_proc_bw": None,
+                      "disk_dev_q": None}
+        if not self._disk_dev_cache:
+            return out
+        devs = list(self._disk_dev_cache.keys())
+        base = self._disk_dev_cache[devs[0]]
+        if base.get("ts") is None or not base["ts"].size:
+            return out
+        time_ms = (base["ts"] - self.t0) / 1e6
+        n = len(time_ms)
+
+        bw: dict = {"t": time_ms}
+        for dev in devs:
+            c = self._disk_dev_cache[dev]
+            rd = c.get("rd", np.zeros(n)) / (1024 ** 2)
+            wr = c.get("wr", np.zeros(n)) / (1024 ** 2)
+            if rd.size != n: rd = np.resize(rd, n)
+            if wr.size != n: wr = np.resize(wr, n)
+            bw[f"{dev}_rd"] = rd
+            bw[f"{dev}_wr"] = wr
+        out["disk_dev_bw"] = bw
+
+        if self._disk_proc_cache:
+            pids = sorted(self._disk_proc_cache.keys())
+            base_p = self._disk_proc_cache[pids[0]]
+            time_ms_p = (base_p["ts"] - self.t0) / 1e6
+            np_ = len(time_ms_p)
+            d: dict = {"t": time_ms_p}
+            for pid in pids:
+                c = self._disk_proc_cache[pid]
+                rd = c.get("rd", np.zeros(np_)) / (1024 ** 2)
+                wr = c.get("wr", np.zeros(np_)) / (1024 ** 2)
+                if rd.size != np_: rd = np.resize(rd, np_)
+                if wr.size != np_: wr = np.resize(wr, np_)
+                d[f"pid_{pid}_rd"] = rd
+                d[f"pid_{pid}_wr"] = wr
+            out["disk_proc_bw"] = d
+
+        q: dict = {"t": time_ms}
+        for dev in devs:
+            c = self._disk_dev_cache[dev]
+            rdq = c.get("rdq", np.zeros(n))
+            wrq = c.get("wrq", np.zeros(n))
+            if rdq.size != n: rdq = np.resize(rdq, n)
+            if wrq.size != n: wrq = np.resize(wrq, n)
+            q[f"{dev}_rdq"] = rdq
+            q[f"{dev}_wrq"] = wrq
+        out["disk_dev_q"] = q
+        return out
+
+    # ---- Events -----------------------------------------------------------
+
+    def _project_events_cached(self) -> dict:
+        # Events are small (one entry per region/event), so the existing
+        # per-tick walk is cheap. Fall back to the standalone projector.
+        return project_events(self.events, self.gpu_trace, self.t0,
+                                self.region_colors, self.event_colors)["data"]
 
     def tick(self):
         """Periodic-callback entry point. Idempotent if no new bytes."""

@@ -139,10 +139,16 @@ def _load_all(metadata_path):
 # ----- Per-panel builders --------------------------------------------------
 
 def _empty_figure(title, x_range, height=PANEL_HEIGHT, y_label=""):
+    # WebGL backend: line glyphs with O(100k) points rasterize on the GPU
+    # in one draw call; the canvas backend rasterizes line-by-line on the
+    # CPU and stalls at >~50k points per glyph. Critical for live mode
+    # where the dataset grows monotonically. Bokeh falls back to canvas
+    # for any glyph WebGL doesn't support (text, hover-anchored shapes),
+    # so this is safe to set per-figure.
     kwargs = dict(width=PLOT_WIDTH, height=height, title=title,
                   tools="pan,box_zoom,xwheel_zoom,reset,save",
                   active_scroll="xwheel_zoom",
-                  output_backend="canvas")
+                  output_backend="webgl")
     if x_range is not None:
         kwargs["x_range"] = x_range
     fig = figure(**kwargs)
@@ -748,10 +754,15 @@ def _run_live(args):
         layout, cds = _build_layout(frame, state.gpu_trace, state.sys_trace,
                                       state.disk_trace, state.events,
                                       state.t0, state.session_meta, live=True)
-        # Each browser tab gets its own CDS registry — `state.cds` would
-        # be shared across tabs and confuse the per-tick replace logic.
-        # Wrap tick() so the callback closes over this connection's CDS.
+        # Each browser tab gets its own CDS registry + per-CDS row-count
+        # bookmarks; the tick callback closes over both so it knows what
+        # to *append* (vs. resending the full dataset every poll, which
+        # quickly chokes the WebSocket on long runs).
         per_doc_cds = dict(cds)
+        per_doc_streamed: dict[str, int] = {}
+        for key, src in per_doc_cds.items():
+            first = next(iter(src.data.values()), None)
+            per_doc_streamed[key] = len(first) if first is not None else 0
 
         def tick():
             if not state._drain_into_traces():
@@ -763,25 +774,54 @@ def _run_live(args):
                 src = per_doc_cds.get(key)
                 if src is None:
                     continue
-                src.data = {k: list(v) if isinstance(v, np.ndarray) else v
-                             for k, v in cols.items()}
+                # Row count for this CDS = length of any one column. Empty
+                # projection ⇒ nothing to stream.
+                first_col = next(iter(cols.values()), None)
+                if first_col is None:
+                    continue
+                new_len = len(first_col)
+                prev = per_doc_streamed.get(key, 0)
+                if new_len <= prev:
+                    continue
+                # Stream only the appended rows. Cumulative columns
+                # (PCIe cum bytes) and varea cumulative-tops (CPU/mem
+                # stacks) are pointwise-derived from per-sample values,
+                # so the [prev:new_len] slice carries the correct values
+                # without having to re-touch already-painted rows.
+                delta = {}
+                for col_name, col_data in cols.items():
+                    sliced = col_data[prev:new_len]
+                    delta[col_name] = (list(sliced)
+                                        if isinstance(sliced, np.ndarray)
+                                        else list(sliced))
+                # Bokeh's stream() requires *every* existing column to
+                # receive the same number of new rows. Hover-tool helpers
+                # (_attach_anchored_hover) inject an extra `_anchor_y`
+                # column on the CDS that's not part of the projection;
+                # pad any such trailing column with zeros so the stream
+                # call doesn't reject the delta.
+                delta_count = new_len - prev
+                for extra_col in src.data:
+                    if extra_col not in delta:
+                        delta[extra_col] = [0.0] * delta_count
+                src.stream(delta)
+                per_doc_streamed[key] = new_len
 
         doc.add_root(layout)
         doc.add_periodic_callback(tick, args.poll_interval_ms)
         doc.title = "cupti_profiler — Bokeh visualization (live)"
 
     app = Application(FunctionHandler(make_doc))
-    origins = [f"{args.host}:{args.port}", f"localhost:{args.port}",
-                f"127.0.0.1:{args.port}"]
+    # `--allow-websocket-origin` accepts repeated `host:port` values, or
+    # the literal `*` to allow any origin. Default = `*` because the page
+    # is typically reached via an SSH tunnel / VS Code port-forward whose
+    # local port is unknown to the server and changes per session.
+    origins = args.allow_websocket_origin or ["*"]
     server = Server({"/": app}, address=args.host, port=args.port,
                     allow_websocket_origin=origins)
     server.start()
     url = f"http://localhost:{args.port}/"
     print(f"[live] Serving on {url}  (Ctrl-C to stop)")
-    try:
-        server.io_loop.add_callback(server.show, "/")
-    except Exception:
-        pass  # show() opens a browser; ignore failures (e.g. headless server).
     try:
         server.io_loop.start()
     except KeyboardInterrupt:
@@ -831,6 +871,13 @@ def main():
     parser.add_argument("--live-bootstrap-timeout-s", type=float, default=30.0,
                         help="Live mode: how long to wait for "
                              "session_metadata.pb to appear (default: %(default)s).")
+    parser.add_argument("--allow-websocket-origin", action="append", default=None,
+                        metavar="HOST:PORT",
+                        help="Live mode: extra origin to accept WebSocket "
+                             "connections from. Pass multiple times for several "
+                             "origins, or pass `*` to allow any. Default: `*` — "
+                             "needed when the page is reached via SSH tunnel / "
+                             "VS Code port-forward whose port differs from --port.")
     args = parser.parse_args()
 
     if args.live:

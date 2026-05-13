@@ -736,7 +736,7 @@ A full-suite run produces five `.pb` files under `output_dir`:
 
 | File | Schema | Contents |
 | ---- | ------ | -------- |
-| `gpu_metrics.pb` | `GpuMetricsTrace` (length-delimited) | GPU PM samples + regions |
+| `gpu_metrics.pb` | `GpuMetricsTrace` (length-delimited) | GPU PM counter samples (regions live in `events.pb`) |
 | `system_metrics.pb` | `SystemMetricsTrace` (length-delimited) | CPU + memory samples (system + per-PID) |
 | `disk_metrics.pb` | `DiskMetricsTrace` (length-delimited) | Disk device + per-PID I/O samples |
 | `events.pb` | `EventTrace` (length-delimited) | Regions + events, Generic + GPU domains |
@@ -748,12 +748,19 @@ A full-suite run produces five `.pb` files under `output_dir`:
 message GpuMetricsTrace {
     string device_name = 1;
     string chip_name = 2;
-    uint64 sampling_interval_ns = 3;
+    uint64 sampling_frequency_hz = 3;
     repeated string metric_names = 4;
     repeated GpuMetricSample samples = 5;
-    repeated GpuRegion regions = 6;
+    // Field 6 (regions) and field 8 (region_timing_method) were removed —
+    // regions now live in events.pb (see proto/events.proto).
+    reserved 6, 8;
     double peak_dram_bw_gbps = 7;
-    string region_timing_method = 8;
+    double peak_pcie_bw_bytes_per_sec = 13;
+    double peak_nvlink_bw_bytes_per_sec = 14;
+    uint64 steady_clock_reference_ns = 9;
+    uint64 cupti_reference_ns = 10;
+    uint64 wall_clock_epoch_ns = 11;
+    repeated GpuFlushStats flush_stats = 12;
 }
 ```
 

@@ -153,11 +153,12 @@ How it works:
 
 Caveats:
 
-- **GPU regions appear only after the workload's `Stop()`**. The GPU
-  region timeline is empty during a live run; it gets populated within
-  one poll interval after the workload exits. (CUDA event resolution
-  conflicts with active PM sampling, so resolution is deferred to
-  shutdown.) Generic-domain (host) regions / events stream in normally.
+- **Region resolution lags by one event-flush interval.** GPU-domain
+  regions are recorded by `cudaEvent` and resolved on the
+  `event_flush_thread`; they appear on the regions strip a flush
+  interval after `End()` (default 5 s, set via `events.flush_interval_ms`
+  in your `.pbtxt`). Generic-domain regions stream out at the same
+  cadence. There is no longer a "wait until Stop()" gap.
 - **One Python process per page.** Closing the browser does not stop
   the server; Ctrl-C in Terminal B does.
 - **Long runs**: at default 10 kHz GPU + 100 Hz system/disk, ~60 s of
