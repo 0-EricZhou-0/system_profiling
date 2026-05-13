@@ -5,8 +5,15 @@
 // per tracked PID. The flush thread drains those ticks and serializes
 // them into a SystemMetricsTrace with the values[] columns ordered to
 // match the per-scope FQN registry hardcoded in this file.
+//
+// Each flush also snapshots ProcessTrackingProbe — entries flagged
+// `pending_removal=true` are emitted in this trace's tracked_processes
+// with TrackedProcessV2.removed=true, then dropped via
+// ProcessTrackingProbe::CommitPendingRemovals() so subsequent flushes
+// no longer carry them.
 #pragma once
 
+#include <cupti_profiler/process_tracking_probe.h>
 #include <cupti_profiler/system_profiler.h>
 
 #include <atomic>
@@ -64,16 +71,19 @@ struct SystemPendingFlushStats {
     bool     valid        = false;
 };
 
-/// Build a SystemMetricsTrace from a drained batch. Exposed so
-/// SystemProfiler::Stop() can serialize the final batch on the calling
-/// thread without re-implementing the conversion.
-SystemMetricsTrace BuildSystemTrace(const std::string& hostname,
-                                    uint64_t samplingFrequencyHz,
-                                    uint32_t hostCpuCount,
-                                    uint64_t steadyClockRefNs,
-                                    uint64_t wallClockEpochNs,
-                                    const std::vector<TrackedProcess>& processes,
-                                    const SystemSampleBatch& drained);
+/// Build a SystemMetricsTrace from a drained batch + a tracked-PID
+/// snapshot. Exposed so SystemProfiler::Stop() can serialize the final
+/// batch on the calling thread without re-implementing the conversion.
+/// Entries with `pending_removal=true` are emitted with
+/// TrackedProcessV2.removed=true.
+SystemMetricsTrace BuildSystemTrace(
+    const std::string& hostname,
+    uint64_t samplingFrequencyHz,
+    uint32_t hostCpuCount,
+    uint64_t steadyClockRefNs,
+    uint64_t wallClockEpochNs,
+    const std::vector<ProcessTrackingProbe::ProcessEntry>& processes,
+    const SystemSampleBatch& drained);
 
 size_t WriteDelimitedSystemTraceSized(const SystemMetricsTrace& trace,
                                       std::ofstream& out);
@@ -85,7 +95,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
                            const std::string& hostname,
                            uint64_t samplingFrequencyHz,
                            uint32_t hostCpuCount,
-                           const std::vector<TrackedProcess>& Processes,
+                           ProcessTrackingProbe& probe,
                            std::atomic<bool>& stop,
                            uint64_t flushIntervalMs,
                            uint64_t steadyClockRefNs,

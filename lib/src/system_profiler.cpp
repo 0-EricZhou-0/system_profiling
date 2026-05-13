@@ -15,6 +15,8 @@
 #include <mutex>
 #include <thread>
 #include <unistd.h>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace cupti_profiler {
 
@@ -58,8 +60,6 @@ SystemProfiler::SystemProfiler() : m_impl(std::make_unique<Impl>()) {}
 SystemProfiler::~SystemProfiler() {
     if (m_impl && m_impl->running) Stop();
 }
-SystemProfiler::SystemProfiler(SystemProfiler&&) noexcept = default;
-SystemProfiler& SystemProfiler::operator=(SystemProfiler&&) noexcept = default;
 
 void SystemProfiler::Configure(const SystemProfilerConfig& config) {
     m_impl->config = config;
@@ -69,6 +69,15 @@ void SystemProfiler::Configure(const SystemProfilerConfig& config) {
     m_impl->hostname = buf;
     long nproc = sysconf(_SC_NPROCESSORS_ONLN);
     m_impl->hostCpuCount = (nproc > 0) ? static_cast<uint32_t>(nproc) : 0;
+
+    // Seed the ProcessTrackingProbe with the configured PIDs. Mid-run
+    // Add/Remove calls layer on top.
+    std::vector<ProcessTrackingProbe::ProcessEntry> seed;
+    seed.reserve(config.Processes.size());
+    for (const auto& p : config.Processes) {
+        seed.push_back({p.pid, p.alias, /*pending_removal=*/false});
+    }
+    SetInitialProcesses(std::move(seed));
 
     std::cout << "[System] Sampling frequency: " << config.samplingFrequencyHz << " Hz\n";
     std::cout << "[System] Tracking " << config.Processes.size() << " PID(s)\n";
@@ -96,11 +105,11 @@ void SystemProfiler::Start() {
     m_impl->wallClockEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    // Take initial snapshots for delta computation
+    // Take initial CPU snapshot for delta computation. Per-PID
+    // baselines are seeded lazily on the first iteration the PID is
+    // seen — that way mid-run AddTrackedProcess() works without a
+    // separate hook.
     m_impl->prevCPU = internal::ReadCPUStat();
-    for (const auto& p : m_impl->config.Processes) {
-        m_impl->prevPID[p.pid] = internal::ReadPIDStat(p.pid);
-    }
 
     // Launch sample thread
     m_impl->stopSample = false;
@@ -141,27 +150,55 @@ void SystemProfiler::Start() {
                 impl.prevCPU = curCPU;
             }
 
-            // Per-PID tick — CPU + memory in one ProcessSample.
-            for (const auto& proc : impl.config.Processes) {
-                uint32_t pid = proc.pid;
+            // Per-PID tick — CPU + memory in one ProcessSample. The
+            // tracked-PID set is whatever ProcessTrackingProbe holds
+            // right now (config + any mid-run Add/Remove). Entries with
+            // pending_removal=true are skipped — they're awaiting the
+            // next flush to be emitted as a removal marker.
+            auto snapshot = this->SnapshotProcesses();
+            std::unordered_set<uint32_t> snapshotPids;
+            snapshotPids.reserve(snapshot.size());
+
+            double dtSec = 1.0 / impl.config.samplingFrequencyHz;
+            for (const auto& entry : snapshot) {
+                uint32_t pid = entry.pid;
+                snapshotPids.insert(pid);
+                if (entry.pending_removal) continue;
+
                 auto curPID = internal::ReadPIDStat(pid);
-                auto& prev  = impl.prevPID[pid];
+                auto it     = impl.prevPID.find(pid);
+                if (it == impl.prevPID.end()) {
+                    // Mid-run add — seed the baseline; skip this tick.
+                    // First emitted sample is one tick later, so the
+                    // delta isn't garbage.
+                    impl.prevPID[pid] = curPID;
+                    continue;
+                }
+                auto& prev  = it->second;
                 auto statm  = internal::ReadPIDStatm(pid);
 
-                double dtSec = 1.0 / impl.config.samplingFrequencyHz;
                 internal::ProcessTick t;
                 t.timestamp_ns   = tsNs;
                 t.pid            = pid;
                 t.cpu_user_pct   = (double)(curPID.utime - prev.utime) / (dtSec * clkTck) * 100.0;
                 t.cpu_kernel_pct = (double)(curPID.stime - prev.stime) / (dtSec * clkTck) * 100.0;
                 t.cpu_iowait_pct = (double)(curPID.blkioTicks - prev.blkioTicks) / (dtSec * clkTck) * 100.0;
-                t.rss_bytes      = statm.RSSPages   * pageSize;
-                t.vms_bytes      = statm.VMSPages   * pageSize;
+                t.rss_bytes      = statm.RSSPages    * pageSize;
+                t.vms_bytes      = statm.VMSPages    * pageSize;
                 t.shared_bytes   = statm.sharedPages * pageSize;
                 prev = curPID;
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.processTicks.push_back(std::move(t));
+            }
+            // Drop baselines for PIDs that are no longer in the
+            // snapshot (committed removals).
+            for (auto it = impl.prevPID.begin(); it != impl.prevPID.end(); ) {
+                if (snapshotPids.find(it->first) == snapshotPids.end()) {
+                    it = impl.prevPID.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
     });
@@ -177,7 +214,7 @@ void SystemProfiler::Start() {
                                            std::cref(m_impl->hostname),
                                            m_impl->config.samplingFrequencyHz,
                                            m_impl->hostCpuCount,
-                                           std::cref(m_impl->config.Processes),
+                                           std::ref(static_cast<ProcessTrackingProbe&>(*this)),
                                            std::ref(m_impl->stopFlush),
                                            m_impl->config.flushIntervalMs,
                                            m_impl->steadyClockRefNs,
@@ -215,13 +252,14 @@ void SystemProfiler::Stop() {
             drained.processTicks.swap(m_impl->batch.processTicks);
         }
 
+        auto processSnapshot = SnapshotProcesses();
         if (!drained.systemTicks.empty() || !drained.processTicks.empty() ||
             m_impl->flushStatsPending.valid) {
             SystemMetricsTrace trace = internal::BuildSystemTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz,
                 m_impl->hostCpuCount,
                 m_impl->steadyClockRefNs, m_impl->wallClockEpochNs,
-                m_impl->config.Processes, drained);
+                processSnapshot, drained);
             // Attach any pending flush stats from the last background flush cycle.
             if (m_impl->flushStatsPending.valid) {
                 auto* fs = trace.add_flush_stats();
@@ -232,6 +270,7 @@ void SystemProfiler::Stop() {
 
             internal::WriteDelimitedSystemTraceSized(trace, m_impl->outFile);
             m_impl->outFile.flush();
+            CommitPendingRemovals();
         }
         m_impl->outFile.close();
         std::cout << "[System] Wrote trace to " << m_impl->config.outputFile << "\n";

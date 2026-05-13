@@ -1,6 +1,7 @@
 // System Profiler — CPU utilization + memory usage (system-wide and per-process).
 #pragma once
 
+#include <cupti_profiler/process_tracking_probe.h>
 #include <cupti_profiler/tracked_process.h>
 
 #include <cstdint>
@@ -35,12 +36,14 @@ struct CUPTI_PROFILER_API SystemProfilerConfig {
     std::string outputFile;
 };
 
-class CUPTI_PROFILER_API SystemProfiler {
+class CUPTI_PROFILER_API SystemProfiler : public ProcessTrackingProbe {
 public:
     SystemProfiler();
     ~SystemProfiler();
-    SystemProfiler(SystemProfiler&&) noexcept;
-    SystemProfiler& operator=(SystemProfiler&&) noexcept;
+    // Non-movable: ProcessTrackingProbe owns a shared_mutex. The suite
+    // constructs this in place inside its Impl.
+    SystemProfiler(SystemProfiler&&) = delete;
+    SystemProfiler& operator=(SystemProfiler&&) = delete;
 
     void Configure(const SystemProfilerConfig& config);
     void Start();
@@ -50,6 +53,10 @@ public:
 
     /// Join threads, flush remaining data, close file.
     void Stop();
+
+    // AddTrackedProcess / RemoveTrackedProcess are inherited from
+    // ProcessTrackingProbe — call them between Start() and Stop() to
+    // adjust the tracked PID set mid-run.
 
 private:
     class Impl;

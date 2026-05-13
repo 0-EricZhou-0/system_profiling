@@ -64,15 +64,15 @@ void AddScopeRegistry(SystemMetricsTrace& trace) {
     for (const char* f : kProcessFqns) proc->add_fqns(f);
 }
 
-void AddTrackedProcesses(SystemMetricsTrace& trace,
-                         const std::vector<TrackedProcess>& processes)
+void AddTrackedProcesses(
+    SystemMetricsTrace& trace,
+    const std::vector<ProcessTrackingProbe::ProcessEntry>& processes)
 {
     for (const auto& p : processes) {
         auto* tp = trace.add_tracked_processes();
         tp->set_pid(p.pid);
         tp->set_alias(p.alias);
-        // `removed` defaults to false. The removal-marker path is wired
-        // up in the ProcessTrackingProbe commit.
+        tp->set_removed(p.pending_removal);
     }
 }
 
@@ -104,13 +104,14 @@ void AppendProcessSample(SystemMetricsTrace& trace, const ProcessTick& t) {
 
 } // namespace
 
-SystemMetricsTrace BuildSystemTrace(const std::string& hostname,
-                                    uint64_t samplingFrequencyHz,
-                                    uint32_t hostCpuCount,
-                                    uint64_t steadyClockRefNs,
-                                    uint64_t wallClockEpochNs,
-                                    const std::vector<TrackedProcess>& processes,
-                                    const SystemSampleBatch& drained)
+SystemMetricsTrace BuildSystemTrace(
+    const std::string& hostname,
+    uint64_t samplingFrequencyHz,
+    uint32_t hostCpuCount,
+    uint64_t steadyClockRefNs,
+    uint64_t wallClockEpochNs,
+    const std::vector<ProcessTrackingProbe::ProcessEntry>& processes,
+    const SystemSampleBatch& drained)
 {
     SystemMetricsTrace trace;
     PopulateHeader(trace, hostname, samplingFrequencyHz, hostCpuCount,
@@ -144,7 +145,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
                            const std::string& hostname,
                            uint64_t samplingFrequencyHz,
                            uint32_t hostCpuCount,
-                           const std::vector<TrackedProcess>& Processes,
+                           ProcessTrackingProbe& probe,
                            std::atomic<bool>& stop,
                            uint64_t flushIntervalMs,
                            uint64_t steadyClockRefNs,
@@ -165,12 +166,13 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
             drained.processTicks.swap(batch.processTicks);
         }
 
+        auto processSnapshot = probe.SnapshotProcesses();
         if (drained.systemTicks.empty() && drained.processTicks.empty()) continue;
 
         SystemMetricsTrace trace = BuildSystemTrace(
             hostname, samplingFrequencyHz, hostCpuCount,
             steadyClockRefNs, wallClockEpochNs,
-            Processes, drained);
+            processSnapshot, drained);
 
         {
             std::lock_guard<std::mutex> lock(pendingMutex);
@@ -188,6 +190,10 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
             bytes = WriteDelimitedSystemTraceSized(trace, outFile);
             outFile.flush();
         }
+        // Now that the removed=true markers have been written, drop
+        // those entries so subsequent flushes don't keep emitting them.
+        probe.CommitPendingRemovals();
+
         uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         uint64_t intervalNs = (prevFlushNs == 0) ? 0 : (nowNs - prevFlushNs);

@@ -36,7 +36,15 @@ namespace cupti_profiler {
 
 class ProcessTrackingProbe {
 public:
+    ProcessTrackingProbe() = default;
     virtual ~ProcessTrackingProbe() = default;
+
+    // Non-copyable and non-movable: holds a shared_mutex. Derived
+    // probes are owned by ProfilerSuite::Impl in place and never moved.
+    ProcessTrackingProbe(const ProcessTrackingProbe&) = delete;
+    ProcessTrackingProbe& operator=(const ProcessTrackingProbe&) = delete;
+    ProcessTrackingProbe(ProcessTrackingProbe&&) = delete;
+    ProcessTrackingProbe& operator=(ProcessTrackingProbe&&) = delete;
 
     /// Append a new tracked PID. Thread-safe; takes effect on the
     /// next sample tick of the derived probe.
@@ -47,7 +55,6 @@ public:
     /// CommitPendingRemovals() is called. Thread-safe.
     void RemoveTrackedProcess(uint32_t pid);
 
-protected:
     struct ProcessEntry {
         uint32_t    pid              = 0;
         std::string alias;
@@ -55,11 +62,12 @@ protected:
     };
 
     /// Replace the tracked process set in one shot. Called by derived
-    /// classes from Configure() to seed the initial config.processes.
+    /// classes from Configure() to seed config.processes.
     void SetInitialProcesses(std::vector<ProcessEntry> entries);
 
-    /// Snapshot copy under shared_lock. The sample/flush loop calls
-    /// this every iteration; the cost is one O(N) copy.
+    /// Snapshot copy under shared_lock. Called from the sample loop
+    /// (every tick) AND from the flush thread (every flush); the cost
+    /// is one O(N) copy.
     std::vector<ProcessEntry> SnapshotProcesses() const;
 
     /// Drop every entry currently marked `pending_removal`. Called
