@@ -1,5 +1,6 @@
 #include <cupti_profiler/profiler_suite.h>
 
+#include "metric_catalog.h"
 #include "profiler_config.pb.h"
 #include "session_metadata.pb.h"
 #include "session_metadata_writer.h"
@@ -10,6 +11,7 @@
 #include <sys/stat.h>
 #include <chrono>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -36,6 +38,10 @@ public:
     bool eventEnabled = false;
 
     std::string sessionMetadataPath;
+    std::string metricCatalogPath;
+
+    // Loaded MetricCatalog. nullopt before Configure().
+    std::unique_ptr<internal::MetricCatalog> catalog;
 
     uint64_t startWallClockEpochNs = 0;
 
@@ -185,6 +191,10 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         ? std::string("session_metadata.pb")
         : proto.session_metadata_file();
 
+    // Metric catalog path (loaded at Configure()). Empty = default
+    // location next to the binary.
+    m_impl->metricCatalogPath = proto.metric_catalog_path();
+
     // Apply output_dir: prepend to each component's output_file, create dir if needed
     std::string outputDir = proto.output_dir();
     if (!outputDir.empty()) {
@@ -209,11 +219,56 @@ SystemProfiler& ProfilerSuite::GetSystemProfiler() { return m_impl->systemProfil
 DiskProfiler& ProfilerSuite::GetDiskProfiler() { return m_impl->diskProfiler; }
 EventProfiler& ProfilerSuite::GetEventProfiler() { return m_impl->eventProfiler; }
 
+// Resolve the MetricCatalog pbtxt to load. Priority:
+//   1. Explicit ProfilerSuiteConfig.metric_catalog_path.
+//   2. configs/metric_catalog.pbtxt relative to the current working
+//      directory (typical when running an example from the repo root).
+//   3. configs/metric_catalog.pbtxt relative to /proc/self/exe.
+// Exits with a clear message if none of these are readable.
+static std::string ResolveCatalogPath(const std::string& configured) {
+    namespace fs = std::filesystem;
+    if (!configured.empty()) return configured;
+    fs::path candidates[] = {
+        fs::path("configs/metric_catalog.pbtxt"),
+    };
+    for (const auto& p : candidates) {
+        if (fs::exists(p)) return p.string();
+    }
+    // Try sibling of the binary.
+    char exeBuf[4096];
+    ssize_t n = readlink("/proc/self/exe", exeBuf, sizeof(exeBuf) - 1);
+    if (n > 0) {
+        exeBuf[n] = '\0';
+        fs::path exeDir = fs::path(exeBuf).parent_path();
+        fs::path sibling = exeDir / "configs" / "metric_catalog.pbtxt";
+        if (fs::exists(sibling)) return sibling.string();
+        // Walk up looking for a configs/ sibling (handy for build/...
+        // layouts where the binary lives under build/examples/).
+        for (auto cur = exeDir; !cur.empty() && cur != cur.root_path();
+             cur = cur.parent_path()) {
+            fs::path up = cur / "configs" / "metric_catalog.pbtxt";
+            if (fs::exists(up)) return up.string();
+        }
+    }
+    std::cerr << "ProfilerSuite: cannot find metric_catalog.pbtxt. "
+                 "Set ProfilerSuiteConfig.metric_catalog_path to a valid "
+                 "MetricCatalog pbtxt.\n";
+    std::exit(1);
+}
+
 void ProfilerSuite::Configure() {
     if (!m_impl->loaded) {
         std::cerr << "ProfilerSuite::Configure() called before LoadConfig()\n";
         return;
     }
+    // Load the catalog before any probe configures, so probes can
+    // consult it for their ScopeMetricNames registries (full wiring
+    // lands in the descriptor-driven-emit follow-up; this commit just
+    // loads + inlines into SessionMetadata).
+    std::string catalogPath = ResolveCatalogPath(m_impl->metricCatalogPath);
+    m_impl->catalog = std::make_unique<internal::MetricCatalog>(
+        internal::MetricCatalog::LoadFromPbtxt(catalogPath));
+
     if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Configure(m_impl->gpuConfig);
     if (m_impl->sysEnabled)   m_impl->systemProfiler.Configure(m_impl->sysConfig);
     if (m_impl->diskEnabled)  m_impl->diskProfiler.Configure(m_impl->diskConfig);
@@ -253,6 +308,13 @@ void ProfilerSuite::Impl::WriteSessionManifest() {
                  diskConfig.samplingFrequencyHz);
     if (eventEnabled)
         addProbe(PROBE_KIND_EVENTS, eventConfig.outputFile, 0);
+
+    // Inline the active MetricCatalog so the visualizer only needs
+    // one file (session_metadata.pb) to bootstrap.
+    if (catalog) {
+        *meta.mutable_catalog() = catalog->Proto();
+    }
+
     internal::WriteSessionMetadata(sessionMetadataPath, meta);
 }
 
@@ -284,6 +346,17 @@ void ProfilerSuite::Stop() {
     if (m_impl->eventEnabled) m_impl->eventProfiler.Stop();
 
     m_impl->WriteSessionManifest();
+}
+
+void ProfilerSuite::AddTrackedProcess(uint32_t pid, std::string alias) {
+    // Fan out to every probe that supports per-PID sampling.
+    if (m_impl->sysEnabled)  m_impl->systemProfiler.AddTrackedProcess(pid, alias);
+    if (m_impl->diskEnabled) m_impl->diskProfiler.AddTrackedProcess(pid, std::move(alias));
+}
+
+void ProfilerSuite::RemoveTrackedProcess(uint32_t pid) {
+    if (m_impl->sysEnabled)  m_impl->systemProfiler.RemoveTrackedProcess(pid);
+    if (m_impl->diskEnabled) m_impl->diskProfiler.RemoveTrackedProcess(pid);
 }
 
 } // namespace cupti_profiler

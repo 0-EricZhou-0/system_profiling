@@ -268,7 +268,20 @@ PYBIND11_MODULE(_native, m) {
             "Returns the suite-owned DiskProfiler.")
         .def("get_event_profiler",  &ProfilerSuite::GetEventProfiler,
              py::return_value_policy::reference_internal,
-            "Returns the suite-owned EventProfiler.");
+            "Returns the suite-owned EventProfiler.")
+        .def("add_tracked_process",
+             [](ProfilerSuite& self, uint32_t pid, std::string alias) {
+                 self.AddTrackedProcess(pid, std::move(alias));
+             },
+             py::arg("pid"), py::arg("alias") = std::string{},
+            "Start tracking a PID mid-run. Fans out to every probe that "
+            "supports per-PID sampling (System + Disk). First sample for "
+            "the PID is one sample-tick after this call returns.")
+        .def("remove_tracked_process", &ProfilerSuite::RemoveTrackedProcess,
+             py::arg("pid"),
+            "Stop tracking a PID. The PID appears one more time in the "
+            "next flush with TrackedProcessV2.removed=true (visualizer "
+            "renders a removal marker), then is dropped.");
 
     // -------------------------------------------------------------------
     // CUDA stream helpers — let Python tests get a real cudaStream_t
