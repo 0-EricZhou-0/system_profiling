@@ -15,22 +15,24 @@ gpu {
     sampling_frequency_hz: 10000    # 10 kHz
     hw_buffer_size: 536870912       # 512 MB
     max_samples: 50000
-    metrics: "sm__cycles_active.avg"
-    metrics: "sm__cycles_active.max"
-    metrics: "sm__cycles_elapsed.avg"
-    metrics: "sm__warps_active.avg"
-    metrics: "sm__warps_active.max"
+    # SM utilization as % of peak — emitted directly by CUPTI rather
+    # than computed post-hoc from raw cycle counts (the new
+    # descriptor-driven renderer plots metrics in their native unit).
+    metrics: "sm__cycles_active.avg.pct_of_peak_sustained_elapsed"
+    metrics: "sm__cycles_active.max.pct_of_peak_sustained_elapsed"
+    # Active warps per active SM cycle (0-64 on H100).
+    metrics: "sm__warps_active.avg.per_cycle_active"
+    metrics: "sm__warps_active.max.per_cycle_active"
+    # DRAM bandwidth as % of peak.
     metrics: "dram__read_throughput.avg.pct_of_peak_sustained_elapsed"
-    metrics: "dram__read_throughput.max.pct_of_peak_sustained_elapsed"
     metrics: "dram__write_throughput.avg.pct_of_peak_sustained_elapsed"
-    metrics: "dram__write_throughput.max.pct_of_peak_sustained_elapsed"
-    # PCIe host<->device throughput (bytes/sec) and per-window byte counter
+    # PCIe host<->device throughput in bytes/sec (and the raw window
+    # byte counter — cumsum gives total bytes transferred).
     metrics: "pcie__read_bytes.sum.per_second"
     metrics: "pcie__write_bytes.sum.per_second"
-    # Raw bytes per sample window — cumsum gives total bytes transferred over the run
     metrics: "pcie__read_bytes.sum"
     metrics: "pcie__write_bytes.sum"
-    # NVLink rx/tx throughput (bytes/sec)
+    # NVLink rx/tx throughput in bytes/sec.
     metrics: "nvlrx__bytes.sum.per_second"
     metrics: "nvltx__bytes.sum.per_second"
     flush_interval_ms: 10000

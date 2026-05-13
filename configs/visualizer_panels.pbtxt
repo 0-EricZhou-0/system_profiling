@@ -13,35 +13,35 @@
 
 panels {
     title: "SM Utilization (%)"
-    series_glob: "sm__cycles_active.avg*"
+    series_glob: "sm__cycles_active.*.pct_of_peak_*"
     scope: SCOPE_GPU
     y_min: 0  y_max: 105
     peak_constant: 100.0
 }
 panels {
     title: "Active Warps / Cycle"
-    series_glob: "sm__warps_active.avg*"
+    series_glob: "sm__warps_active.*.per_cycle_*"
     scope: SCOPE_GPU
     y_min: 0  y_max: 66
     peak_constant: 64.0
 }
 panels {
-    title: "DRAM Bandwidth"
+    title: "DRAM Bandwidth (% of peak)"
     series_glob: "dram__*_throughput.*"
     scope: SCOPE_GPU
-    unit_override: UNIT_BYTES_PER_SEC
-    peak_from_gpu_info: "peak_dram_bw_bytes_per_s"
+    y_min: 0  y_max: 105
+    peak_constant: 100.0
 }
 panels {
     title: "PCIe Bandwidth"
-    series_glob: "pcie__*_throughput.*"
+    series_glob: "pcie__*_bytes.sum.per_second"
     scope: SCOPE_GPU
     unit_override: UNIT_BYTES_PER_SEC
     peak_from_gpu_info: "peak_pcie_bw_bytes_per_s"
 }
 panels {
     title: "NVLink Bandwidth"
-    series_glob: "nvl*__*_throughput.*"
+    series_glob: "nvl*__*.per_second"
     scope: SCOPE_GPU
     unit_override: UNIT_BYTES_PER_SEC
     peak_from_gpu_info: "peak_nvlink_bw_bytes_per_s"
