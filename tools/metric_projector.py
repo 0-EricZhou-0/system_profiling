@@ -100,6 +100,11 @@ class TraceProjector:
         # legend label regardless of which probe surfaced the PID.
         self.tracked_processes: dict[int, TrackedProcess] = {}
 
+        # FQN -> source probe ("gpu" / "system" / "disk"). Lets the
+        # visualizer group panels by which probe emitted their series.
+        # Populated as each ScopeMetricNames is seen on ingest.
+        self.fqn_to_probe: dict[str, str] = {}
+
     # ------------------------------------------------------------------
     # Ingest
     # ------------------------------------------------------------------
@@ -130,6 +135,13 @@ class TraceProjector:
             if smn.scope == scope:
                 return list(smn.fqns)
         return []
+
+    def _record_probe_source(self, trace, probe: str) -> None:
+        for smn in trace.scope_metric_names:
+            for fqn in smn.fqns:
+                # First-writer wins; in practice an FQN is owned by one
+                # probe, so this is just defensive.
+                self.fqn_to_probe.setdefault(fqn, probe)
 
     def _ingest_samples_uniform(
         self,
@@ -173,6 +185,7 @@ class TraceProjector:
 
     def ingest_gpu(self, trace) -> None:
         self._absorb_header(trace.header)
+        self._record_probe_source(trace, "gpu")
         for g in trace.tracked_gpus:
             self.gpu_info[g.device_index] = GpuDeviceInfo(
                 device_name=g.device_name,
@@ -210,6 +223,7 @@ class TraceProjector:
 
     def ingest_system(self, trace) -> None:
         self._absorb_header(trace.header)
+        self._record_probe_source(trace, "system")
         self._absorb_tracked_processes(trace.tracked_processes)
         sys_fqns = self._scope_fqns(trace, _mc.SCOPE_SYSTEM)
         proc_fqns = self._scope_fqns(trace, _mc.SCOPE_PROCESS)
@@ -224,6 +238,7 @@ class TraceProjector:
 
     def ingest_disk(self, trace) -> None:
         self._absorb_header(trace.header)
+        self._record_probe_source(trace, "disk")
         self._absorb_tracked_processes(trace.tracked_processes)
         dev_fqns = self._scope_fqns(trace, _mc.SCOPE_DEVICE)
         proc_fqns = self._scope_fqns(trace, _mc.SCOPE_PROCESS)
