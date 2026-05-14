@@ -33,6 +33,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 
@@ -66,9 +67,9 @@ PANEL_HEIGHT_FOOTER = 0.7   # write-rate text footer
 
 SPACING_PANEL        = 0.55   # within a section
 SPACING_SECTION      = 0.90   # between sections (dashed sep at midpoint)
-SPACING_EVENT_REGION = 2.50   # event strip -> region strip
+SPACING_EVENT_REGION = 1.85   # event strip -> region strip
 SPACING_AFTER_REGION = 1.45   # region strip -> first metric panel
-SPACING_TITLE        = 0.85   # title baseline above first strip
+SPACING_TITLE        = 0.95   # title baseline above first strip
 
 FIG_WIDTH         = 21.0
 FIG_MARGIN_TOP    = 1.2
@@ -87,14 +88,17 @@ YLIM_HEADROOM      = 1.10
 # fraction (just inside the y-axis); Y is in data coordinates.
 MAX_LABEL_X_AXES_FRAC = 0.005
 
-REGION_COLORS = [
-    "#d62728", "#2ca02c", "#1f77b4", "#ff7f0e",
-    "#9467bd", "#8c564b", "#e377c2", "#17becf",
-]
-EVENT_COLORS = [
-    "#000000", "#FF1493", "#00CED1", "#FFD700",
-    "#7B68EE", "#228B22", "#A0522D", "#DC143C",
-]
+# Region strip: 10-color cycle from matplotlib's `tab10` qualitative
+# palette (blue, orange, green, red, purple, brown, pink, gray,
+# olive, cyan).
+REGION_COLORS = [mcolors.to_hex(c)
+                 for c in matplotlib.colormaps["tab10"].colors]
+# Event strip: 20-color cycle from `tab20b` — muted-saturated
+# variant of tab10 with four shades per hue family, so events stay
+# visually distinct from regions and from each other for long
+# event lists.
+EVENT_COLORS = [mcolors.to_hex(c)
+                for c in matplotlib.colormaps["tab20b"].colors]
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +401,114 @@ def _fmt_plain(v: float) -> str:
     return f"{v:.4f}".rstrip("0").rstrip(".")
 
 
-def _render_region_strip(ax, regions, t0_ns: int, xmax_s: float) -> None:
+# Faint leader from the marker (xy) to the label (xytext). Stays
+# invisible / minimal when xytext is its natural (0, ±4); once the
+# spread pass shifts xytext sideways, the leader becomes a slanted
+# line connecting label back to its true marker on the strip.
+LABEL_LEADER_LINEWIDTH = 0.4
+LABEL_LEADER_ALPHA     = 0.6
+# Minimum gap (display px) between adjacent rotated labels.
+LABEL_OVERLAP_PAD_PX   = 2.5
+# How far (display px) the outermost label is allowed to extend past
+# the strip's axis bounds during the spread pass. Soft clamp — the
+# label's outer edge stops `LABEL_CLAMP_CLEARANCE_PX` past the axis
+# edge, not at the edge itself. Larger = labels can stretch further
+# into the page margins; 0 reverts to a hard clamp at the axis edge.
+LABEL_CLAMP_CLEARANCE_PX = 40.0
+
+
+def _leader_props(color: str) -> dict:
+    return dict(arrowstyle="-", color=color,
+                linewidth=LABEL_LEADER_LINEWIDTH,
+                alpha=LABEL_LEADER_ALPHA,
+                shrinkA=0, shrinkB=2)
+
+
+def _spread_rotated_label_groups(ax, groups, renderer,
+                                 padding_px: float = LABEL_OVERLAP_PAD_PX) -> None:
+    """Push overlapping rotated-label groups outward from the axes
+    horizontal midpoint. Each `group` is a list of annotations that
+    belong to the same logical marker (one event = [name_above,
+    time_below]; one region = [name_above, duration_below]). All
+    annotations within a group share the same data-anchor x and
+    move together; the collision width is the max bbox width across
+    the group's members, so name + 2-line time stay vertically
+    aligned regardless of which one is wider.
+
+    Algorithm: sort groups by current bbox center. Right half walks
+    left-to-right, pushing rightward when a group's left edge would
+    cross the previous group's right edge plus padding. Left half
+    walks right-to-left, pushing leftward by the same rule. Both
+    halves use a soft clamp at the strip's axis bounds +/-
+    LABEL_CLAMP_CLEARANCE_PX."""
+    if not groups:
+        return
+    items = []
+    for grp in groups:
+        if not grp:
+            continue
+        bboxes = [ann.get_window_extent(renderer) for ann in grp]
+        widths = [b.width for b in bboxes]
+        max_w  = max(widths)
+        # All members of one group share the same data-x anchor and
+        # use rotation=90 with horizontally-centered bbox post-rotation,
+        # so any member's bbox center is the group's natural x.
+        orig_cx = 0.5 * (bboxes[0].x0 + bboxes[0].x1)
+        items.append({
+            "anns":    grp,
+            "orig_cx": orig_cx,
+            "cx":      orig_cx,
+            "width":   max_w,
+        })
+    items.sort(key=lambda d: d["cx"])
+    n = len(items)
+    if n == 0:
+        return
+    ax_bbox = ax.get_window_extent()
+    pivot = n // 2
+
+    # Soft clamp: groups may extend LABEL_CLAMP_CLEARANCE_PX past
+    # the strip's bounds before stopping.
+    right_clamp = ax_bbox.x1 + LABEL_CLAMP_CLEARANCE_PX
+    left_clamp  = ax_bbox.x0 - LABEL_CLAMP_CLEARANCE_PX
+
+    prev_right = -float("inf")
+    for k in range(pivot, n):
+        d = items[k]
+        left = d["cx"] - d["width"] / 2
+        if left < prev_right + padding_px:
+            d["cx"] += (prev_right + padding_px) - left
+        max_cx = right_clamp - d["width"] / 2
+        if d["cx"] > max_cx:
+            d["cx"] = max_cx
+        prev_right = d["cx"] + d["width"] / 2
+
+    next_left = float("inf")
+    for k in range(pivot - 1, -1, -1):
+        d = items[k]
+        right = d["cx"] + d["width"] / 2
+        if right > next_left - padding_px:
+            d["cx"] += (next_left - padding_px) - right
+        min_cx = left_clamp + d["width"] / 2
+        if d["cx"] < min_cx:
+            d["cx"] = min_cx
+        next_left = d["cx"] - d["width"] / 2
+
+    pts_per_px = 72.0 / ax.figure.dpi
+    for d in items:
+        dx_px = d["cx"] - d["orig_cx"]
+        if abs(dx_px) < 0.5:
+            continue
+        dx_pts = dx_px * pts_per_px
+        for ann in d["anns"]:
+            cur = ann.xyann
+            ann.xyann = (cur[0] + dx_pts, cur[1])
+
+
+def _render_region_strip(ax, regions, t0_ns: int, xmax_s: float):
+    """Returns a list of per-region annotation groups; each group is
+    [name_annotation, duration_annotation] anchored at the same
+    r_start_s, so the spread pass moves them together."""
     ax.set_xlim(0, xmax_s)
     ax.set_ylim(-0.5, 0.5)
     ax.set_yticks([])
@@ -405,28 +516,39 @@ def _render_region_strip(ax, regions, t0_ns: int, xmax_s: float) -> None:
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.set_ylabel("Region", fontsize=8)
+    groups: list[list] = []
     for ri, (name, start_ns, end_ns) in enumerate(regions):
         r_start_s = (start_ns - t0_ns) / 1e9
         dur_s = (end_ns - start_ns) / 1e9
         color = REGION_COLORS[ri % len(REGION_COLORS)]
         ax.barh(0, dur_s, left=r_start_s, height=1.0,
                 color=color, alpha=1.0, edgecolor=color, linewidth=0.8)
-        ax.annotate(name,
-                    xy=(r_start_s, 1.0), xycoords=("data", "axes fraction"),
-                    xytext=(0, 4), textcoords="offset points",
-                    fontsize=7, color=color, fontweight="bold",
-                    rotation=90, rotation_mode="anchor",
-                    ha="left", va="center", annotation_clip=False)
-        ax.annotate(_fmt_dur(dur_s),
-                    xy=(r_start_s, 0.0), xycoords=("data", "axes fraction"),
-                    xytext=(0, -4), textcoords="offset points",
-                    fontsize=7, color=color, fontweight="bold",
-                    rotation=90, rotation_mode="anchor",
-                    ha="right", va="center", annotation_clip=False)
+        name_ann = ax.annotate(
+            name,
+            xy=(r_start_s, 1.0), xycoords=("data", "axes fraction"),
+            xytext=(0, 4), textcoords="offset points",
+            fontsize=7, color=color, fontweight="bold",
+            rotation=90, rotation_mode="anchor",
+            ha="left", va="center", annotation_clip=False,
+            arrowprops=_leader_props(color))
+        dur_ann = ax.annotate(
+            _fmt_dur(dur_s),
+            xy=(r_start_s, 0.0), xycoords=("data", "axes fraction"),
+            xytext=(0, -4), textcoords="offset points",
+            fontsize=7, color=color, fontweight="bold",
+            rotation=90, rotation_mode="anchor",
+            ha="right", va="center", annotation_clip=False,
+            arrowprops=_leader_props(color))
+        groups.append([name_ann, dur_ann])
+    return groups
 
 
 def _render_event_strip(ax, events, t0_ns: int, xmax_s: float,
-                        wall_ref_ns: int, steady_ref_ns: int) -> None:
+                        wall_ref_ns: int, steady_ref_ns: int):
+    """Returns a list of per-event annotation groups; each group is
+    [name_annotation, time_annotation] (or just [name_annotation] if
+    wall_ref_ns == 0) anchored at the same t_s, so the spread pass
+    moves them together."""
     ax.set_xlim(0, xmax_s)
     ax.set_ylim(-0.5, 0.5)
     ax.set_yticks([])
@@ -434,18 +556,21 @@ def _render_event_strip(ax, events, t0_ns: int, xmax_s: float,
     for side in ("top", "right", "left"):
         ax.spines[side].set_visible(False)
     ax.set_ylabel("Event", fontsize=8)
+    groups: list[list] = []
     for ei, (name, ts) in enumerate(events):
         t_s = (ts - t0_ns) / 1e9
         color = EVENT_COLORS[ei % len(EVENT_COLORS)]
         ax.axvline(t_s, color=color, lw=1.2, ls="-", alpha=0.85)
         ax.plot(t_s, 0, marker="v", markersize=8,
                 color=color, markeredgecolor="black", markeredgewidth=0.5)
-        ax.annotate(name,
-                    xy=(t_s, 1.0), xycoords=("data", "axes fraction"),
-                    xytext=(0, 4), textcoords="offset points",
-                    fontsize=7, color=color, fontweight="bold",
-                    rotation=90, rotation_mode="anchor",
-                    ha="left", va="center", annotation_clip=False)
+        group: list = [ax.annotate(
+            name,
+            xy=(t_s, 1.0), xycoords=("data", "axes fraction"),
+            xytext=(0, 4), textcoords="offset points",
+            fontsize=7, color=color, fontweight="bold",
+            rotation=90, rotation_mode="anchor",
+            ha="left", va="center", annotation_clip=False,
+            arrowprops=_leader_props(color))]
         if wall_ref_ns > 0:
             wall_ns = wall_ref_ns + (ts - steady_ref_ns)
             dt = datetime.fromtimestamp(wall_ns / 1e9, tz=timezone.utc)
@@ -456,12 +581,16 @@ def _render_event_strip(ax, events, t0_ns: int, xmax_s: float,
             # rotated lines. Shorter than one concatenated string, so
             # the strip's perpendicular footprint is smaller.
             label = f"{abs_str}\n{delta_s:+.3f}s"
-            ax.annotate(label,
-                        xy=(t_s, 0.0), xycoords=("data", "axes fraction"),
-                        xytext=(0, -4), textcoords="offset points",
-                        fontsize=7, color=color, fontweight="bold",
-                        rotation=90, rotation_mode="anchor",
-                        ha="right", va="center", annotation_clip=False)
+            group.append(ax.annotate(
+                label,
+                xy=(t_s, 0.0), xycoords=("data", "axes fraction"),
+                xytext=(0, -4), textcoords="offset points",
+                fontsize=7, color=color, fontweight="bold",
+                rotation=90, rotation_mode="anchor",
+                ha="right", va="center", annotation_clip=False,
+                arrowprops=_leader_props(color)))
+        groups.append(group)
+    return groups
 
 
 def _overlay_regions(metric_axes, regions, t0_ns: int) -> None:
@@ -876,13 +1005,17 @@ def main() -> int:
         _render_flush_panel(flush_ax, flush_sources, t0_ns, xmax_s)
 
     # ---------------- Strips + overlays ----------------
+    event_groups:  list[list] = []
+    region_groups: list[list] = []
     if event_ax is not None:
         ev_meta = probes["events"]["meta"]
-        _render_event_strip(event_ax, probes["events"]["events"], t0_ns, xmax_s,
-                            wall_ref_ns=ev_meta.wall_clock_epoch_ns if ev_meta else 0,
-                            steady_ref_ns=ev_meta.steady_clock_reference_ns if ev_meta else 0)
+        event_groups = _render_event_strip(
+            event_ax, probes["events"]["events"], t0_ns, xmax_s,
+            wall_ref_ns=ev_meta.wall_clock_epoch_ns if ev_meta else 0,
+            steady_ref_ns=ev_meta.steady_clock_reference_ns if ev_meta else 0)
     if region_ax is not None:
-        _render_region_strip(region_ax, probes["events"]["regions"], t0_ns, xmax_s)
+        region_groups = _render_region_strip(
+            region_ax, probes["events"]["regions"], t0_ns, xmax_s)
 
     if probes["events"]["regions"]:
         _overlay_regions(all_metric_axes, probes["events"]["regions"], t0_ns)
@@ -1013,6 +1146,20 @@ def main() -> int:
 
     title_y_frac = (fig_h - FIG_MARGIN_TOP + SPACING_TITLE) / fig_h
     fig.suptitle(title_line, fontsize=12, y=title_y_frac)
+
+    # ---------------- Resolve label overlaps ----------------
+    # Spread strip labels outward from the horizontal midpoint.
+    # Each event/region is one group: its name + time/duration
+    # share one anchor x and move together. Collision width uses
+    # the max bbox in the group so the 2-line time label dictates
+    # spacing on the event strip.
+    if event_groups or region_groups:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        if event_ax is not None:
+            _spread_rotated_label_groups(event_ax, event_groups, renderer)
+        if region_ax is not None:
+            _spread_rotated_label_groups(region_ax, region_groups, renderer)
 
     out_path = Path(args.output).resolve()
     _log(f"saving to {out_path}")
