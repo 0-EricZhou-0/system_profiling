@@ -182,10 +182,31 @@ class TraceProjector:
                 peak_nvlink_bw_bytes_per_s=g.peak_nvlink_bw_bytes_per_s,
             )
         fqns = self._scope_fqns(trace, _mc.SCOPE_GPU)
-        self._ingest_samples_uniform(
-            trace.samples, fqns, _mc.SCOPE_GPU,
-            scope_key_fn=lambda s: int(s.gpu_index),
-        )
+        if not fqns:
+            return
+        # GPU samples are timestamped in CUPTI's own clock domain. The
+        # trace header carries an anchor pair (`steady_clock_reference_ns`,
+        # `cupti_reference_ns`) captured at the same instant, so we can
+        # convert into the same `steady_clock` number space the system
+        # and disk probes use — necessary for shared X-axis plotting.
+        anchors = trace.header.anchors
+        if anchors.cupti_reference_ns:
+            cupti_to_steady = (int(anchors.steady_clock_reference_ns)
+                               - int(anchors.cupti_reference_ns))
+        else:
+            cupti_to_steady = 0
+        n = len(fqns)
+        for s in trace.samples:
+            ts = int(s.timestamp_ns) + cupti_to_steady
+            key = int(s.gpu_index)
+            self._note_scope_key(_mc.SCOPE_GPU, key)
+            for i in range(n):
+                cache = self._caches.get((fqns[i], key))
+                if cache is None:
+                    cache = _SeriesCache()
+                    self._caches[(fqns[i], key)] = cache
+                cache.ts.append(ts)
+                cache.vals.append(s.values[i])
 
     def ingest_system(self, trace) -> None:
         self._absorb_header(trace.header)
