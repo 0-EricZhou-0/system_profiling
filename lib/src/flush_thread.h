@@ -28,6 +28,7 @@ struct GpuDevicePayload {
     double                    peak_dram_bw_bytes_per_s;
     double                    peak_pcie_bw_bytes_per_s;
     double                    peak_nvlink_bw_bytes_per_s;
+    uint32_t                  max_warps_per_sm;
     std::vector<SamplerRange> samples;
 };
 
@@ -62,6 +63,7 @@ struct DeviceDrainSlot {
     double*             peak_dram_bw_bytes_per_s;
     double*             peak_pcie_bw_bytes_per_s;
     double*             peak_nvlink_bw_bytes_per_s;
+    uint32_t*           max_warps_per_sm;
     CuptiProfilerHost*  host;
 };
 

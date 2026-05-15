@@ -119,6 +119,7 @@ public:
         double                       peakDramBwBytesPerSec = 0.0;
         double                       peakPcieBwBytesPerSec = 0.0;
         double                       peakNvlinkBwBytesPerSec = 0.0;
+        uint32_t                     maxWarpsPerSm = 0;
         std::thread                  decodeThread;
         std::atomic<bool>            stopDecode{false};
         CUptiResult                  decodeResult = CUPTI_SUCCESS;
@@ -230,8 +231,14 @@ void GpuProfiler::Configure(const ProfilerConfig& config) {
         d.peakDramBwGbps        = (double)prop.memoryClockRate * 1e3
                                   * (prop.memoryBusWidth / 8) * 2 / 1e9;
         d.peakDramBwBytesPerSec = d.peakDramBwGbps * 1e9;
+        // Per-SM warp occupancy ceiling — used by the "Active Warps /
+        // Cycle" panel's peak.
+        d.maxWarpsPerSm = prop.warpSize > 0
+            ? static_cast<uint32_t>(prop.maxThreadsPerMultiProcessor / prop.warpSize)
+            : 0;
         std::cout << "  Peak DRAM BW: " << std::fixed << std::setprecision(1)
-                  << d.peakDramBwGbps << " GB/s\n";
+                  << d.peakDramBwGbps << " GB/s, max warps/SM: "
+                  << d.maxWarpsPerSm << "\n";
 
         // PCIe + NVLink peaks via NVML — best-effort, no fatal on failure.
         if (nvmlInit_v2() == NVML_SUCCESS) {
@@ -332,6 +339,7 @@ void GpuProfiler::Start() {
             s.peak_dram_bw_bytes_per_s   = &d->peakDramBwBytesPerSec;
             s.peak_pcie_bw_bytes_per_s   = &d->peakPcieBwBytesPerSec;
             s.peak_nvlink_bw_bytes_per_s = &d->peakNvlinkBwBytesPerSec;
+            s.max_warps_per_sm           = &d->maxWarpsPerSm;
             s.host                       = &d->host;
             slots.push_back(std::move(s));
         }
@@ -404,6 +412,7 @@ void GpuProfiler::Stop() {
             p.peak_dram_bw_bytes_per_s   = d->peakDramBwBytesPerSec;
             p.peak_pcie_bw_bytes_per_s   = d->peakPcieBwBytesPerSec;
             p.peak_nvlink_bw_bytes_per_s = d->peakNvlinkBwBytesPerSec;
+            p.max_warps_per_sm           = d->maxWarpsPerSm;
             p.samples                    = d->host.DrainSamples();
             totalRemaining              += p.samples.size();
             payloads.push_back(std::move(p));

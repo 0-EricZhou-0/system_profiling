@@ -59,6 +59,7 @@ class GpuDeviceInfo:
     peak_dram_bw_bytes_per_s: float = 0.0
     peak_pcie_bw_bytes_per_s: float = 0.0
     peak_nvlink_bw_bytes_per_s: float = 0.0
+    max_warps_per_sm: int = 0
 
 
 @dataclass
@@ -193,6 +194,7 @@ class TraceProjector:
                 peak_dram_bw_bytes_per_s=g.peak_dram_bw_bytes_per_s,
                 peak_pcie_bw_bytes_per_s=g.peak_pcie_bw_bytes_per_s,
                 peak_nvlink_bw_bytes_per_s=g.peak_nvlink_bw_bytes_per_s,
+                max_warps_per_sm=int(g.max_warps_per_sm),
             )
         fqns = self._scope_fqns(trace, _mc.SCOPE_GPU)
         if not fqns:

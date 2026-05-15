@@ -63,6 +63,11 @@ message GPUDeviceInfo {
     double peak_dram_bw_bytes_per_s = 4;
     double peak_pcie_bw_bytes_per_s = 5;
     double peak_nvlink_bw_bytes_per_s = 6;
+    // cudaDeviceProp.maxThreadsPerMultiProcessor / warpSize. The
+    // hardware ceiling that "Active Warps / Cycle" panels normalize
+    // against — chip-dependent (64 on Volta+/Hopper/Ampere, 32 on
+    // Turing).
+    uint32 max_warps_per_sm         = 7;
 }
 
 // Clock anchors used to convert sample timestamps between domains.

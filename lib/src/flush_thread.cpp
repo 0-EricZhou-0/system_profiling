@@ -61,6 +61,7 @@ GPUMetricsTrace BuildTrace(const std::string& hostname,
         dev->set_peak_dram_bw_bytes_per_s(d.peak_dram_bw_bytes_per_s);
         dev->set_peak_pcie_bw_bytes_per_s(d.peak_pcie_bw_bytes_per_s);
         dev->set_peak_nvlink_bw_bytes_per_s(d.peak_nvlink_bw_bytes_per_s);
+        dev->set_max_warps_per_sm(d.max_warps_per_sm);
 
         for (const auto& s : d.samples) {
             auto* sample = trace.add_samples();
@@ -122,6 +123,7 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
             p.peak_dram_bw_bytes_per_s   = *slot.peak_dram_bw_bytes_per_s;
             p.peak_pcie_bw_bytes_per_s   = *slot.peak_pcie_bw_bytes_per_s;
             p.peak_nvlink_bw_bytes_per_s = *slot.peak_nvlink_bw_bytes_per_s;
+            p.max_warps_per_sm           = *slot.max_warps_per_sm;
             p.samples                    = slot.host->DrainSamples();
             totalSamples += p.samples.size();
             payloads.push_back(std::move(p));
