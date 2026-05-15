@@ -28,6 +28,8 @@ except ImportError:
 
 from google.protobuf import text_format
 
+import metric_suffix as _suffix  # sibling under tools/
+
 
 Panel = _pn.Panel
 PanelLayout = _pn.PanelLayout
@@ -58,38 +60,6 @@ def load_panel_layout(path: str | os.PathLike) -> PanelLayout:
 # ---------------------------------------------------------------------------
 # GPU FQN -> MetricDescriptor synthesis
 # ---------------------------------------------------------------------------
-
-# Counter-name fragments that indicate the underlying value is bytes
-# (and so a `.per_second` suffix means bytes-per-second rather than Hz).
-_BYTE_COUNTER_FRAGMENTS = ("bytes", "throughput")
-
-
-def _infer_unit(entity: str, counter: str, submetric: str) -> int:
-    """Best-effort unit inference for an FQN that isn't declared in
-    the static catalog. Documented heuristic (see docs/metric-model.md):
-
-      .ratio                    -> RATIO
-      .pct                      -> PCT
-      .pct_of_peak_*            -> PCT
-      .per_second on byte-y     -> BYTES_PER_SEC
-      .per_second on cycle-y    -> HZ
-      .per_cycle_*              -> COUNT
-      everything else           -> COUNT
-    """
-    s = submetric.lower()
-    if s == "ratio":
-        return _mc.UNIT_RATIO
-    if s == "pct" or s.startswith("pct_of_"):
-        return _mc.UNIT_PCT
-    if s == "per_second":
-        is_bytey = any(frag in counter.lower() for frag in _BYTE_COUNTER_FRAGMENTS)
-        return _mc.UNIT_BYTES_PER_SEC if is_bytey else _mc.UNIT_HZ
-    if s.startswith("per_cycle"):
-        return _mc.UNIT_COUNT
-    if s.startswith("peak_"):
-        # peak_* by itself evaluates to a constant — render as count.
-        return _mc.UNIT_COUNT
-    return _mc.UNIT_COUNT
 
 
 def synthesize_descriptor(fqn: str) -> MetricDescriptor:
@@ -131,7 +101,12 @@ def synthesize_descriptor(fqn: str) -> MetricDescriptor:
     else:
         d.type = _mc.METRIC_TYPE_COUNTER
 
-    d.unit = _infer_unit(d.entity, d.counter, d.submetric)
+    d.unit = _suffix.unit_for(d.counter, d.submetric)
+    # Auto-derive a human-readable description from the suffix table
+    # so synthesized descriptors carry something useful for the
+    # visualizer's auto-title fallback. Catalog-declared metrics get
+    # their own `description` from the pbtxt and this is not used.
+    d.description = _suffix.label_for(d.entity, d.counter, d.rollup, d.submetric)
     d.smoothable = True
     return d
 
