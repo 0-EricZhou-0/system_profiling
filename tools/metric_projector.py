@@ -25,10 +25,7 @@ from typing import Any, Callable, Hashable
 
 import numpy as np
 
-try:
-    from cupti_profiler.proto import metric_catalog_pb2 as _mc
-except ImportError:
-    import metric_catalog_pb2 as _mc
+import metric_catalog_pb2 as _mc
 
 from metric_catalog import HostMeta, MetricCatalog, build_index
 

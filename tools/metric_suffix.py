@@ -16,10 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-try:
-    from cupti_profiler.proto import metric_catalog_pb2 as _mc
-except ImportError:
-    import metric_catalog_pb2 as _mc
+import metric_catalog_pb2 as _mc
 
 
 # ---------------------------------------------------------------------------

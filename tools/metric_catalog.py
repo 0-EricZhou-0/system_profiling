@@ -25,13 +25,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
-# Generated proto bindings — assumed importable (either dev path
-# `PYTHONPATH=generated/proto` or pip-installed under
-# cupti_profiler.proto). Try both shapes.
-try:
-    from cupti_profiler.proto import metric_catalog_pb2 as _mc
-except ImportError:
-    import metric_catalog_pb2 as _mc  # noqa: F401
+# Generated proto bindings. Entry-point scripts under tools/ put
+# `generated/proto/` on sys.path before importing this module.
+import metric_catalog_pb2 as _mc
 
 from google.protobuf import text_format
 

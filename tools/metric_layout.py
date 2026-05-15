@@ -19,12 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Optional
 
-try:
-    from cupti_profiler.proto import panels_pb2 as _pn
-    from cupti_profiler.proto import metric_catalog_pb2 as _mc
-except ImportError:
-    import panels_pb2 as _pn  # noqa: F401
-    import metric_catalog_pb2 as _mc
+import panels_pb2 as _pn
+import metric_catalog_pb2 as _mc
 
 from google.protobuf import text_format
 
