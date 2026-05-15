@@ -53,6 +53,7 @@ import events_pb2  # noqa: E402
 
 import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
+import metric_suffix  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 
@@ -301,6 +302,21 @@ def _series_label(series: metric_layout.ResolvedSeries,
 _COLOR_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
 
+def _panel_title(panel, series_list: list[metric_layout.ResolvedSeries]) -> str:
+    """Use the pbtxt-supplied title verbatim if set; otherwise derive
+    one from the first resolved series. Falls through to the
+    descriptor's `description` (catalog-declared) before consulting
+    `metric_suffix.label_for(...)` (suffix-table derivation)."""
+    if panel.title:
+        return panel.title
+    if not series_list:
+        return panel.series_glob
+    d = series_list[0].descriptor
+    if d.description:
+        return d.description
+    return metric_suffix.label_for(d.entity, d.counter, d.rollup, d.submetric)
+
+
 def _render_metric_panel(
     ax,
     panel,
@@ -312,7 +328,7 @@ def _render_metric_panel(
     t0_ns: int,
     pid_color_map: dict[int, str],
 ) -> None:
-    ax.set_title(panel.title, fontsize=10, loc="left")
+    ax.set_title(_panel_title(panel, series_list), fontsize=10, loc="left")
     ax.grid(True, alpha=0.3)
 
     unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
@@ -605,46 +621,6 @@ def _overlay_regions(metric_axes, regions, t0_ns: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Flush stats panel
-# ---------------------------------------------------------------------------
-
-def _build_flush_series(traces, first_sample_ns: int) -> tuple[np.ndarray, np.ndarray]:
-    """Walk traces in order and build (ts_s, MiBps) arrays. Each
-    flush_stats entry contributes one point at the running
-    cumulative-end of `flush_interval_ns`."""
-    times_ns = []
-    rates = []
-    cur_ns = first_sample_ns
-    for t in traces:
-        for fs in t.flush_stats:
-            if fs.flush_interval_ns == 0:
-                continue
-            cur_ns += int(fs.flush_interval_ns)
-            bps = float(fs.flush_byte_size) / (fs.flush_interval_ns / 1e9)
-            times_ns.append(cur_ns)
-            rates.append(bps)
-    return np.asarray(times_ns, dtype=np.int64), \
-           np.asarray(rates,    dtype=np.float64)
-
-
-def _render_flush_panel(ax, sources, t0_ns: int, xmax_s: float) -> None:
-    """sources: list of (label, color, ts_ns_array, rate_Bps_array)."""
-    ax.set_title("Per-probe Write Rate (file emission)", fontsize=10, loc="left")
-    ax.grid(True, alpha=0.3)
-    ax.set_ylabel("MiB/s")
-    for label, color, ts_ns, rates in sources:
-        if ts_ns.size == 0:
-            continue
-        time_s = (ts_ns - t0_ns) / 1e9
-        ax.plot(time_s, rates / (1024.0 ** 2), color=color, linewidth=1.0,
-                marker="o", markersize=2.5, label=label)
-    ax.set_xlim(0, xmax_s)
-    ax.legend(loc="upper right", fontsize=7, framealpha=0.85)
-    ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
-    ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
-
-
-# ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
 
@@ -861,41 +837,6 @@ def main() -> int:
                         pid_color_map[pid] = _COLOR_CYCLE[len(seen_pids) % len(_COLOR_CYCLE)]
                         seen_pids.append(pid)
 
-    # Flush sources
-    flush_sources = []
-    for key, color in (("gpu", "C0"), ("system", "C1"), ("disk", "C2")):
-        p = probes[key]
-        if not p["traces"]:
-            continue
-        # Anchor at the trace's first sample timestamp so the rate
-        # series sits on the same x axis as the metric panels.
-        first_ns = None
-        for t in p["traces"]:
-            for attr in ("samples", "system_samples", "device_samples"):
-                arr = getattr(t, attr, None)
-                if arr is not None and len(arr) > 0:
-                    if attr == "samples":
-                        first_ns = int(t.samples[0].timestamp_ns)
-                        # Convert GPU to steady_clock if needed
-                        if key == "gpu":
-                            anchors = t.header.anchors
-                            first_ns = _gpu_to_steady(
-                                first_ns,
-                                anchors.cupti_reference_ns,
-                                anchors.steady_clock_reference_ns)
-                    else:
-                        first_ns = int(arr[0].timestamp_ns)
-                    break
-            if first_ns is not None:
-                break
-        if first_ns is None:
-            continue
-        ts_ns, rates = _build_flush_series(p["traces"], first_ns)
-        # Convert GPU cumulative ts to steady too (the cumulative
-        # offset is already in steady space because we converted the
-        # anchor; flush_interval_ns is wall delta, domain-independent).
-        flush_sources.append((key.upper(), color, ts_ns, rates))
-
     # ---------------- Build inches-based layout ----------------
     sections: list[tuple[str, list[tuple[str, float]]]] = []
 
@@ -911,10 +852,6 @@ def main() -> int:
         if groups.get(group_key):
             sections.append((group_key,
                              [("metric", PANEL_HEIGHT_METRIC)] * len(groups[group_key])))
-
-    has_flush = bool(flush_sources)
-    if has_flush:
-        sections.append(("flush", [("metric", PANEL_HEIGHT_METRIC)]))
 
     has_footer = bool(probes["gpu"]["traces"] or probes["system"]["traces"]
                        or probes["disk"]["traces"])
@@ -967,26 +904,19 @@ def main() -> int:
     # Sort axes by role
     event_ax = region_ax = footer_ax = None
     metric_axes_by_group: dict[str, list] = {"gpu": [], "system": [], "disk": []}
-    flush_ax = None
     for group_key, panel_kind, ax in placed:
         if panel_kind == "event":  event_ax = ax
         elif panel_kind == "region": region_ax = ax
         elif panel_kind == "footer": footer_ax = ax
         elif panel_kind == "metric":
-            if group_key == "flush":
-                flush_ax = ax
-            else:
-                metric_axes_by_group[group_key].append(ax)
+            metric_axes_by_group[group_key].append(ax)
 
     all_metric_axes = []
     for g in ("gpu", "system", "disk"):
         all_metric_axes.extend(metric_axes_by_group[g])
-    if flush_ax is not None:
-        all_metric_axes.append(flush_ax)
 
     # ---------------- Render metric panels ----------------
-    _log(f"rendering {sum(len(v) for v in metric_axes_by_group.values())} metric panels"
-         f"{' + 1 flush panel' if flush_ax else ''}")
+    _log(f"rendering {sum(len(v) for v in metric_axes_by_group.values())} metric panels")
     sample_freq_for = {"gpu": probes["gpu"]["freq_hz"],
                        "system": probes["system"]["freq_hz"],
                        "disk": probes["disk"]["freq_hz"]}
@@ -1000,9 +930,6 @@ def main() -> int:
                 t0_ns=t0_ns,
                 pid_color_map=pid_color_map,
             )
-
-    if flush_ax is not None:
-        _render_flush_panel(flush_ax, flush_sources, t0_ns, xmax_s)
 
     # ---------------- Strips + overlays ----------------
     event_groups:  list[list] = []

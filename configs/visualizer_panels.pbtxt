@@ -30,13 +30,14 @@ panels {
     peak_constant: 100.0
 }
 panels {
-    title: "PCIe Bandwidth"
+    # title omitted -> auto-derived via metric_suffix.label_for:
+    # "PCIe Read Bytes / s (sum)"
     series_glob: "pcie__*_bytes.sum.per_second"
     unit_override: UNIT_BYTES_PER_SEC
     peak_from_gpu_info: "peak_pcie_bw_bytes_per_s"
 }
 panels {
-    title: "NVLink Bandwidth"
+    # title omitted -> auto-derived
     series_glob: "nvl*__*.per_second"
     unit_override: UNIT_BYTES_PER_SEC
     peak_from_gpu_info: "peak_nvlink_bw_bytes_per_s"

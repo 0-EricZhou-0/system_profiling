@@ -47,6 +47,7 @@ import session_metadata_pb2  # noqa: E402
 
 import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
+import metric_suffix  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 from bokeh.application import Application  # noqa: E402
@@ -204,6 +205,20 @@ def _series_label(series: metric_layout.ResolvedSeries,
 _PALETTE = list(Category10[10])
 
 
+def _panel_title(panel, series_list: list[metric_layout.ResolvedSeries]) -> str:
+    """Pbtxt `title:` wins; otherwise fall back to the resolved
+    descriptor's `description` (catalog) or `metric_suffix.label_for`
+    (FQN suffix table)."""
+    if panel.title:
+        return panel.title
+    if not series_list:
+        return panel.series_glob
+    d = series_list[0].descriptor
+    if d.description:
+        return d.description
+    return metric_suffix.label_for(d.entity, d.counter, d.rollup, d.submetric)
+
+
 def _build_panel(
     panel,
     series_list: list[metric_layout.ResolvedSeries],
@@ -221,7 +236,7 @@ def _build_panel(
     scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
 
     fig_kwargs = dict(
-        title=panel.title,
+        title=_panel_title(panel, series_list),
         x_axis_label="time (s)",
         y_axis_label=ylabel,
         width=1200, height=240,
@@ -527,7 +542,8 @@ def _build_live_panel(panel, series_list, projector, projection, t0_ns,
     scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
 
     fig_kwargs = dict(
-        title=panel.title, x_axis_label="time (s)", y_axis_label=ylabel,
+        title=_panel_title(panel, series_list),
+        x_axis_label="time (s)", y_axis_label=ylabel,
         width=1200, height=240,
         tools="xpan,xwheel_zoom,box_zoom,reset,save",
         active_drag="xpan", active_scroll="xwheel_zoom",
