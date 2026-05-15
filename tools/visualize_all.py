@@ -276,23 +276,25 @@ def _resolve_panel_peak(panel, descriptor, projector: TraceProjector) -> float |
 
 def _series_label(series: metric_layout.ResolvedSeries,
                   projector: TraceProjector) -> str:
-    fqn = series.fqn
+    """Compact legend label (panel title already carries the entity +
+    suffix). The long form lives in `<output>.legend.txt`."""
+    base = series.label_short
     key = series.scope_key
     if series.scope == mc_pb.SCOPE_SYSTEM:
-        return fqn
+        return base
     if series.scope == mc_pb.SCOPE_PROCESS:
         tp = projector.tracked_processes.get(int(key))
         if tp and tp.alias:
-            return f"{fqn}  [{tp.alias} (PID {key})]"
-        return f"{fqn}  [PID {key}]"
+            return f"{base}  [{tp.alias} (PID {key})]"
+        return f"{base}  [PID {key}]"
     if series.scope == mc_pb.SCOPE_DEVICE:
-        return f"{fqn}  [{key}]"
+        return f"{base}  [{key}]"
     if series.scope == mc_pb.SCOPE_GPU:
         info = projector.gpu_info.get(int(key))
         if info and info.device_name:
-            return f"{fqn}  [GPU {key}: {info.device_name}]"
-        return f"{fqn}  [GPU {key}]"
-    return fqn
+            return f"{base}  [GPU {key}: {info.device_name}]"
+        return f"{base}  [GPU {key}]"
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -618,6 +620,59 @@ def _overlay_regions(metric_axes, regions, t0_ns: int) -> None:
             ax.axvspan(r_start_s, r_end_s, alpha=0.08, color=color)
             ax.axvline(r_start_s, color=color, lw=0.6, ls="--", alpha=0.4)
             ax.axvline(r_end_s,   color=color, lw=0.6, ls="--", alpha=0.4)
+
+
+# ---------------------------------------------------------------------------
+# Companion legend file
+# ---------------------------------------------------------------------------
+
+def _scope_key_suffix(series: metric_layout.ResolvedSeries,
+                      projector: TraceProjector) -> str:
+    """Bracketed scope-key descriptor used by both the short legend
+    label on-plot and the long-form companion text file."""
+    key = series.scope_key
+    if series.scope == mc_pb.SCOPE_PROCESS:
+        tp = projector.tracked_processes.get(int(key))
+        if tp and tp.alias:
+            return f"[{tp.alias} (PID {key})]"
+        return f"[PID {key}]"
+    if series.scope == mc_pb.SCOPE_DEVICE:
+        return f"[{key}]"
+    if series.scope == mc_pb.SCOPE_GPU:
+        info = projector.gpu_info.get(int(key))
+        if info and info.device_name:
+            return f"[GPU {key}: {info.device_name}]"
+        return f"[GPU {key}]"
+    return ""
+
+
+def _write_legend_file(out_path: Path, png_path: Path,
+                       resolved, projector: TraceProjector) -> None:
+    """Dump every panel's series with both short and long labels +
+    the underlying FQN. Lives next to the rendered PNG so the
+    on-plot short legend stays compact while the long form is one
+    click away.
+
+    `resolved` is the list of (panel, series_list) tuples in render
+    order."""
+    lines: list[str] = []
+    lines.append(f"# Legend reference for {png_path.name}")
+    lines.append("#")
+    lines.append("# The on-plot legend uses `short`; this file pairs each entry")
+    lines.append("# with its `long` (suffix-derived) form and the underlying FQN.")
+    lines.append("")
+    for panel, series_list in resolved:
+        title = panel.title or _panel_title(panel, series_list)
+        lines.append(f"## {title}")
+        for s in series_list:
+            sk = _scope_key_suffix(s, projector)
+            short = s.label_short + (f"  {sk}" if sk else "")
+            long_ = s.label        + (f"  {sk}" if sk else "")
+            lines.append(f"  short : {short}")
+            lines.append(f"  long  : {long_}")
+            lines.append(f"  fqn   : {s.fqn}")
+            lines.append("")
+    out_path.write_text("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -1091,6 +1146,11 @@ def main() -> int:
     out_path = Path(args.output).resolve()
     _log(f"saving to {out_path}")
     fig.savefig(out_path, dpi=150)
+
+    legend_path = out_path.with_suffix(".legend.txt")
+    _write_legend_file(legend_path, out_path, resolved, projector)
+    _log(f"legend reference written to {legend_path}")
+
     _log("done")
     return 0
 

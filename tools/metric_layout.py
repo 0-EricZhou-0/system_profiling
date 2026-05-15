@@ -133,8 +133,28 @@ class ResolvedSeries:
 
     @property
     def label(self) -> str:
-        """Friendly legend label. Falls through to the FQN."""
-        return self.fqn
+        """Long-form pretty label for this series — same fallback chain
+        as the visualizers' `_panel_title`:
+
+          1. descriptor `description` (catalog-declared, wins if set)
+          2. `metric_suffix.label_for(entity, counter, rollup, submetric)`
+          3. raw FQN
+
+        Used for the companion `<output>.legend.txt` and for tooltips.
+        The scope-key suffix ("[PID 1234]", "[GPU 0: H100]", …) is
+        appended by the visualizer's `_series_label`, not here."""
+        d = self.descriptor
+        if d.description:
+            return d.description
+        return _suffix.label_for(d.entity, d.counter, d.rollup, d.submetric) or self.fqn
+
+    @property
+    def label_short(self) -> str:
+        """Compact legend label — just the pretty counter name. Keeps
+        plot legends from spilling across the page. The panel title
+        already carries the entity + suffix; the legend only needs to
+        differentiate series *within* one panel."""
+        return _suffix.pretty_counter(self.descriptor.counter) or self.fqn
 
 
 def resolve_panel_series(

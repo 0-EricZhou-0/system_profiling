@@ -179,22 +179,24 @@ def _resolve_panel_peak(panel, descriptor, projector: TraceProjector) -> float |
 
 def _series_label(series: metric_layout.ResolvedSeries,
                   projector: TraceProjector) -> str:
-    fqn, key = series.fqn, series.scope_key
+    """Compact legend label. Hover tooltips can carry the long form."""
+    base = series.label_short
+    key = series.scope_key
     if series.scope == mc_pb.SCOPE_SYSTEM:
-        return fqn
+        return base
     if series.scope == mc_pb.SCOPE_PROCESS:
         tp = projector.tracked_processes.get(int(key))
         if tp and tp.alias:
-            return f"{fqn}  [{tp.alias} (PID {key})]"
-        return f"{fqn}  [PID {key}]"
+            return f"{base}  [{tp.alias} (PID {key})]"
+        return f"{base}  [PID {key}]"
     if series.scope == mc_pb.SCOPE_DEVICE:
-        return f"{fqn}  [{key}]"
+        return f"{base}  [{key}]"
     if series.scope == mc_pb.SCOPE_GPU:
         info = projector.gpu_info.get(int(key))
         if info and info.device_name:
-            return f"{fqn}  [GPU {key}: {info.device_name}]"
-        return f"{fqn}  [GPU {key}]"
-    return fqn
+            return f"{base}  [GPU {key}: {info.device_name}]"
+        return f"{base}  [GPU {key}]"
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -594,25 +596,27 @@ def _live_series_factory(entry, fqn, scope_key, color, ts_s, vals,
     mid-run. Allocates a CDS, attaches it to the panel's figure, and
     returns the CDS so the coordinator can stream subsequent rows in."""
     cds = ColumnDataSource(data=dict(x=list(ts_s), y=list(vals)))
-    # Bokeh re-evaluates the legend after add_layout; using
-    # legend_label directly on .line attaches it cleanly.
-    label = f"{fqn}  [scope_key={scope_key}]"
+    # Short legend label — just the pretty counter name (the panel
+    # title already conveys the entity + suffix).
+    base = metric_suffix.pretty_counter(descriptor.counter) or fqn
     if descriptor.scope == mc_pb.SCOPE_PROCESS:
         tp = projector.tracked_processes.get(int(scope_key))
         if tp and tp.alias:
-            label = f"{fqn}  [{tp.alias} (PID {scope_key})]"
+            label = f"{base}  [{tp.alias} (PID {scope_key})]"
         else:
-            label = f"{fqn}  [PID {scope_key}]"
+            label = f"{base}  [PID {scope_key}]"
     elif descriptor.scope == mc_pb.SCOPE_GPU:
         info = projector.gpu_info.get(int(scope_key))
         if info and info.device_name:
-            label = f"{fqn}  [GPU {scope_key}: {info.device_name}]"
+            label = f"{base}  [GPU {scope_key}: {info.device_name}]"
         else:
-            label = f"{fqn}  [GPU {scope_key}]"
+            label = f"{base}  [GPU {scope_key}]"
     elif descriptor.scope == mc_pb.SCOPE_DEVICE:
-        label = f"{fqn}  [{scope_key}]"
+        label = f"{base}  [{scope_key}]"
     elif descriptor.scope == mc_pb.SCOPE_SYSTEM:
-        label = fqn
+        label = base
+    else:
+        label = f"{base}  [scope_key={scope_key}]"
     entry.figure.line("x", "y", source=cds, color=color, line_width=1.2,
                        legend_label=label)
     return cds
