@@ -339,6 +339,7 @@ deciding unilaterally:
 
 ## See also
 
+- [`cupti-fqn-suffixes.md`](cupti-fqn-suffixes.md) — full table of FQN suffixes (`.per_cycle_active`, `.pct_of_peak_sustained_elapsed`, `.per_second`, …) with the math CUPTI applies and the resulting unit. Also covers the auto-title fallback used when a panel in `visualizer_panels.pbtxt` omits `title:`.
 - [`system-guide.md` § GPU metrics reference](system-guide.md#gpu-metrics-reference) — the operational view (what to put in `metrics:`).
 - [`system-guide.md` § System & disk metrics reference](system-guide.md#system--disk-metrics-reference) — the current (pre-unification) field-by-field listing.
 - [`tools/README.md` § `list_pm_metrics`](tools/README.md#list_pm_metrics) — enumerate the live CUPTI catalog on the local GPU.

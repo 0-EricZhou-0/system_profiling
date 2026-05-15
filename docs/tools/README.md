@@ -41,7 +41,10 @@ loaded via `--catalog PATH`) and a `PanelLayout` pbtxt
 peak / scope; the panel layout declares which FQN globs go on which
 subplot. To add or remove panels, edit the pbtxt — no Python code
 changes needed. See [`metric-model.md`](../metric-model.md) for the
-type system.
+type system and [`cupti-fqn-suffixes.md`](../cupti-fqn-suffixes.md)
+for the full table of `.per_cycle_active` / `.pct_of_peak_*` /
+`.per_second` suffixes plus the auto-title fallback used when a
+panel omits `title:`.
 
 ## `visualize_single.py`
 
