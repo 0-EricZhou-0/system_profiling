@@ -175,14 +175,17 @@ def resolve_panel_series(
 
     `series_keys` is whatever (fqn, scope_key) tuples the projector
     has produced; we filter to those whose FQN matches the panel's
-    series_glob and whose descriptor scope matches the panel's scope.
-    """
+    series_glob. If `panel.scope` is set (non-zero) we additionally
+    require the descriptor's scope to match — but in practice the
+    FQN glob is enough because entity prefixes don't overlap across
+    scopes (`cpu__*` is always SCOPE_SYSTEM, `proc__*` is always
+    SCOPE_PROCESS, etc.), so leaving `panel.scope` unset works."""
     out: list[ResolvedSeries] = []
     for fqn, scope_key in series_keys:
         if not fnmatch.fnmatchcase(fqn, panel.series_glob):
             continue
         d = get_or_synthesize_descriptor(catalog_index, fqn)
-        if d.scope != panel.scope:
+        if panel.scope != _mc.SCOPE_UNSPECIFIED and d.scope != panel.scope:
             continue
         out.append(ResolvedSeries(
             fqn=fqn, scope=d.scope, scope_key=scope_key, descriptor=d,
