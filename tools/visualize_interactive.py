@@ -40,6 +40,7 @@ sys.path.insert(0, str(_HERE.parent / "generated" / "proto"))
 from google.protobuf.internal.decoder import _DecodeVarint32  # noqa: E402
 
 import metric_catalog_pb2 as mc_pb  # noqa: E402
+import panels_pb2 as panels_pb  # noqa: E402
 import gpu_metrics_pb2  # noqa: E402
 import system_metrics_pb2  # noqa: E402
 import disk_metrics_pb2  # noqa: E402
@@ -295,6 +296,122 @@ def _build_panel(
 
 
 # ---------------------------------------------------------------------------
+# Aggregation companion panels
+# ---------------------------------------------------------------------------
+
+# Source unit → integrated unit. Mirrors the table in visualize_all.py.
+_INTEGRATED_UNIT = {
+    mc_pb.UNIT_BYTES_PER_SEC: mc_pb.UNIT_BYTES,
+}
+
+
+def _trapz_cumulative(ts_ns: np.ndarray, vals: np.ndarray) -> np.ndarray:
+    """Trapezoidal cumulative integral of (timestamps_ns, values)."""
+    if ts_ns.size < 2:
+        return np.zeros_like(vals, dtype=np.float64)
+    dt_s = np.diff(ts_ns.astype(np.int64)) / 1e9
+    avg  = 0.5 * (vals[:-1].astype(np.float64) + vals[1:].astype(np.float64))
+    inc  = avg * dt_s
+    out  = np.empty(vals.size, dtype=np.float64)
+    out[0]  = 0.0
+    out[1:] = np.cumsum(inc)
+    return out
+
+
+def _panel_has_cumulative_companion(panel,
+                                     series_list: list[metric_layout.ResolvedSeries]
+                                     ) -> bool:
+    """Whether `panel` opted into PANEL_AGGREGATION_INTEGRATE AND the
+    source unit has a mapped integrated unit. Returns False (with no
+    warning) for non-integrable units — visualize_all.py logs the
+    skip; here we keep the live-render path quiet since this gets
+    called every tick."""
+    if panel.aggregation != panels_pb.PANEL_AGGREGATION_INTEGRATE:
+        return False
+    if not series_list:
+        return False
+    src_unit = (panel.unit_override
+                if panel.unit_override != mc_pb.UNIT_UNSPECIFIED
+                else series_list[0].descriptor.unit)
+    return src_unit in _INTEGRATED_UNIT
+
+
+def _build_cumulative_panel(
+    panel,
+    series_list: list[metric_layout.ResolvedSeries],
+    projector: TraceProjector,
+    projection: dict,
+    t0_ns: int,
+    x_range=None,
+) -> tuple:
+    """Bokeh equivalent of visualize_all._render_integrated_panel.
+
+    Returns (figure, cds_by_key) — same shape as _build_panel so the
+    static / live machinery treats it like a regular panel for layout
+    purposes. The CDS values are pre-cumulated; in live mode the
+    coordinator doesn't yet stream into these (cumulative requires
+    per-series running-total state — tracked as a follow-up).
+    """
+    src_unit = (panel.unit_override
+                if panel.unit_override != mc_pb.UNIT_UNSPECIFIED
+                else series_list[0].descriptor.unit)
+    integrated_unit = _INTEGRATED_UNIT.get(src_unit, mc_pb.UNIT_UNSPECIFIED)
+
+    # First pass: cumulate every series so we can size the byte-axis.
+    cumulatives: list[tuple[metric_layout.ResolvedSeries, np.ndarray, np.ndarray]] = []
+    max_total = 0.0
+    for series in series_list:
+        ts_ns, vals = projection[(series.fqn, series.scope_key)]
+        if ts_ns.size == 0:
+            continue
+        cum = _trapz_cumulative(ts_ns, vals.astype(np.float64))
+        cumulatives.append((series, ts_ns, cum))
+        if cum.size and cum[-1] > max_total:
+            max_total = float(cum[-1])
+
+    scale_fn, ylabel = _format_unit_axis(integrated_unit,
+                                          peak_hint=max_total if max_total > 0 else None)
+    base_title = _panel_title(panel, series_list)
+
+    fig_kwargs = dict(
+        title=f"{base_title}  (cumulative)",
+        x_axis_label="time (s)",
+        y_axis_label=ylabel,
+        width=1200, height=240,
+        tools="xpan,xwheel_zoom,box_zoom,reset,save",
+        active_drag="xpan", active_scroll="xwheel_zoom",
+        output_backend="webgl",
+    )
+    if x_range is not None:
+        fig_kwargs["x_range"] = x_range
+    fig = figure(**fig_kwargs)
+
+    cds_by_key: dict[tuple, ColumnDataSource] = {}
+    for i, (series, ts_ns, cum) in enumerate(cumulatives):
+        color = _PALETTE[i % len(_PALETTE)]
+        time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
+        cds = ColumnDataSource(data=dict(x=time_s, y=scale_fn(cum)))
+        cds_by_key[(series.fqn, series.scope_key)] = cds
+        fig.line("x", "y", source=cds, color=color, line_width=1.2,
+                 legend_label=_series_label(series, projector))
+
+    fig.y_range.start = 0.0
+
+    fig.add_tools(HoverTool(
+        tooltips=[("t", "@x{0.000}s"),
+                  ("total", f"@y{{0.000}} {ylabel}" if ylabel else "@y{0.000}")],
+        mode="vline",
+    ))
+
+    if fig.legend:
+        fig.legend.click_policy = "hide"
+        fig.legend.location = "top_left"
+        fig.legend.label_text_font_size = "8pt"
+
+    return fig, cds_by_key
+
+
+# ---------------------------------------------------------------------------
 # Static rendering path
 # ---------------------------------------------------------------------------
 
@@ -328,6 +445,15 @@ def _render_static(
         if shared_x is None:
             shared_x = fig.x_range
         figs.append(fig)
+        # Companion cumulative panel, directly below — opt-in per
+        # panel via aggregation: PANEL_AGGREGATION_INTEGRATE.
+        if _panel_has_cumulative_companion(panel, series):
+            cum_fig, _ = _build_cumulative_panel(
+                panel, series, projector, proj, t0_ns, x_range=shared_x)
+            figs.append(cum_fig)
+        elif panel.aggregation == panels_pb.PANEL_AGGREGATION_INTEGRATE:
+            _log(f"  panel {panel.title!r}: aggregation INTEGRATE set but "
+                 "source unit has no integrated mapping — skipping companion")
 
     layout_root = column(figs, sizing_mode="stretch_width")
     html = file_html(layout_root, INLINE, title=title)
@@ -455,6 +581,24 @@ def _run_live(args, metadata_path: Path) -> int:
         else _HERE.parent / "configs" / "visualizer_panels.pbtxt"
     layout = metric_layout.load_panel_layout(layout_path)
     _log(f"layout: {len(layout.panels)} panels")
+
+    # Cumulative companion panels need per-(panel, series) running-
+    # total state that the current LiveCoordinator doesn't carry — see
+    # _build_cumulative_panel docstring. Refuse to start live mode if
+    # the active layout asks for any integrate-aggregation panel,
+    # rather than silently freezing the cumulative at first paint.
+    # The companion lives in the static path and as a planned follow-
+    # up for live mode.
+    for panel in layout.panels:
+        if panel.aggregation == panels_pb.PANEL_AGGREGATION_INTEGRATE:
+            raise NotImplementedError(
+                f"panel {panel.title or panel.series_glob!r} has "
+                "aggregation: PANEL_AGGREGATION_INTEGRATE, but cumulative "
+                "companion panels are not supported in --live mode yet. "
+                "Either drop --live and render statically, or set "
+                "aggregation: PANEL_AGGREGATION_UNSPECIFIED on the panel "
+                "in the layout pbtxt."
+            )
 
     def make_doc(doc):
         """One coordinator + one document per browser session."""

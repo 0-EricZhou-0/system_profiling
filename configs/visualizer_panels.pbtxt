@@ -35,12 +35,17 @@ panels {
     series_glob: "pcie__*_bytes.sum.per_second"
     unit_override: UNIT_BYTES_PER_SEC
     peak_from_gpu_info: "peak_pcie_bw_bytes_per_s"
+    # Companion panel directly below: cumulative bytes transferred
+    # (∫ bandwidth dt). Auto-scales to KiB / MiB / GiB.
+    aggregation: PANEL_AGGREGATION_INTEGRATE
 }
 panels {
     # title omitted -> auto-derived
     series_glob: "nvl*__*.per_second"
     unit_override: UNIT_BYTES_PER_SEC
     peak_from_gpu_info: "peak_nvlink_bw_bytes_per_s"
+    # Companion panel: cumulative NVLink bytes (rx + tx).
+    aggregation: PANEL_AGGREGATION_INTEGRATE
 }
 
 # ============================================================
@@ -83,6 +88,8 @@ panels {
     title: "Disk Bandwidth"
     series_glob: "disk__*_bytes.*"
     unit_override: UNIT_BYTES_PER_SEC
+    # Companion panel: cumulative bytes read / written per device.
+    aggregation: PANEL_AGGREGATION_INTEGRATE
 }
 panels {
     title: "Disk Queue Depth"
@@ -92,4 +99,6 @@ panels {
     title: "Per-PID I/O"
     series_glob: "proc__io_*"
     unit_override: UNIT_BYTES_PER_SEC
+    # Companion panel: cumulative bytes per PID (rchar + wchar).
+    aggregation: PANEL_AGGREGATION_INTEGRATE
 }

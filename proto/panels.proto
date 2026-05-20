@@ -11,6 +11,19 @@ import "metric_catalog.proto";
 // The default layout ships as `configs/visualizer_panels.pbtxt`;
 // users override via the `--panel-layout PATH` CLI flag.
 
+// Optional companion-panel aggregation. When set, the renderer emits
+// a second panel directly below the source panel carrying an
+// aggregated form of the same series — useful for turning rates into
+// running totals (e.g. PCIe Bytes/s → cumulative Bytes).
+enum PanelAggregation {
+    PANEL_AGGREGATION_UNSPECIFIED = 0;   // no companion panel
+    // ∫ y dt — integrates the series over time. Best for *.per_second
+    // throughputs; the renderer derives the integrated unit
+    // (BYTES_PER_SEC → BYTES, etc.). Non-rate panels are skipped with
+    // a warning.
+    PANEL_AGGREGATION_INTEGRATE   = 1;
+}
+
 message Panel {
     // Human-readable header above the panel.
     string title         = 1;
@@ -41,6 +54,9 @@ message Panel {
         // SCOPE_GPU panels only.
         string peak_from_gpu_info        = 10;
     }
+
+    // Companion-panel aggregation. See enum docs.
+    PanelAggregation aggregation = 11;
 }
 
 message PanelLayout {

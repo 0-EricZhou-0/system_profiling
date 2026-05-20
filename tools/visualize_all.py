@@ -45,6 +45,7 @@ sys.path.insert(0, str(_HERE.parent / "generated" / "proto"))
 from google.protobuf.internal.decoder import _DecodeVarint32  # noqa: E402
 
 import metric_catalog_pb2 as mc_pb  # noqa: E402
+import panels_pb2 as panels_pb  # noqa: E402
 import gpu_metrics_pb2  # noqa: E402
 import system_metrics_pb2  # noqa: E402
 import disk_metrics_pb2  # noqa: E402
@@ -298,6 +299,39 @@ def _series_label(series: metric_layout.ResolvedSeries,
 
 
 # ---------------------------------------------------------------------------
+# Aggregation helpers
+# ---------------------------------------------------------------------------
+
+# Source unit → integrated unit. Used by PANEL_AGGREGATION_INTEGRATE to
+# pick the axis formatter for the cumulative companion panel.
+#   bytes/s × s          → bytes
+#   pct/s (=pct·s/s)     → not a sensible total → skip
+#   requests             → already a count → skip (would just sum gauge values)
+#   Hz × s               → cycles → fall through with no unit label
+_INTEGRATED_UNIT = {
+    mc_pb.UNIT_BYTES_PER_SEC: mc_pb.UNIT_BYTES,
+}
+
+
+def _trapz_cumulative(ts_ns: np.ndarray, vals: np.ndarray) -> np.ndarray:
+    """Trapezoidal cumulative integral of (timestamps_ns, values).
+
+    Returns an array the same length as ts_ns; the first element is 0
+    and each subsequent element accumulates 0.5·(y[i-1]+y[i])·Δt where
+    Δt is in seconds.
+    """
+    if ts_ns.size < 2:
+        return np.zeros_like(vals, dtype=np.float64)
+    dt_s = np.diff(ts_ns.astype(np.int64)) / 1e9
+    avg  = 0.5 * (vals[:-1].astype(np.float64) + vals[1:].astype(np.float64))
+    inc  = avg * dt_s
+    out  = np.empty(vals.size, dtype=np.float64)
+    out[0]  = 0.0
+    out[1:] = np.cumsum(inc)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Panel rendering
 # ---------------------------------------------------------------------------
 
@@ -394,6 +428,89 @@ def _render_metric_panel(
         axis.set_major_formatter(fmt)
 
     ax.legend(loc="upper right", fontsize=7, framealpha=0.85)
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
+    ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
+
+
+def _render_integrated_panel(
+    ax,
+    panel,
+    series_list: list[metric_layout.ResolvedSeries],
+    projector: TraceProjector,
+    projection: dict,
+    t0_ns: int,
+    pid_color_map: dict[int, str],
+) -> None:
+    """Companion to _render_metric_panel — plots ∫ y dt of each series.
+
+    Uses the panel's source unit (descriptor.unit, possibly overridden
+    by panel.unit_override) and looks up the integrated unit in
+    _INTEGRATED_UNIT. If the source unit isn't integrable, the panel
+    falls back to UNIT_UNSPECIFIED (no axis label, auto-scale).
+    """
+    source_unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
+        else series_list[0].descriptor.unit
+    integrated_unit = _INTEGRATED_UNIT.get(source_unit, mc_pb.UNIT_UNSPECIFIED)
+    title = _panel_title(panel, series_list) + "  (cumulative)"
+    ax.set_title(title, fontsize=10, loc="left")
+    ax.grid(True, alpha=0.3)
+
+    # First-pass max to size the byte-unit axis (KiB / MiB / GiB).
+    # Compute the cumulative arrays once, stash, plot.
+    max_total = 0.0
+    series_cumulatives: list[tuple[metric_layout.ResolvedSeries, np.ndarray, np.ndarray]] = []
+    for series in series_list:
+        ts_ns, vals = projection[(series.fqn, series.scope_key)]
+        if ts_ns.size == 0:
+            continue
+        cum = _trapz_cumulative(ts_ns, vals.astype(np.float64))
+        series_cumulatives.append((series, ts_ns, cum))
+        if cum.size and cum[-1] > max_total:
+            max_total = float(cum[-1])
+
+    scale_fn, ylabel = _format_unit_axis(integrated_unit,
+                                          peak_hint=max_total if max_total > 0 else None)
+    ax.set_ylabel(ylabel)
+
+    color_idx = 0
+    for series, ts_ns, cum in series_cumulatives:
+        if (series.scope == mc_pb.SCOPE_PROCESS
+                and int(series.scope_key) in pid_color_map):
+            color = pid_color_map[int(series.scope_key)]
+        else:
+            color = _COLOR_CYCLE[color_idx % len(_COLOR_CYCLE)]
+            color_idx += 1
+        time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
+        ax.plot(time_s, scale_fn(cum),
+                color=color, linewidth=0.9,
+                label=_series_label(series, projector))
+
+    # Annotate each series' run total at the right edge so the
+    # cumulative value is readable without squinting at the axis.
+    if series_cumulatives:
+        total_label_lines = []
+        for series, _ts, cum in series_cumulatives:
+            if cum.size == 0:
+                continue
+            total_label_lines.append(
+                f"{_series_label(series, projector)} = "
+                f"{_fmt_plain(scale_fn(float(cum[-1])))}"
+                f"{(' ' + ylabel) if ylabel else ''}"
+            )
+        if total_label_lines:
+            ax.text(0.99, 0.04, "\n".join(total_label_lines),
+                    transform=ax.transAxes, ha="right", va="bottom",
+                    fontsize=7, color="black",
+                    bbox=dict(facecolor="white", alpha=0.75,
+                              edgecolor="#cccccc", linewidth=0.5,
+                              boxstyle="round,pad=0.25"))
+
+    ax.set_ylim(bottom=0.0)
+    for axis in (ax.xaxis, ax.yaxis):
+        fmt = ticker.ScalarFormatter(useOffset=False, useMathText=False)
+        fmt.set_scientific(False)
+        axis.set_major_formatter(fmt)
+    ax.legend(loc="upper left", fontsize=7, framealpha=0.85)
     ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
@@ -653,16 +770,23 @@ def _write_legend_file(out_path: Path, png_path: Path,
     on-plot short legend stays compact while the long form is one
     click away.
 
-    `resolved` is the list of (panel, series_list) tuples in render
-    order."""
+    `resolved` is the list of (panel, series_list, kind) tuples in
+    render order. Integrated companion panels share the same series
+    set as their parent — we annotate the legend entry instead of
+    repeating the series list."""
     lines: list[str] = []
     lines.append(f"# Legend reference for {png_path.name}")
     lines.append("#")
     lines.append("# The on-plot legend uses `short`; this file pairs each entry")
     lines.append("# with its `long` (suffix-derived) form and the underlying FQN.")
     lines.append("")
-    for panel, series_list in resolved:
+    for panel, series_list, kind in resolved:
         title = panel.title or _panel_title(panel, series_list)
+        if kind == "integrated":
+            lines.append(f"## {title}  (cumulative)")
+            lines.append("  (companion panel — ∫ y dt of the entries above)")
+            lines.append("")
+            continue
         lines.append(f"## {title}")
         for s in series_list:
             sk = _scope_key_suffix(s, projector)
@@ -862,29 +986,44 @@ def main() -> int:
             catalog_index[fqn] = metric_layout.synthesize_descriptor(fqn)
 
     series_keys = list(proj.keys())
+    # `resolved` carries one entry per rendered subplot. Each is
+    # (panel, series_list, kind) where kind ∈ {"metric", "integrated"}.
+    # A panel with aggregation: PANEL_AGGREGATION_INTEGRATE produces
+    # *two* entries — the regular metric panel followed by its
+    # integrated companion (in adjacency order).
     resolved = []
     for panel in layout.panels:
         series = metric_layout.resolve_panel_series(panel, catalog_index, series_keys)
         if not series:
             _log(f"  skip panel {panel.title!r}  (no matching series)")
             continue
-        resolved.append((panel, series))
+        resolved.append((panel, series, "metric"))
+        if panel.aggregation == panels_pb.PANEL_AGGREGATION_INTEGRATE:
+            src_unit = (panel.unit_override
+                        if panel.unit_override != mc_pb.UNIT_UNSPECIFIED
+                        else series[0].descriptor.unit)
+            if src_unit not in _INTEGRATED_UNIT:
+                _log(f"  panel {panel.title!r}: aggregation INTEGRATE set "
+                     f"but source unit {src_unit} has no integrated unit "
+                     "mapping — skipping companion panel")
+            else:
+                resolved.append((panel, series, "integrated"))
     if not resolved:
         _log("no panels resolved any series")
         return 1
 
     # Group resolved panels by source probe.
     groups: dict[str, list] = {"gpu": [], "system": [], "disk": []}
-    for panel, series in resolved:
+    for panel, series, kind in resolved:
         g = _panel_group(series, projector.fqn_to_probe)
-        groups.setdefault(g, []).append((panel, series))
+        groups.setdefault(g, []).append((panel, series, kind))
 
     # Stable PID color map: shared across every per-PID panel so the
     # same PID renders in the same color everywhere.
     pid_color_map: dict[int, str] = {}
     seen_pids: list[int] = []
     for _g, panels in groups.items():
-        for _p, series_list in panels:
+        for _p, series_list, _k in panels:
             for s in series_list:
                 if s.scope == mc_pb.SCOPE_PROCESS:
                     pid = int(s.scope_key)
@@ -976,8 +1115,13 @@ def main() -> int:
                        "system": probes["system"]["freq_hz"],
                        "disk": probes["disk"]["freq_hz"]}
     for group_key in ("gpu", "system", "disk"):
-        for ax, (panel, series_list) in zip(
+        for ax, (panel, series_list, kind) in zip(
                 metric_axes_by_group[group_key], groups[group_key]):
+            if kind == "integrated":
+                _render_integrated_panel(
+                    ax, panel, series_list, projector, proj,
+                    t0_ns=t0_ns, pid_color_map=pid_color_map)
+                continue
             _render_metric_panel(
                 ax, panel, series_list, projector, proj,
                 sample_freq_hz=sample_freq_for[group_key],
