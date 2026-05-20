@@ -94,13 +94,15 @@ def main() -> int:
         if fqn not in catalog_index:
             catalog_index[fqn] = metric_layout.synthesize_descriptor(fqn)
 
-    # Filter to GPU-only panels.
+    # Filter to GPU-only series. `Panel.scope` is optional in the
+    # default layout, so we filter on the resolved series' descriptor
+    # scope — non-GPU panels naturally drop out when their globs match
+    # no SCOPE_GPU FQNs.
     series_keys = list(proj.keys())
     resolved = []
     for panel in layout.panels:
-        if panel.scope != mc_pb.SCOPE_GPU:
-            continue
         series = metric_layout.resolve_panel_series(panel, catalog_index, series_keys)
+        series = [s for s in series if s.scope == mc_pb.SCOPE_GPU]
         if not series:
             continue
         resolved.append((panel, series))
@@ -116,10 +118,11 @@ def main() -> int:
     )
     axes = axes.flatten()
     for ax, (panel, series_list) in zip(axes, resolved):
-        _va._render_panel(ax, panel, series_list, projector, proj,
-                          sample_freq_hz=sample_freq,
-                          smooth_window_s=args.smooth_window_s,
-                          t0_ns=t0_ns)
+        _va._render_metric_panel(ax, panel, series_list, projector, proj,
+                                 sample_freq_hz=sample_freq,
+                                 smooth_window_s=args.smooth_window_s,
+                                 t0_ns=t0_ns,
+                                 pid_color_map={})
     axes[-1].set_xlabel("time (s)")
 
     info = next(iter(projector.gpu_info.values()), None)
