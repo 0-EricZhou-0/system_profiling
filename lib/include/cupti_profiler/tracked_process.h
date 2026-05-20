@@ -1,6 +1,6 @@
 // Shared "one tracked PID, optionally with a display alias" struct used by
-// SystemProfiler and DiskProfiler configs. Mirrors the TrackedProcess proto
-// message in proto/tracked_process.proto.
+// SystemProfiler and DiskProfiler configs. Mirrors the TrackedProcessV2 proto
+// message in proto/metric_sample.proto.
 
 #pragma once
 
