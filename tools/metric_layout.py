@@ -157,6 +157,58 @@ class ResolvedSeries:
         return _suffix.pretty_counter(self.descriptor.counter) or self.fqn
 
 
+def disambiguate_short_labels(
+    series_list: list[ResolvedSeries],
+) -> dict[tuple[str, object], str]:
+    """For one panel's series list, return the minimum-length labels
+    that keep every entry distinct.
+
+    Starts from `ResolvedSeries.label_short`. For each group of series
+    that collapse to the same short label, widens *only that group*
+    by the first axis among {entity, rollup, submetric} that actually
+    differs across the colliding series. The scope-key suffix
+    ('[GPU 0: H100]', '[PID 1234]') is appended later by the
+    visualizer and isn't considered here.
+
+    The result is keyed by `(fqn, scope_key)` — that tuple is the
+    visualizer's canonical series identity."""
+    labels: dict[tuple[str, object], str] = {
+        (s.fqn, s.scope_key): s.label_short for s in series_list
+    }
+    # Group series by their initial label.
+    groups: dict[str, list[ResolvedSeries]] = {}
+    for s in series_list:
+        groups.setdefault(s.label_short, []).append(s)
+
+    for label, members in groups.items():
+        if len(members) < 2:
+            continue
+        # Pick the first axis on which these series actually differ.
+        # Most realistic collisions disambiguate on entity (e.g.
+        # nvlrx__bytes vs nvltx__bytes) or rollup (e.g. avg vs max).
+        entities  = {m.descriptor.entity  for m in members}
+        rollups   = {m.descriptor.rollup  for m in members}
+        submetrics = {m.descriptor.submetric for m in members}
+        # If every standard descriptor axis matches across the group,
+        # the only thing that varies is scope_key (e.g. same FQN
+        # measured on multiple GPUs / PIDs / devices). The visualizer
+        # appends the scope-key suffix later, so leaving label_short
+        # alone keeps the legend terse.
+        if len(entities) == 1 and len(rollups) == 1 and len(submetrics) == 1:
+            continue
+        for s in members:
+            d = s.descriptor
+            if len(entities) > 1:
+                labels[(s.fqn, s.scope_key)] = (
+                    f"{_suffix.pretty_entity(d.entity)} {label}"
+                )
+            elif len(rollups) > 1 and d.rollup:
+                labels[(s.fqn, s.scope_key)] = f"{label} ({d.rollup})"
+            elif len(submetrics) > 1 and d.submetric:
+                labels[(s.fqn, s.scope_key)] = f"{label} [{d.submetric}]"
+    return labels
+
+
 def resolve_panel_series(
     panel: Panel,
     catalog_index: dict[str, MetricDescriptor],

@@ -220,6 +220,19 @@ def _kernel_size(sample_freq_hz: float, window_s: float) -> int:
     return max(1, int(round(sample_freq_hz * window_s)))
 
 
+def _decimate_to_hz(ts_ns: np.ndarray, vals: np.ndarray,
+                    source_hz: float, target_hz: float
+                    ) -> tuple[np.ndarray, np.ndarray]:
+    """Stride-based downsampling: keep every Nth sample where
+    N = source_hz / target_hz. Cheap and predictable; loses transient
+    spikes (use a smaller stride or skip downsampling if you need them).
+    No-op when target_hz <= 0, source_hz <= 0, or source_hz <= target_hz."""
+    if target_hz <= 0 or source_hz <= 0 or source_hz <= target_hz:
+        return ts_ns, vals
+    step = max(1, int(round(source_hz / target_hz)))
+    return ts_ns[::step], vals[::step]
+
+
 # ---------------------------------------------------------------------------
 # Unit formatting
 # ---------------------------------------------------------------------------
@@ -276,10 +289,17 @@ def _resolve_panel_peak(panel, descriptor, projector: TraceProjector) -> float |
 # ---------------------------------------------------------------------------
 
 def _series_label(series: metric_layout.ResolvedSeries,
-                  projector: TraceProjector) -> str:
+                  projector: TraceProjector,
+                  base: str | None = None) -> str:
     """Compact legend label (panel title already carries the entity +
-    suffix). The long form lives in `<output>.legend.txt`."""
-    base = series.label_short
+    suffix). The long form lives in `<output>.legend.txt`.
+
+    `base` overrides `series.label_short`; pass the disambiguated
+    label from `metric_layout.disambiguate_short_labels` when rendering
+    multiple series in one panel so colliding entries (e.g. avg/max
+    rollups) stay distinguishable."""
+    if base is None:
+        base = series.label_short
     key = series.scope_key
     if series.scope == mc_pb.SCOPE_SYSTEM:
         return base
@@ -291,9 +311,11 @@ def _series_label(series: metric_layout.ResolvedSeries,
     if series.scope == mc_pb.SCOPE_DEVICE:
         return f"{base}  [{key}]"
     if series.scope == mc_pb.SCOPE_GPU:
-        info = projector.gpu_info.get(int(key))
-        if info and info.device_name:
-            return f"{base}  [GPU {key}: {info.device_name}]"
+        # Single-GPU runs need no scope-key suffix — the panel title
+        # carries the entity + suffix. With multiple GPUs, label by
+        # index only; the device-name string just inflates the legend.
+        if len(projector.gpu_info) <= 1:
+            return base
         return f"{base}  [GPU {key}]"
     return base
 
@@ -363,6 +385,7 @@ def _render_metric_panel(
     smooth_window_s: float,
     t0_ns: int,
     pid_color_map: dict[int, str],
+    display_hz: float = 0.0,
 ) -> None:
     ax.set_title(_panel_title(panel, series_list), fontsize=10, loc="left")
     ax.grid(True, alpha=0.3)
@@ -372,6 +395,8 @@ def _render_metric_panel(
     peak_hint = _resolve_panel_peak(panel, series_list[0].descriptor, projector)
     scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
     ax.set_ylabel(ylabel)
+
+    label_bases = metric_layout.disambiguate_short_labels(series_list)
 
     color_idx = 0
     for series in series_list:
@@ -390,10 +415,16 @@ def _render_metric_panel(
             k = _kernel_size(sample_freq_hz, smooth_window_s)
             vals = _smooth(vals.astype(np.float64), k)
 
+        # Smooth-then-decimate: smoothing acts as the anti-aliasing
+        # filter so stride-based decimation doesn't fold high-frequency
+        # content back into the visible band.
+        ts_ns, vals = _decimate_to_hz(ts_ns, vals, sample_freq_hz, display_hz)
+
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
         ax.plot(time_s, scale_fn(vals),
                 color=color, linewidth=0.9,
-                label=_series_label(series, projector))
+                label=_series_label(series, projector,
+                                    base=label_bases[(series.fqn, series.scope_key)]))
 
     peak_scaled = None
     if peak_hint is not None and peak_hint > 0:
@@ -440,6 +471,8 @@ def _render_integrated_panel(
     projection: dict,
     t0_ns: int,
     pid_color_map: dict[int, str],
+    sample_freq_hz: float = 0.0,
+    display_hz: float = 0.0,
 ) -> None:
     """Companion to _render_metric_panel — plots ∫ y dt of each series.
 
@@ -472,6 +505,8 @@ def _render_integrated_panel(
                                           peak_hint=max_total if max_total > 0 else None)
     ax.set_ylabel(ylabel)
 
+    label_bases = metric_layout.disambiguate_short_labels(series_list)
+
     color_idx = 0
     for series, ts_ns, cum in series_cumulatives:
         if (series.scope == mc_pb.SCOPE_PROCESS
@@ -480,10 +515,16 @@ def _render_integrated_panel(
         else:
             color = _COLOR_CYCLE[color_idx % len(_COLOR_CYCLE)]
             color_idx += 1
-        time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
-        ax.plot(time_s, scale_fn(cum),
+        # Decimate the cumulative curve for display; the run-total
+        # annotation below uses cum[-1] which is computed from the
+        # full-resolution series, so the total stays faithful.
+        ts_plot, cum_plot = _decimate_to_hz(ts_ns, cum,
+                                            sample_freq_hz, display_hz)
+        time_s = (ts_plot.astype(np.int64) - t0_ns) / 1e9
+        ax.plot(time_s, scale_fn(cum_plot),
                 color=color, linewidth=0.9,
-                label=_series_label(series, projector))
+                label=_series_label(series, projector,
+                                    base=label_bases[(series.fqn, series.scope_key)]))
 
     # Annotate each series' run total at the right edge so the
     # cumulative value is readable without squinting at the axis.
@@ -493,7 +534,7 @@ def _render_integrated_panel(
             if cum.size == 0:
                 continue
             total_label_lines.append(
-                f"{_series_label(series, projector)} = "
+                f"{_series_label(series, projector, base=label_bases[(series.fqn, series.scope_key)])} = "
                 f"{_fmt_plain(scale_fn(float(cum[-1])))}"
                 f"{(' ' + ylabel) if ylabel else ''}"
             )
@@ -756,9 +797,8 @@ def _scope_key_suffix(series: metric_layout.ResolvedSeries,
     if series.scope == mc_pb.SCOPE_DEVICE:
         return f"[{key}]"
     if series.scope == mc_pb.SCOPE_GPU:
-        info = projector.gpu_info.get(int(key))
-        if info and info.device_name:
-            return f"[GPU {key}: {info.device_name}]"
+        if len(projector.gpu_info) <= 1:
+            return ""
         return f"[GPU {key}]"
     return ""
 
@@ -788,10 +828,12 @@ def _write_legend_file(out_path: Path, png_path: Path,
             lines.append("")
             continue
         lines.append(f"## {title}")
+        label_bases = metric_layout.disambiguate_short_labels(series_list)
         for s in series_list:
             sk = _scope_key_suffix(s, projector)
-            short = s.label_short + (f"  {sk}" if sk else "")
-            long_ = s.label        + (f"  {sk}" if sk else "")
+            base = label_bases[(s.fqn, s.scope_key)]
+            short = base + (f"  {sk}" if sk else "")
+            long_ = s.label + (f"  {sk}" if sk else "")
             lines.append(f"  short : {short}")
             lines.append(f"  long  : {long_}")
             lines.append(f"  fqn   : {s.fqn}")
@@ -938,6 +980,14 @@ def main() -> int:
                              "configs/visualizer_panels.pbtxt)")
     parser.add_argument("--smooth-window-s", type=float, default=0.0,
                         help="Boxcar smoothing window in seconds. 0 = none.")
+    parser.add_argument("--display-hz", type=float, default=0.0,
+                        help="Downsample every series to this rate (in Hz) "
+                             "before plotting via stride decimation. 0 (the "
+                             "default) keeps the raw sampling rate. Applied "
+                             "after smoothing so the smoothing pass acts as "
+                             "the anti-aliasing filter. Run-total annotations "
+                             "on cumulative panels still use the full-rate "
+                             "data so the displayed totals stay faithful.")
     args = parser.parse_args()
 
     metadata_path = Path(args.metadata).resolve()
@@ -1120,7 +1170,9 @@ def main() -> int:
             if kind == "integrated":
                 _render_integrated_panel(
                     ax, panel, series_list, projector, proj,
-                    t0_ns=t0_ns, pid_color_map=pid_color_map)
+                    t0_ns=t0_ns, pid_color_map=pid_color_map,
+                    sample_freq_hz=sample_freq_for[group_key],
+                    display_hz=args.display_hz)
                 continue
             _render_metric_panel(
                 ax, panel, series_list, projector, proj,
@@ -1128,6 +1180,7 @@ def main() -> int:
                 smooth_window_s=args.smooth_window_s,
                 t0_ns=t0_ns,
                 pid_color_map=pid_color_map,
+                display_hz=args.display_hz,
             )
 
     # ---------------- Strips + overlays ----------------
