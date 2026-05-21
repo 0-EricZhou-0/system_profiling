@@ -61,38 +61,44 @@ IOWait %          = delta(iowait) / delta(total) × 100
 
 **Implementation:** `ReadCPUStat()` in `lib/src/proc_readers.cpp` reads the first line, parses 8 fields into a `CPUStatSnapshot`. Delta computation happens in `SystemProfiler::Impl`'s sample thread.
 
-### Per-process CPU — `/proc/[PID]/stat`
+### Per-process CPU — `/proc/[PID]/schedstat`
 
-**Source:** Single line with 52+ space-separated fields.
-
-**Parsing challenge:** Field 2 (`comm`) is the process name in parentheses and can contain spaces, parentheses, and newlines. The correct parsing strategy is:
-
-1. Find the **last** `)` in the line
-2. Fields after it start at index 3 (1-indexed)
-3. Count from there: field 14 = `utime`, field 15 = `stime`, field 42 = `delayacct_blkio_ticks`
+**Source:** Three integer fields on one line (kernel docs:
+`scheduler/sched-stats.rst`):
 
 ```text ln:false
-Fields of interest (1-indexed):
-  14: utime             — user mode ticks
-  15: stime             — kernel mode ticks
-  42: delayacct_blkio_ticks — cumulative I/O wait ticks
+  1: sum_exec_runtime — nanoseconds the task has spent on a CPU
+  2: run_delay        — nanoseconds spent waiting in the runqueue
+                         (gated by `kernel.sched_schedstats` sysctl)
+  3: pcount           — number of times scheduled onto a CPU
 ```
+
+The profiler reads only field 1. The other two are intentionally
+ignored — `run_delay` requires a sysctl that defaults to off on
+Linux 4.6+, and `pcount` isn't a metric we surface.
 
 **Per-process CPU %:**
 
 ```text ln:false
-User %   = delta(utime) / (dt_seconds × CLK_TCK) × 100
-System % = delta(stime) / (dt_seconds × CLK_TCK) × 100
-IOWait % = delta(blkio_ticks) / (dt_seconds × CLK_TCK) × 100
+Active % = delta(sum_exec_runtime_ns) / dt_ns × 100
 ```
 
 > [!IMPORTANT]
-> Per-process CPU % can exceed 100% on multi-core systems (e.g., a process using 4 cores reports ~400%).
+> Per-process CPU % can exceed 100% on multi-core systems (e.g., a
+> process using 4 cores reports ~400%). The panel `peak_expr`
+> caps the y-axis at `ncpus × 100`.
 
-> [!WARNING]
-> `delayacct_blkio_ticks` (field 42) requires `CONFIG_TASK_DELAY_ACCT=y` in the kernel config. This is enabled on most distributions but if absent, the field reads as 0.
+> [!NOTE]
+> `sum_exec_runtime` is always tracked by the kernel scheduler
+> regardless of the `kernel.sched_schedstats` sysctl, so per-PID
+> CPU works out-of-the-box on every mainstream distro. This is the
+> reason we switched from `/proc/[PID]/stat`'s `utime/stime` (10 ms
+> `CLK_TCK` quantization → 0/100/200% staircase at 100 Hz sampling)
+> to schedstat's nanosecond-precise field 1. The cost is that we
+> no longer split per-PID time into user / kernel / iowait —
+> `sum_exec_runtime` is total on-CPU time only.
 
-**Implementation:** `ReadPIDStat()` in `lib/src/proc_readers.cpp`.
+**Implementation:** `ReadPIDSchedStat()` in `lib/src/proc_readers.cpp`.
 
 ### System memory — `/proc/meminfo`
 
@@ -340,9 +346,7 @@ The `ProfilerSuite::LoadConfig()` method:
 
 | Metric | Unit | Source |
 | ------ | ---- | ------ |
-| `user_pct` | % | `delta(utime) / (dt × CLK_TCK) × 100` from `/proc/[PID]/stat` |
-| `system_pct` | % | `delta(stime) / (dt × CLK_TCK) × 100` |
-| `iowait_pct` | % | `delta(blkio_ticks) / (dt × CLK_TCK) × 100` |
+| `cpu_pct` | % of one core | `delta(sum_exec_runtime_ns) / dt_ns × 100` from `/proc/[PID]/schedstat` field 1 |
 
 ### Memory (system-wide)
 

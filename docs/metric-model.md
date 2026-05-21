@@ -228,17 +228,19 @@ Today's `CPUProcessSample` and `MemoryProcessSample`:
 
 | Legacy field | Catalog FQN | Type | Unit | Peak | Scope |
 | ------------- | ------------ | ---- | ---- | ---- | ----- |
-| `user_pct` | `proc__cycles_user.sum.per_second` | Counter | PCT (of one core) | `100 × ncpus` | `PROCESS(pid)` |
-| `system_pct` | `proc__cycles_kernel.sum.per_second` | Counter | PCT (of one core) | `100 × ncpus` | `PROCESS(pid)` |
-| `iowait_pct` | `proc__cycles_iowait.sum.per_second` | Counter | PCT (of one core) | `100 × ncpus` | `PROCESS(pid)` |
+| `cpu_pct` | `proc__cycles_active.sum.per_second` | Counter | PCT (of one core) | `100 × ncpus` | `PROCESS(pid)` |
 | `rss_bytes` | `proc__rss_bytes` | Counter | BYTES | `mem.capacity_bytes` | `PROCESS(pid)` |
 | `vms_bytes` | `proc__vms_bytes` | Counter | BYTES | — | `PROCESS(pid)` |
 | `shared_bytes` | `proc__shared_bytes` | Counter | BYTES | `mem.capacity_bytes` | `PROCESS(pid)` |
 
-> Per-PID `*_pct` are documented as "% of one CPU" — modelling them as a
-> Counter with `.sum.per_second` semantics (not pre-normalized) is more
-> faithful: a 4-thread saturating process reports `400`, exactly what
-> `.sum` across four cores would yield.
+> Per-PID `cpu_pct` is "% of one CPU" — modelling it as a Counter with
+> `.sum.per_second` semantics (not pre-normalized) is more faithful: a
+> 4-thread saturating process reports `400`, exactly what `.sum` across
+> four cores would yield. The value is derived from `/proc/<pid>/schedstat`
+> field 1 (`sum_exec_runtime` in ns), giving nanosecond precision rather
+> than the 10 ms `CLK_TCK` quantization that `utime/stime` would impose.
+> The trade-off is that we no longer split per-PID time into user /
+> kernel / iowait — schedstat reports total on-CPU time only.
 
 ### 2.4 — Mapping `DiskMetricsTrace`
 
