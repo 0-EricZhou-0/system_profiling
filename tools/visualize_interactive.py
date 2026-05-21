@@ -1020,8 +1020,12 @@ def _render_static(
 
     # Free up wheel-zoom near the bounds so the gesture isn't rejected
     # when the cursor sits next to an edge that already touches a bound.
+    # Also drop the Bokeh logo from every toolbar (15 logos across the
+    # page is visual noise; the framework is implicit from the file
+    # extension).
     for f in strips + figs:
         _relax_wheel_zoom(f)
+        f.toolbar.logo = None
 
     # Wrap both strips in their own Column with spacing=0 so there's
     # no transparent gap between them during scroll, and make THAT
