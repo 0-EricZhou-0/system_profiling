@@ -300,6 +300,33 @@ _RENDER_BACKEND = "canvas"
 _YLIM_HEADROOM = 1.10
 
 
+# Per-theme colors. The plot internals are handled by Bokeh's
+# `dark_minimal` theme; this table covers the bits Bokeh doesn't
+# touch (page background, loading overlay, sticky-strip fills,
+# dashed separator). Mutated by main() from --theme.
+_THEMES = {
+    "light": {
+        "bokeh_theme":   None,
+        "page_bg":       "#ffffff",
+        "page_fg":       "#333333",
+        "strip_bg":      "#ffffff",
+        "strip_border":  "#888888",
+        "overlay_track": "#e0e0e0",
+        "overlay_accent": "#3870c4",
+    },
+    "dark": {
+        "bokeh_theme":    "dark_minimal",
+        "page_bg":        "#15191c",
+        "page_fg":        "#cdd0d4",
+        "strip_bg":       "#20262d",
+        "strip_border":   "#555555",
+        "overlay_track":  "#333a40",
+        "overlay_accent": "#5b9bd5",
+    },
+}
+_THEME = "light"
+
+
 def _attach_unified_hover(
     fig,
     series_list: list[metric_layout.ResolvedSeries],
@@ -673,8 +700,8 @@ def _build_region_strip(regions, t0_ns: int, x_range) -> "figure":
     # strip figures are wrapped in a single sticky Column at the
     # call site (gap-free), so the sticky positioning lives there
     # rather than on each strip.
-    fig.background_fill_color = "#ffffff"
-    fig.border_fill_color     = "#ffffff"
+    fig.background_fill_color = _THEMES[_THEME]["strip_bg"]
+    fig.border_fill_color     = _THEMES[_THEME]["strip_bg"]
     fig.yaxis.visible = False
     fig.ygrid.visible = False
     fig.xaxis.visible = False
@@ -714,8 +741,8 @@ def _build_event_strip(events, t0_ns: int, x_range) -> "figure":
         active_drag="xpan", active_scroll="xwheel_zoom",
         output_backend=_RENDER_BACKEND,
     )
-    fig.background_fill_color = "#ffffff"
-    fig.border_fill_color     = "#ffffff"
+    fig.background_fill_color = _THEMES[_THEME]["strip_bg"]
+    fig.border_fill_color     = _THEMES[_THEME]["strip_bg"]
     fig.yaxis.visible = False
     fig.ygrid.visible = False
     fig.xaxis.visible = False
@@ -760,46 +787,50 @@ def _overlay_regions(figs: list, regions, t0_ns: int) -> None:
 # finishes hydrating every document on the page. Without this, a multi-MB
 # HTML can look frozen for several seconds while the browser parses JSON
 # and lays out canvases.
-_LOADING_OVERLAY_HEAD = """\
+def _loading_overlay_head(theme: dict) -> str:
+    """CSS for the loading overlay + page body background. Pulls
+    colors from the active theme (light or dark)."""
+    return f"""\
 <style>
-  #cupti-loading-overlay {
+  html, body {{ background: {theme["page_bg"]}; color: {theme["page_fg"]}; }}
+  #cupti-loading-overlay {{
     position: fixed; inset: 0;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     gap: 14px;
-    background: #ffffff;
+    background: {theme["page_bg"]};
     z-index: 999999;
     transition: opacity 0.25s ease;
     font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    color: #333;
-  }
-  #cupti-loading-overlay.hidden { opacity: 0; pointer-events: none; }
-  #cupti-loading-overlay .spinner {
+    color: {theme["page_fg"]};
+  }}
+  #cupti-loading-overlay.hidden {{ opacity: 0; pointer-events: none; }}
+  #cupti-loading-overlay .spinner {{
     width: 44px; height: 44px;
-    border: 4px solid #e0e0e0;
-    border-top-color: #3870c4;
+    border: 4px solid {theme["overlay_track"]};
+    border-top-color: {theme["overlay_accent"]};
     border-radius: 50%;
     animation: cupti-spin 0.9s linear infinite;
-  }
-  #cupti-loading-overlay .label  { font-weight: 500; }
-  #cupti-loading-overlay .meta   { color: #777; font-size: 12px; font-variant-numeric: tabular-nums; }
+  }}
+  #cupti-loading-overlay .label  {{ font-weight: 500; }}
+  #cupti-loading-overlay .meta   {{ opacity: 0.7; font-size: 12px; font-variant-numeric: tabular-nums; }}
   /* Indeterminate bar — slides L→R via pure CSS so it animates even
      while the JS thread is blocked in Bokeh hydration. JS-driven
      progress can't update during that window. */
-  #cupti-loading-overlay .bar {
-    width: 280px; height: 6px; background: #e7e7e7; border-radius: 3px;
+  #cupti-loading-overlay .bar {{
+    width: 280px; height: 6px; background: {theme["overlay_track"]}; border-radius: 3px;
     overflow: hidden; position: relative;
-  }
-  #cupti-loading-overlay .bar::after {
+  }}
+  #cupti-loading-overlay .bar::after {{
     content: ""; position: absolute; top: 0; left: 0;
-    width: 40%; height: 100%; background: #3870c4; border-radius: 3px;
+    width: 40%; height: 100%; background: {theme["overlay_accent"]}; border-radius: 3px;
     animation: cupti-slide 1.4s ease-in-out infinite;
-  }
-  @keyframes cupti-spin  { to { transform: rotate(360deg); } }
-  @keyframes cupti-slide {
-    0%   { transform: translateX(-100%); }
-    100% { transform: translateX(350%); }
-  }
+  }}
+  @keyframes cupti-spin  {{ to {{ transform: rotate(360deg); }} }}
+  @keyframes cupti-slide {{
+    0%   {{ transform: translateX(-100%); }}
+    100% {{ transform: translateX(350%); }}
+  }}
 </style>
 """
 
@@ -878,8 +909,10 @@ def _inject_loading_overlay(html: str, n_figures: int) -> str:
     bokeh's embedded minified JS source (e.g. `must be under <body>`
     in error messages). The overlay is `position: fixed`, so DOM
     insertion point doesn't affect its visual placement."""
+    theme = _THEMES[_THEME]
     if "</head>" in html:
-        html = html.replace("</head>", _LOADING_OVERLAY_HEAD + "</head>", 1)
+        html = html.replace("</head>",
+                            _loading_overlay_head(theme) + "</head>", 1)
     if "</body>" in html:
         html = html.replace("</body>",
                             _loading_overlay_body(n_figures) + "</body>", 1)
@@ -1031,6 +1064,7 @@ def _render_static(
     # no transparent gap between them during scroll, and make THAT
     # the sticky element. The dashed bottom border separates the
     # sticky band from the scrolling metric panels.
+    theme = _THEMES[_THEME]
     layout_children: list = []
     if strips:
         strip_col = column(strips, spacing=0, sizing_mode="stretch_width")
@@ -1038,14 +1072,15 @@ def _render_static(
             "position":      "sticky",
             "top":           "0",
             "z-index":       "50",
-            "background":    "#ffffff",
-            "border-bottom": "1px dashed #888888",
+            "background":    theme["strip_bg"],
+            "border-bottom": f"1px dashed {theme['strip_border']}",
         }
         layout_children.append(strip_col)
     layout_children.extend(figs)
     all_figs = strips + figs  # for the loading-overlay panel count
     layout_root = column(layout_children, sizing_mode="stretch_width")
-    html = file_html(layout_root, INLINE, title=title)
+    html = file_html(layout_root, INLINE, title=title,
+                     theme=theme["bokeh_theme"])
     html = _inject_loading_overlay(html, len(all_figs))
     out_path.write_text(html)
     _log(f"wrote {out_path}  ({out_path.stat().st_size // 1024} KiB; "
@@ -1088,7 +1123,7 @@ def _serve(html_path: Path, host: str, port: int, open_browser: bool) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    global _RENDER_BACKEND
+    global _RENDER_BACKEND, _THEME
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("metadata", help="Path to session_metadata.pb")
@@ -1129,6 +1164,12 @@ def main() -> int:
                              "still compute their total from the raw series; "
                              "decimation only affects how many points are "
                              "sent to the browser.")
+    parser.add_argument("--theme", default=_THEME, choices=tuple(_THEMES),
+                        help="Color theme. 'light' (default) keeps the "
+                             "stock white-on-grey Bokeh styling; 'dark' "
+                             "applies Bokeh's dark_minimal theme to every "
+                             "plot and flips the page background, loading "
+                             "overlay, and sticky-strip fills to match.")
     parser.add_argument("--render-backend", default=_RENDER_BACKEND,
                         choices=("webgl", "canvas", "svg"),
                         help="Bokeh output backend per panel. canvas (the "
@@ -1139,6 +1180,7 @@ def main() -> int:
                              "catastrophically on ReadPixels).")
     args = parser.parse_args()
     _RENDER_BACKEND = args.render_backend
+    _THEME = args.theme
 
     metadata_path = Path(args.metadata).resolve()
     if args.live:
