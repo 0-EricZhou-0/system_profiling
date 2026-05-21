@@ -268,6 +268,24 @@ def _series_label(series: metric_layout.ResolvedSeries,
 # Bokeh color palette — Category10 has 10 distinct colors; cycle past that.
 _PALETTE = list(Category10[10])
 
+# Fixed plot-area borders so every panel ends at the same right edge
+# regardless of how wide its legend is. Without these the legends sit
+# in a variable-width right column, which jiggles the plot frames
+# left and right across panels and makes legend labels start at
+# different x. _FRAME_WIDTH locks the plot frame itself.
+#
+# Strips don't actually render a toolbar (Bokeh suppresses it on
+# figures with height < ~100 px), so their left border is the bare
+# _BORDER_LEFT_PX. Metric panels DO render a 30 px left-side toolbar,
+# and Bokeh expands their effective left border to ~98 px (toolbar +
+# y-axis padding) regardless of min_border_left. _STRIP_LEFT_PX shims
+# the strips' left border so their plot frames line up with the
+# metric panels' frames despite the missing toolbar reservation.
+_BORDER_LEFT_PX  = 80
+_STRIP_LEFT_PX   = 98
+_FRAME_WIDTH     = 860
+
+
 # Bokeh `output_backend` applied to every figure. main() overrides via
 # --render-backend. canvas is the default because for our trace volume
 # (~6k pts × ~15 panels) it's roughly 4-5× faster to first paint than
@@ -368,8 +386,10 @@ def _build_panel(
         title=_panel_title(panel, series_list),
         x_axis_label="time (s)",
         y_axis_label=ylabel,
-        width=1200, height=240,
+        width=1200, height=240, frame_width=_FRAME_WIDTH,
+        min_border_left=_BORDER_LEFT_PX,
         tools="xpan,xwheel_zoom,box_zoom,reset,save",
+        toolbar_location="left",
         active_drag="xpan", active_scroll="xwheel_zoom",
         output_backend=_RENDER_BACKEND,
     )
@@ -430,6 +450,7 @@ def _build_panel(
         legend = fig.legend[0]
         legend.click_policy = "hide"
         legend.label_text_font_size = "8pt"
+        legend.location = "top_left"
         fig.add_layout(legend, "right")
 
     return fig, cds_by_key
@@ -528,8 +549,10 @@ def _build_cumulative_panel(
         title=f"{base_title}  (cumulative)",
         x_axis_label="time (s)",
         y_axis_label=ylabel,
-        width=1200, height=240,
+        width=1200, height=240, frame_width=_FRAME_WIDTH,
+        min_border_left=_BORDER_LEFT_PX,
         tools="xpan,xwheel_zoom,box_zoom,reset,save",
+        toolbar_location="left",
         active_drag="xpan", active_scroll="xwheel_zoom",
         output_backend=_RENDER_BACKEND,
     )
@@ -569,6 +592,7 @@ def _build_cumulative_panel(
         legend = fig.legend[0]
         legend.click_policy = "hide"
         legend.label_text_font_size = "8pt"
+        legend.location = "top_left"
         fig.add_layout(legend, "right")
 
     return fig, cds_by_key
@@ -636,17 +660,14 @@ def _build_region_strip(regions, t0_ns: int, x_range) -> "figure":
     name + start/end."""
     fig = figure(
         title="Regions",
-        width=1200, height=70,
+        width=1200, height=70, frame_width=_FRAME_WIDTH,
+        min_border_left=_STRIP_LEFT_PX,
         x_range=x_range, y_range=(0.0, 1.0),
         tools="xpan,xwheel_zoom,reset",
+        toolbar_location="left",
         active_drag="xpan", active_scroll="xwheel_zoom",
         output_backend=_RENDER_BACKEND,
-        toolbar_location=None,
     )
-    # Inline `styles` is set on the figure's host element in light DOM,
-    # which sidesteps Bokeh 3.x's shadow-DOM boundary (where global
-    # CSS via css_classes wouldn't reach). The region strip stacks
-    # below the event strip (height=70 + small slack).
     # Solid fills on both the plot area and the surrounding frame
     # so metric panels can't bleed through during scroll. The two
     # strip figures are wrapped in a single sticky Column at the
@@ -685,12 +706,13 @@ def _build_event_strip(events, t0_ns: int, x_range) -> "figure":
     plus a vertical hairline. Hover shows name + timestamp."""
     fig = figure(
         title="Events",
-        width=1200, height=70,
+        width=1200, height=70, frame_width=_FRAME_WIDTH,
+        min_border_left=_STRIP_LEFT_PX,
         x_range=x_range, y_range=(0.0, 1.0),
         tools="xpan,xwheel_zoom,reset",
+        toolbar_location="left",
         active_drag="xpan", active_scroll="xwheel_zoom",
         output_backend=_RENDER_BACKEND,
-        toolbar_location=None,
     )
     fig.background_fill_color = "#ffffff"
     fig.border_fill_color     = "#ffffff"
@@ -1288,8 +1310,10 @@ def _build_live_panel(panel, series_list, projector, projection, t0_ns,
     fig_kwargs = dict(
         title=_panel_title(panel, series_list),
         x_axis_label="time (s)", y_axis_label=ylabel,
-        width=1200, height=240,
+        width=1200, height=240, frame_width=_FRAME_WIDTH,
+        min_border_left=_BORDER_LEFT_PX,
         tools="xpan,xwheel_zoom,box_zoom,reset,save",
+        toolbar_location="left",
         active_drag="xpan", active_scroll="xwheel_zoom",
         output_backend=_RENDER_BACKEND,
     )
@@ -1328,6 +1352,7 @@ def _build_live_panel(panel, series_list, projector, projection, t0_ns,
         legend = fig.legend[0]
         legend.click_policy = "hide"
         legend.label_text_font_size = "8pt"
+        legend.location = "top_left"
         fig.add_layout(legend, "right")
 
     return fig, cds_by_key, scale_fn
