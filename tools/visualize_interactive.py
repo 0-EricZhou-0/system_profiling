@@ -57,8 +57,9 @@ from bokeh.application.handlers.function import FunctionHandler  # noqa: E402
 from bokeh.embed import file_html  # noqa: E402
 from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column  # noqa: E402
-from bokeh.models import (BoxAnnotation, ColumnDataSource, CustomJS,  # noqa: E402
-                          HoverTool, Range1d, Span, WheelZoomTool)
+from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
+                          CustomJS, HoverTool, PanTool, Range1d,
+                          ResetTool, SaveTool, Span, WheelZoomTool)
 from bokeh.palettes import Category10  # noqa: E402
 from bokeh.plotting import figure  # noqa: E402
 from bokeh.resources import INLINE  # noqa: E402
@@ -184,20 +185,32 @@ def _kernel_size(sample_freq_hz: float, window_s: float) -> int:
     return max(1, int(round(sample_freq_hz * window_s)))
 
 
-def _relax_wheel_zoom(fig) -> None:
-    """Flip WheelZoomTool.maintain_focus = False on every wheel-zoom
-    tool attached to the figure.
+def _make_plot_tools(include_save: bool = True) -> tuple[list, BoxZoomTool, WheelZoomTool]:
+    """Build the per-figure tool set:
 
-    Bokeh's default behavior anchors the wheel zoom at the cursor and
-    refuses to apply a zoom step that would push *either* side of the
-    range past its bounds. Near the left edge with bounds=(0, …), the
-    zoom-out attempt extends below 0 and the whole gesture is rejected
-    — so the user gets a 'stuck' feeling. Setting maintain_focus=False
-    tells Bokeh: 'if one side hits a bound, absorb the remaining zoom
-    on the other side instead of cancelling.'"""
-    for t in fig.tools:
-        if isinstance(t, WheelZoomTool):
-            t.maintain_focus = False
+      - PanTool         (toolbar only — not the active drag)
+      - WheelZoomTool   ctrl-modifier gated, so plain scroll falls
+                        through to the browser (page scroll) and
+                        ctrl+scroll triggers x-axis zoom; maintain_focus
+                        off so cursor-anchored zoom near an edge that
+                        already touches a bound absorbs the remaining
+                        zoom on the other side instead of being dropped
+      - BoxZoomTool     click-drag rectangle on the plot zooms the
+                        x-axis to the selected region (rubber-band)
+      - ResetTool
+      - SaveTool        (optional — skipped on strips)
+
+    Returns (tools, box_zoom, wheel_zoom) so callers can pin
+    active_drag and active_scroll to the right instances."""
+    pan   = PanTool(dimensions="width")
+    wheel = WheelZoomTool(dimensions="width",
+                          modifiers={"ctrl": True},
+                          maintain_focus=False)
+    boxz  = BoxZoomTool(dimensions="width")
+    tools: list = [pan, wheel, boxz, ResetTool()]
+    if include_save:
+        tools.append(SaveTool())
+    return tools, boxz, wheel
 
 
 def _decimate_to_hz(ts_ns: np.ndarray, vals: np.ndarray,
@@ -414,15 +427,17 @@ def _build_panel(
     peak_hint = _resolve_panel_peak(panel, series_list[0].descriptor, projector)
     scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
 
+    tools, box_zoom, wheel_zoom = _make_plot_tools()
     fig_kwargs = dict(
         title=_panel_title(panel, series_list),
         x_axis_label="time (s)",
         y_axis_label=ylabel,
         width=1200, height=240, frame_width=_FRAME_WIDTH,
         min_border_left=_BORDER_LEFT_PX,
-        tools="xpan,xwheel_zoom,box_zoom,reset,save",
+        tools=tools,
         toolbar_location="left",
-        active_drag="xpan", active_scroll="xwheel_zoom",
+        active_drag=box_zoom,
+        active_scroll=wheel_zoom,
         output_backend=_RENDER_BACKEND,
     )
     if x_range is not None:
@@ -577,15 +592,17 @@ def _build_cumulative_panel(
                                           peak_hint=max_total if max_total > 0 else None)
     base_title = _panel_title(panel, series_list)
 
+    tools, box_zoom, wheel_zoom = _make_plot_tools()
     fig_kwargs = dict(
         title=f"{base_title}  (cumulative)",
         x_axis_label="time (s)",
         y_axis_label=ylabel,
         width=1200, height=240, frame_width=_FRAME_WIDTH,
         min_border_left=_BORDER_LEFT_PX,
-        tools="xpan,xwheel_zoom,box_zoom,reset,save",
+        tools=tools,
         toolbar_location="left",
-        active_drag="xpan", active_scroll="xwheel_zoom",
+        active_drag=box_zoom,
+        active_scroll=wheel_zoom,
         output_backend=_RENDER_BACKEND,
     )
     if x_range is not None:
@@ -690,14 +707,16 @@ def _load_events_for_session(meta: session_metadata_pb2.SessionMetadata,
 def _build_region_strip(regions, t0_ns: int, x_range) -> "figure":
     """Thin strip figure with one colored bar per region. Hover shows
     name + start/end."""
+    tools, box_zoom, wheel_zoom = _make_plot_tools(include_save=False)
     fig = figure(
         title="Regions",
         width=1200, height=70, frame_width=_FRAME_WIDTH,
         min_border_left=_STRIP_LEFT_PX,
         x_range=x_range, y_range=(0.0, 1.0),
-        tools="xpan,xwheel_zoom,reset",
+        tools=tools,
         toolbar_location="left",
-        active_drag="xpan", active_scroll="xwheel_zoom",
+        active_drag=box_zoom,
+        active_scroll=wheel_zoom,
         output_backend=_RENDER_BACKEND,
     )
     # Solid fills on both the plot area and the surrounding frame
@@ -736,14 +755,16 @@ def _build_region_strip(regions, t0_ns: int, x_range) -> "figure":
 def _build_event_strip(events, t0_ns: int, x_range) -> "figure":
     """Thin strip figure with one inverted-triangle marker per event
     plus a vertical hairline. Hover shows name + timestamp."""
+    tools, box_zoom, wheel_zoom = _make_plot_tools(include_save=False)
     fig = figure(
         title="Events",
         width=1200, height=70, frame_width=_FRAME_WIDTH,
         min_border_left=_STRIP_LEFT_PX,
         x_range=x_range, y_range=(0.0, 1.0),
-        tools="xpan,xwheel_zoom,reset",
+        tools=tools,
         toolbar_location="left",
-        active_drag="xpan", active_scroll="xwheel_zoom",
+        active_drag=box_zoom,
+        active_scroll=wheel_zoom,
         output_backend=_RENDER_BACKEND,
     )
     fig.background_fill_color = _THEMES[_THEME]["strip_bg"]
@@ -1056,13 +1077,11 @@ def _render_static(
     if shared_x is not None and regions:
         strips.append(_build_region_strip(regions, t0_ns, shared_x))
 
-    # Free up wheel-zoom near the bounds so the gesture isn't rejected
-    # when the cursor sits next to an edge that already touches a bound.
-    # Also drop the Bokeh logo from every toolbar (15 logos across the
+    # Drop the Bokeh logo from every toolbar (15 logos across the
     # page is visual noise; the framework is implicit from the file
-    # extension).
+    # extension). The wheel-zoom's maintain_focus=False is set at
+    # construction time inside _make_plot_tools.
     for f in strips + figs:
-        _relax_wheel_zoom(f)
         f.toolbar.logo = None
 
     # Wrap both strips in their own Column with spacing=0 so there's
@@ -1361,14 +1380,16 @@ def _build_live_panel(panel, series_list, projector, projection, t0_ns,
     )
     scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
 
+    tools, box_zoom, wheel_zoom = _make_plot_tools()
     fig_kwargs = dict(
         title=_panel_title(panel, series_list),
         x_axis_label="time (s)", y_axis_label=ylabel,
         width=1200, height=240, frame_width=_FRAME_WIDTH,
         min_border_left=_BORDER_LEFT_PX,
-        tools="xpan,xwheel_zoom,box_zoom,reset,save",
+        tools=tools,
         toolbar_location="left",
-        active_drag="xpan", active_scroll="xwheel_zoom",
+        active_drag=box_zoom,
+        active_scroll=wheel_zoom,
         output_backend=_RENDER_BACKEND,
     )
     if x_range is not None:
