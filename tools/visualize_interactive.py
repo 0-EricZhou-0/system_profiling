@@ -643,6 +643,17 @@ def _build_region_strip(regions, t0_ns: int, x_range) -> "figure":
         output_backend=_RENDER_BACKEND,
         toolbar_location=None,
     )
+    # Inline `styles` is set on the figure's host element in light DOM,
+    # which sidesteps Bokeh 3.x's shadow-DOM boundary (where global
+    # CSS via css_classes wouldn't reach). The region strip stacks
+    # below the event strip (height=70 + small slack).
+    # Solid fills on both the plot area and the surrounding frame
+    # so metric panels can't bleed through during scroll. The two
+    # strip figures are wrapped in a single sticky Column at the
+    # call site (gap-free), so the sticky positioning lives there
+    # rather than on each strip.
+    fig.background_fill_color = "#ffffff"
+    fig.border_fill_color     = "#ffffff"
     fig.yaxis.visible = False
     fig.ygrid.visible = False
     fig.xaxis.visible = False
@@ -681,6 +692,8 @@ def _build_event_strip(events, t0_ns: int, x_range) -> "figure":
         output_backend=_RENDER_BACKEND,
         toolbar_location=None,
     )
+    fig.background_fill_color = "#ffffff"
+    fig.border_fill_color     = "#ffffff"
     fig.yaxis.visible = False
     fig.ygrid.visible = False
     fig.xaxis.visible = False
@@ -983,12 +996,29 @@ def _render_static(
     if shared_x is not None and regions:
         strips.append(_build_region_strip(regions, t0_ns, shared_x))
 
-    all_figs = strips + figs
     # Free up wheel-zoom near the bounds so the gesture isn't rejected
     # when the cursor sits next to an edge that already touches a bound.
-    for f in all_figs:
+    for f in strips + figs:
         _relax_wheel_zoom(f)
-    layout_root = column(all_figs, sizing_mode="stretch_width")
+
+    # Wrap both strips in their own Column with spacing=0 so there's
+    # no transparent gap between them during scroll, and make THAT
+    # the sticky element. The dashed bottom border separates the
+    # sticky band from the scrolling metric panels.
+    layout_children: list = []
+    if strips:
+        strip_col = column(strips, spacing=0, sizing_mode="stretch_width")
+        strip_col.styles = {
+            "position":      "sticky",
+            "top":           "0",
+            "z-index":       "50",
+            "background":    "#ffffff",
+            "border-bottom": "1px dashed #888888",
+        }
+        layout_children.append(strip_col)
+    layout_children.extend(figs)
+    all_figs = strips + figs  # for the loading-overlay panel count
+    layout_root = column(layout_children, sizing_mode="stretch_width")
     html = file_html(layout_root, INLINE, title=title)
     html = _inject_loading_overlay(html, len(all_figs))
     out_path.write_text(html)
