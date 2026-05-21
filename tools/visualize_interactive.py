@@ -55,6 +55,7 @@ from metric_projector import TraceProjector  # noqa: E402
 from bokeh.application import Application  # noqa: E402
 from bokeh.application.handlers.function import FunctionHandler  # noqa: E402
 from bokeh.embed import file_html  # noqa: E402
+from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column  # noqa: E402
 from bokeh.models import (BoxAnnotation, ColumnDataSource, CustomJS,  # noqa: E402
                           HoverTool, Range1d, Span, WheelZoomTool)
@@ -316,11 +317,15 @@ _THEMES = {
     },
     "dark": {
         "bokeh_theme":    "dark_minimal",
-        "page_bg":        "#15191c",
-        "page_fg":        "#cdd0d4",
-        "strip_bg":       "#20262d",
+        # Page bg = dark_minimal's `border_fill_color`; strip bg =
+        # dark_minimal's `background_fill_color`. Keeping them in sync
+        # so the sticky strips and metric panels share one continuous
+        # dark surface with no visual seam.
+        "page_bg":        "#15191C",
+        "page_fg":        "#E0E0E0",
+        "strip_bg":       "#20262B",
         "strip_border":   "#555555",
-        "overlay_track":  "#333a40",
+        "overlay_track":  "#2a3036",
         "overlay_accent": "#5b9bd5",
     },
 }
@@ -1079,8 +1084,11 @@ def _render_static(
     layout_children.extend(figs)
     all_figs = strips + figs  # for the loading-overlay panel count
     layout_root = column(layout_children, sizing_mode="stretch_width")
-    html = file_html(layout_root, INLINE, title=title,
-                     theme=theme["bokeh_theme"])
+    # file_html silently ignores theme string names — resolve to a
+    # Theme object via built_in_themes. None falls through to stock.
+    bokeh_theme = (built_in_themes[theme["bokeh_theme"]]
+                   if theme["bokeh_theme"] else None)
+    html = file_html(layout_root, INLINE, title=title, theme=bokeh_theme)
     html = _inject_loading_overlay(html, len(all_figs))
     out_path.write_text(html)
     _log(f"wrote {out_path}  ({out_path.stat().st_size // 1024} KiB; "
