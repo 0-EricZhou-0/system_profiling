@@ -55,6 +55,16 @@ public:
     /// Stop all enabled profilers.
     void Stop();
 
+    /// Begin tracking a PID mid-run. Fans out to every enabled probe
+    /// that supports per-PID sampling (currently System + Disk).
+    /// Thread-safe.
+    void AddTrackedProcess(uint32_t pid, std::string alias = {});
+
+    /// Stop tracking a PID mid-run. The PID appears one more time in
+    /// the next flush of each affected probe (with TrackedProcessV2.
+    /// removed=true) before being dropped. Thread-safe.
+    void RemoveTrackedProcess(uint32_t pid);
+
 private:
     class Impl;
     std::unique_ptr<Impl> m_impl;

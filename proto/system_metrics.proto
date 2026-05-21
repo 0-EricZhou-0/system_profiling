@@ -1,65 +1,25 @@
 syntax = "proto3";
 
-import "tracked_process.proto";
+import "metric_sample.proto";
 
-message CPUSystemSample {
-    uint64 timestamp_ns = 1;
-    double total_utilization_pct = 2;
-    double user_pct = 3;
-    double system_pct = 4;
-    double iowait_pct = 5;
-}
-
-message CPUProcessSample {
-    uint64 timestamp_ns = 1;
-    uint32 pid = 2;
-    double user_pct = 3;
-    double system_pct = 4;
-    double iowait_pct = 5;   // from delayacct_blkio_ticks in /proc/[pid]/stat
-}
-
-message MemorySystemSample {
-    uint64 timestamp_ns = 1;
-    uint64 total_bytes = 2;
-    uint64 used_bytes = 3;
-    uint64 available_bytes = 4;
-    uint64 buffers_bytes = 5;
-    uint64 cached_bytes = 6;
-}
-
-message MemoryProcessSample {
-    uint64 timestamp_ns = 1;
-    uint32 pid = 2;
-    uint64 rss_bytes = 3;
-    uint64 vms_bytes = 4;
-    uint64 shared_bytes = 5;
-}
-
-// Per-flush write accounting. See gpu_metrics.proto::SystemFlushStats.
-message SystemFlushStats {
-    uint64 timestamp_ns = 1;
-    uint64 bytes_written = 2;
-    uint64 interval_ns = 3;
-}
-
+// CPU + memory trace. SystemProfiler emits one length-delimited
+// SystemMetricsTrace per flush. Two scopes appear simultaneously:
+//   SCOPE_SYSTEM  — singleton, one Sample per tick. The values[]
+//                   array combines CPU utilization + system memory
+//                   stats in the order declared by the corresponding
+//                   ScopeMetricNames entry.
+//   SCOPE_PROCESS — one ProcessSample per tracked PID per tick. The
+//                   values[] array combines per-PID CPU + memory.
+//
+// `tracked_processes` carries TrackedProcessV2 entries; a mid-run
+// RemoveTrackedProcess() flips `removed=true` on the next flush
+// (the last flush in which the PID still gets a final sample) and
+// then drops the entry on subsequent flushes.
 message SystemMetricsTrace {
-    string hostname = 1;
-    uint64 sampling_frequency_hz = 2;
-    // PIDs (with optional aliases) tracked in this run; per-PID rows in
-    // cpu_process_samples / memory_process_samples reference these entries
-    // by `pid`. Visualizers render labels as "<alias> (PID xxx)" when an
-    // alias is present, otherwise "PID xxx".
-    repeated TrackedProcess tracked_processes = 3;
-    repeated CPUSystemSample cpu_system_samples = 4;
-    repeated CPUProcessSample cpu_process_samples = 5;
-    repeated MemorySystemSample memory_system_samples = 6;
-    repeated MemoryProcessSample memory_process_samples = 7;
-
-    // Sync anchor: steady_clock reading at profiler Start() time.
-    uint64 steady_clock_reference_ns = 8;
-    uint64 wall_clock_epoch_ns = 9;
-
-    // Per-flush write stats (see SystemFlushStats). Each Trace message carries at most
-    // one entry here — the size of the previous flush.
-    repeated SystemFlushStats flush_stats = 10;
+    TraceHeader header                           = 1;
+    repeated ScopeMetricNames scope_metric_names = 2;
+    repeated TrackedProcessV2 tracked_processes  = 3;
+    repeated Sample        system_samples        = 4;
+    repeated ProcessSample process_samples       = 5;
+    repeated FlushStats    flush_stats           = 6;
 }

@@ -1,7 +1,12 @@
-// Internal: Flush thread for disk I/O metrics.
+// Internal: Flush thread for the disk probe.
+//
+// Each flush snapshots ProcessTrackingProbe — pending_removal entries
+// are emitted with TrackedProcessV2.removed=true, then dropped via
+// CommitPendingRemovals().
 #pragma once
 
 #include <cupti_profiler/disk_profiler.h>
+#include <cupti_profiler/process_tracking_probe.h>
 
 #include <atomic>
 #include <cstdint>
@@ -10,27 +15,52 @@
 #include <string>
 #include <vector>
 
-class DiskDeviceSample;
-class DiskProcessSample;
 class DiskMetricsTrace;
 
 namespace cupti_profiler {
 namespace internal {
 
+// One SCOPE_DEVICE sample at one tick. values[] order matches kDeviceFqns.
+struct DiskDeviceTick {
+    uint64_t timestamp_ns        = 0;
+    std::string device_name;
+    double   read_bytes_per_sec  = 0.0;
+    double   write_bytes_per_sec = 0.0;
+    uint32_t read_inflight       = 0;
+    uint32_t write_inflight      = 0;
+};
+
+// One SCOPE_PROCESS sample at one tick. values[] order matches kProcessFqns.
+struct DiskProcessTick {
+    uint64_t timestamp_ns         = 0;
+    uint32_t pid                  = 0;
+    double   rchar_bytes_per_sec  = 0.0;
+    double   wchar_bytes_per_sec  = 0.0;
+};
+
 struct DiskSampleBatch {
-    std::vector<DiskDeviceSample> deviceSamples;
-    std::vector<DiskProcessSample> procSamples;
+    std::vector<DiskDeviceTick>  deviceTicks;
+    std::vector<DiskProcessTick> processTicks;
 };
 
-// Pending flush stats carried across cycles (see flush_thread.h::PendingFlushStats).
 struct DiskPendingFlushStats {
-    uint64_t timestampNs = 0;
     uint64_t bytesWritten = 0;
-    uint64_t intervalNs = 0;
-    bool valid = false;
+    uint64_t intervalNs   = 0;
+    bool     valid        = false;
 };
 
-size_t WriteDelimitedDiskTraceSized(const DiskMetricsTrace& trace, std::ofstream& out);
+DiskMetricsTrace BuildDiskTrace(
+    const std::string& hostname,
+    uint64_t samplingFrequencyHz,
+    uint32_t hostCpuCount,
+    uint64_t steadyClockRefNs,
+    uint64_t wallClockEpochNs,
+    const std::vector<std::string>& devices,
+    const std::vector<ProcessTrackingProbe::ProcessEntry>& processes,
+    const DiskSampleBatch& drained);
+
+size_t WriteDelimitedDiskTraceSized(const DiskMetricsTrace& trace,
+                                    std::ofstream& out);
 
 void DiskFlushThreadFunc(DiskSampleBatch& batch,
                          std::mutex& batchMutex,
@@ -38,8 +68,9 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
                          std::mutex& outMutex,
                          const std::string& hostname,
                          uint64_t samplingFrequencyHz,
+                         uint32_t hostCpuCount,
                          const std::vector<std::string>& devices,
-                         const std::vector<TrackedProcess>& Processes,
+                         ProcessTrackingProbe& probe,
                          std::atomic<bool>& stop,
                          uint64_t flushIntervalMs,
                          uint64_t steadyClockRefNs,

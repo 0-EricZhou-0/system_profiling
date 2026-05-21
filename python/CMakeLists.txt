@@ -67,7 +67,9 @@ add_custom_command(TARGET cupti_profiler_native POST_BUILD
     # so `from cupti_profiler.proto import events_pb2` works in both dev
     # mode (PYTHONPATH=build/python) and after `pip install`.
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/generated/proto/tracked_process_pb2.py"
+        "${CMAKE_SOURCE_DIR}/generated/proto/metric_catalog_pb2.py"
+        "${CMAKE_SOURCE_DIR}/generated/proto/metric_sample_pb2.py"
+        "${CMAKE_SOURCE_DIR}/generated/proto/panels_pb2.py"
         "${CMAKE_SOURCE_DIR}/generated/proto/events_pb2.py"
         "${CMAKE_SOURCE_DIR}/generated/proto/session_metadata_pb2.py"
         "${CMAKE_SOURCE_DIR}/generated/proto/gpu_metrics_pb2.py"
@@ -138,7 +140,9 @@ install(FILES
 
 install(FILES
     "${CMAKE_CURRENT_SOURCE_DIR}/cupti_profiler/proto/__init__.py"
-    "${CMAKE_SOURCE_DIR}/generated/proto/tracked_process_pb2.py"
+    "${CMAKE_SOURCE_DIR}/generated/proto/metric_catalog_pb2.py"
+    "${CMAKE_SOURCE_DIR}/generated/proto/metric_sample_pb2.py"
+    "${CMAKE_SOURCE_DIR}/generated/proto/panels_pb2.py"
     "${CMAKE_SOURCE_DIR}/generated/proto/events_pb2.py"
     "${CMAKE_SOURCE_DIR}/generated/proto/session_metadata_pb2.py"
     "${CMAKE_SOURCE_DIR}/generated/proto/gpu_metrics_pb2.py"

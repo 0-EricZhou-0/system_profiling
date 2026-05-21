@@ -61,8 +61,8 @@ PYBIND11_MODULE(_native, m) {
     py::class_<ProfilerConfig>(m, "GpuProfilerConfig",
         "Configuration for GpuProfiler — CUPTI PM Sampling.")
         .def(py::init<>())
-        .def_readwrite("device_index",          &ProfilerConfig::deviceIndex,
-            "CUDA device ordinal to profile.")
+        .def_readwrite("device_indices",        &ProfilerConfig::deviceIndices,
+            "List of CUDA device ordinals to profile (empty = [0]).")
         .def_readwrite("sampling_frequency_hz", &ProfilerConfig::samplingFrequencyHz,
             "PM sampling rate in Hz (default 10000).")
         .def_readwrite("hw_buffer_size",        &ProfilerConfig::hwBufferSize,
@@ -163,7 +163,7 @@ PYBIND11_MODULE(_native, m) {
         "Records GPU PM samples via CUPTI. Constructed by ProfilerSuite.")
         .def("configure",  &GpuProfiler::Configure, py::arg("config"),
             "Initialize the profiler with the given GpuProfilerConfig. "
-            "Caller must have an active CUDA context on config.device_index.",
+            "Caller must have active CUDA contexts on every index in config.device_indices.",
             py::call_guard<py::gil_scoped_release>())
         .def("start",      &GpuProfiler::Start,
             "Start PM sampling, decode thread, and optional flush thread.",
@@ -268,7 +268,20 @@ PYBIND11_MODULE(_native, m) {
             "Returns the suite-owned DiskProfiler.")
         .def("get_event_profiler",  &ProfilerSuite::GetEventProfiler,
              py::return_value_policy::reference_internal,
-            "Returns the suite-owned EventProfiler.");
+            "Returns the suite-owned EventProfiler.")
+        .def("add_tracked_process",
+             [](ProfilerSuite& self, uint32_t pid, std::string alias) {
+                 self.AddTrackedProcess(pid, std::move(alias));
+             },
+             py::arg("pid"), py::arg("alias") = std::string{},
+            "Start tracking a PID mid-run. Fans out to every probe that "
+            "supports per-PID sampling (System + Disk). First sample for "
+            "the PID is one sample-tick after this call returns.")
+        .def("remove_tracked_process", &ProfilerSuite::RemoveTrackedProcess,
+             py::arg("pid"),
+            "Stop tracking a PID. The PID appears one more time in the "
+            "next flush with TrackedProcessV2.removed=true (visualizer "
+            "renders a removal marker), then is dropped.");
 
     // -------------------------------------------------------------------
     // CUDA stream helpers — let Python tests get a real cudaStream_t

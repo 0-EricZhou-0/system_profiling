@@ -33,41 +33,57 @@ Use it to discover valid metric names before adding `metrics:` entries
 to a `.pbtxt` config or to the `metrics` field on a Python
 `GpuProfilerConfig`.
 
+All three Python renderers are **descriptor-driven**: they consume a
+`MetricCatalog` (inlined into `session_metadata.pb` by the suite, or
+loaded via `--catalog PATH`) and a `PanelLayout` pbtxt
+(`configs/visualizer_panels.pbtxt` by default, override via
+`--panel-layout PATH`). The catalog declares each FQN's type / unit /
+peak / scope; the panel layout declares which FQN globs go on which
+subplot. To add or remove panels, edit the pbtxt — no Python code
+changes needed. See [`metric-model.md`](../metric-model.md) for the
+type system and [`cupti-fqn-suffixes.md`](../cupti-fqn-suffixes.md)
+for the full table of `.per_cycle_active` / `.pct_of_peak_*` /
+`.per_second` suffixes plus the auto-title fallback used when a
+panel omits `title:`.
+
 ## `visualize_single.py`
 
-GPU-only renderer. Takes one `gpu_metrics.pb` and emits a static PNG
-with the GPU panels (SM utilization, warps/cycle, DRAM, PCIe, NVLink).
-Pairs with the [`gemm_profiling`](../examples/gemm_profiling.md) example.
+GPU-only renderer. Takes a `gpu_metrics.pb` and emits a static PNG
+with the catalog/layout-resolved GPU panels. Pairs with
+[`gemm_profiling`](../examples/gemm_profiling.md) which drives
+`GpuProfiler` directly and doesn't emit a `session_metadata.pb`.
 
 ```bash
 python tools/visualize_single.py -i gpu_metrics.pb -o gpu_metrics.png
+# Optional overrides:
+python tools/visualize_single.py -i gpu_metrics.pb \
+    --catalog       configs/metric_catalog.pbtxt \
+    --panel-layout  configs/visualizer_panels.pbtxt \
+    --smooth-window-s 0.01
 ```
-
-No system/disk/event panels; for those use `visualize_all.py` or
-`visualize_interactive.py` against a `session_metadata.pb` instead.
 
 ## `visualize_all.py`
 
 Full-system static renderer. Takes a `session_metadata.pb` and
 auto-discovers each per-probe file from the manifest's `probes` list.
-Produces a single tall PNG with every panel matching the metric and
-event probes that were enabled.
+Walks the panel layout and emits one matplotlib subplot per panel that
+has matching series.
 
 ```bash
 python tools/visualize_all.py profiling_output/session_metadata.pb \
     -o full_profile.png
+# Override the inlined catalog or default panel layout:
+python tools/visualize_all.py session_metadata.pb \
+    --catalog       my_catalog.pbtxt \
+    --panel-layout  my_layout.pbtxt \
+    --smooth-window-s 0.05
 ```
 
-Panels (auto-skip when the corresponding probe is disabled):
-event timeline strip → region timeline strip → GPU SM Util →
-Active Warps / Cycle → DRAM → PCIe → Cumulative PCIe → NVLink →
-CPU (system + per-PID) → Memory (system + per-PID) →
-Disk (per-device + per-PID + queue depth) → Flush-rate panels →
-Write-rate footer.
-
-Many layout knobs are exposed as constants near the top of the file
-(`PANEL_HEIGHT_*`, `SPACING_*`, `FIG_*`, `YLABEL_*`,
-`SPACING_TITLE_FORST_PANEL`).
+Panels in the default layout (auto-skipped when no series matches):
+SM Util → Active Warps/Cycle → DRAM Bandwidth → PCIe Bandwidth →
+NVLink Bandwidth → CPU Utilization → System Memory → Per-PID CPU →
+Per-PID Resident Memory → Per-PID I/O → Disk Bandwidth → Disk Queue
+Depth.
 
 ## `visualize_interactive.py`
 
@@ -88,6 +104,12 @@ python tools/visualize_interactive.py session_metadata.pb --no-serve
 
 # Bind to localhost only (default is 0.0.0.0 = all interfaces):
 python tools/visualize_interactive.py session_metadata.pb --host 127.0.0.1
+
+# Live mode — tail the .pb files and stream new samples into a running
+# Bokeh server. Open the URL in a browser; new data appears every
+# poll-interval-ms (default 1s). Run alongside an active workload.
+python tools/visualize_interactive.py --live \
+    /tmp/run/profiling_output/session_metadata.pb
 ```
 
 What you get:
@@ -110,6 +132,65 @@ What you get:
 
 Panel set is identical to `visualize_all.py` — see the table in that
 section.
+
+### Live mode (`--live`)
+
+Adding `--live` switches the script from a one-shot static HTML render to
+a `bokeh.server` that **tails the `.pb` files as the profiler is still
+writing to them** and refreshes every `--poll-interval-ms` (default
+`1000`). Workflow:
+
+```bash
+# Terminal A — start the workload (anything that drives a ProfilerSuite)
+./build/examples/full_system_profiling -c configs/example.pbtxt
+
+# Terminal B — point the live visualizer at the same output_dir's manifest
+python tools/visualize_interactive.py --live \
+    profiling_output/session_metadata.pb \
+    --port 8000 --poll-interval-ms 1000
+# → http://localhost:8000/
+```
+
+How it works:
+
+- **`session_metadata.pb` is written at `Start()`**, not just `Stop()`.
+  The live visualizer reads it as soon as the run begins to discover
+  which probe files to tail and the inlined `MetricCatalog`. If you
+  launch the visualizer before the workload, it polls (up to
+  `--live-bootstrap-timeout-s`, default 30 s) for the manifest to
+  appear.
+- **Each tick** (`--poll-interval-ms`) reads only the bytes appended
+  since the last tick using a strict offset-aware varint reader, parses
+  the new `*Trace` messages, ingests them into a shared `TraceProjector`,
+  and **streams** the new tail slice into each existing
+  `ColumnDataSource` via `cds.stream(...)`. Bookmark per-series so we
+  never re-send rows the browser already has.
+- **Mid-run PID join**: when
+  `suite.add_tracked_process(pid)` is called from your workload, the
+  next flush carries the new PID in `tracked_processes[]`. The
+  visualizer detects it (via
+  `projector.new_scope_keys_since_last_call()`), allocates a new line
+  glyph + CDS on every matching panel, and starts streaming the PID's
+  samples in.
+- **Mid-run PID removal**: `suite.remove_tracked_process(pid)` flips
+  `TrackedProcessV2.removed=true` on the PID's last appearance in the
+  trace. The visualizer renders a dotted gray vertical marker on the
+  series at that t and stops appending further rows.
+- **Pan/zoom is preserved across ticks** — the user's current view
+  isn't reset when new samples arrive.
+
+Caveats:
+
+- **One Python process per page.** Closing the browser does not stop
+  the server; Ctrl-C in Terminal B does.
+- **Long runs**: per-tick delta streaming scales linearly in the
+  *new* rows since the last tick, not the full run length, so this
+  works for arbitrarily long sessions. The Bokeh client still has to
+  re-render the canvas every tick; for many-minute runs at 10 kHz,
+  bump `--poll-interval-ms` to keep the client responsive.
+
+Disk I/O is the only non-obvious permission gotcha — see
+[*Permissions for per-PID I/O*](../system-guide.md#permissions-for-per-pid-i-o).
 
 ### Viewing from a remote server
 
@@ -134,5 +215,16 @@ root [`requirements.txt`](../../requirements.txt). Quick install:
 pip install -r requirements.txt
 ```
 
-`visualize_all.py` needs `numpy + matplotlib`; `visualize_interactive.py`
-adds `bokeh + pandas` (a Bokeh transitive dep).
+`visualize_all.py` needs `numpy + matplotlib + protobuf`;
+`visualize_interactive.py` adds `bokeh + tornado` (Bokeh transitive).
+
+The renderers also depend on the shared catalog + projector modules
+under `tools/`:
+- `tools/metric_catalog.py` — `MetricCatalog` loader and peak resolver.
+- `tools/metric_layout.py` — `PanelLayout` loader, FQN globbing, GPU
+  FQN suffix-inference for catalog gaps.
+- `tools/metric_projector.py` — `TraceProjector` (proto traces → per-
+  `(fqn, scope_key)` ndarray caches).
+- `tools/live_tail.py` — `TraceTail` (offset-aware tail) + `LiveCoordinator`
+  (drives the Bokeh server's periodic callback). Used only by
+  `--live` mode.

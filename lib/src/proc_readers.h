@@ -19,10 +19,13 @@ struct CPUStatSnapshot {
     }
 };
 
-struct PIDStatSnapshot {
-    uint64_t utime = 0;           // field 14: user mode ticks
-    uint64_t stime = 0;           // field 15: kernel mode ticks
-    uint64_t blkioTicks = 0;      // field 42: delayacct_blkio_ticks
+struct PIDSchedStatSnapshot {
+    // /proc/<pid>/schedstat field 1: sum_exec_runtime (nanoseconds the
+    // task has spent on a CPU). Always tracked by the kernel scheduler
+    // regardless of the kernel.sched_schedstats sysctl, so we get
+    // nanosecond-precision per-PID CPU time without the 10 ms quantization
+    // that /proc/<pid>/stat's utime/stime impose.
+    uint64_t cpuTimeNs = 0;
 };
 
 struct MemInfoSnapshot {
@@ -42,9 +45,9 @@ struct PIDStatmSnapshot {
 /// Read aggregate CPU stats from /proc/stat (first "cpu" line).
 CPUStatSnapshot ReadCPUStat();
 
-/// Read per-process CPU stats from /proc/[pid]/stat.
+/// Read per-process CPU time from /proc/[pid]/schedstat.
 /// Returns zero-initialized snapshot if the process does not exist.
-PIDStatSnapshot ReadPIDStat(uint32_t pid);
+PIDSchedStatSnapshot ReadPIDSchedStat(uint32_t pid);
 
 /// Read system memory info from /proc/meminfo.
 MemInfoSnapshot ReadMemInfo();

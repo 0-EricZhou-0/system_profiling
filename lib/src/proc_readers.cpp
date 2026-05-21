@@ -24,37 +24,19 @@ CPUStatSnapshot ReadCPUStat() {
     return s;
 }
 
-PIDStatSnapshot ReadPIDStat(uint32_t pid) {
-    PIDStatSnapshot s;
-    std::string path = "/proc/" + std::to_string(pid) + "/stat";
+PIDSchedStatSnapshot ReadPIDSchedStat(uint32_t pid) {
+    PIDSchedStatSnapshot s;
+    std::string path = "/proc/" + std::to_string(pid) + "/schedstat";
     std::ifstream f(path);
     if (!f) return s;
 
-    std::string line;
-    std::getline(f, line);
-
-    // Field 2 (comm) can contain spaces and parentheses.
-    // Find the last ')' to anchor field parsing.
-    auto lastParen = line.rfind(')');
-    if (lastParen == std::string::npos) return s;
-
-    // Fields after comm start at lastParen+2 (skip ") ").
-    // These are fields 3..N (1-indexed). We need:
-    //   field 14 = utime  → index 11 after comm (14 - 3 = 11)
-    //   field 15 = stime  → index 12
-    //   field 42 = delayacct_blkio_ticks → index 39
-    std::istringstream iss(line.substr(lastParen + 2));
-    std::string token;
-    std::vector<std::string> fields;
-    while (iss >> token) {
-        fields.push_back(token);
-    }
-
-    // fields[0] = field 3 (state), fields[11] = field 14 (utime), etc.
-    if (fields.size() > 11) s.utime = std::stoull(fields[11]);
-    if (fields.size() > 12) s.stime = std::stoull(fields[12]);
-    if (fields.size() > 39) s.blkioTicks = std::stoull(fields[39]);
-
+    // Format (Documentation/scheduler/sched-stats.rst):
+    //   <sum_exec_runtime> <run_delay> <pcount>
+    // We only consume field 1 — the nanoseconds the task has spent
+    // on a CPU. The remaining two fields (runqueue wait, schedule
+    // count) are gated by the kernel.sched_schedstats sysctl and not
+    // used by this profiler.
+    f >> s.cpuTimeNs;
     return s;
 }
 

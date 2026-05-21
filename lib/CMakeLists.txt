@@ -1,7 +1,10 @@
 # Generate protobuf C++ sources into the build directory.
-# tracked_process.proto is shared by config + system + disk traces, so it
-# must be generated first (others import its descriptor).
-protobuf_generate_cpp(TP_PROTO_SRCS  TP_PROTO_HDRS  "${CMAKE_SOURCE_DIR}/proto/tracked_process.proto")
+# metric_catalog.proto + metric_sample.proto define the type system and
+# shared substructures (Sample, ProcessSample, TrackedProcessV2, ...)
+# that the per-domain trace protos import.
+protobuf_generate_cpp(MC_PROTO_SRCS  MC_PROTO_HDRS  "${CMAKE_SOURCE_DIR}/proto/metric_catalog.proto")
+protobuf_generate_cpp(MS_PROTO_SRCS  MS_PROTO_HDRS  "${CMAKE_SOURCE_DIR}/proto/metric_sample.proto")
+protobuf_generate_cpp(PN_PROTO_SRCS  PN_PROTO_HDRS  "${CMAKE_SOURCE_DIR}/proto/panels.proto")
 protobuf_generate_cpp(GPU_PROTO_SRCS GPU_PROTO_HDRS "${CMAKE_SOURCE_DIR}/proto/gpu_metrics.proto")
 protobuf_generate_cpp(SYS_PROTO_SRCS SYS_PROTO_HDRS "${CMAKE_SOURCE_DIR}/proto/system_metrics.proto")
 protobuf_generate_cpp(DISK_PROTO_SRCS DISK_PROTO_HDRS "${CMAKE_SOURCE_DIR}/proto/disk_metrics.proto")
@@ -30,10 +33,15 @@ add_library(cupti_profiler SHARED
     src/event_profiler.cpp
     # Session manifest writer
     src/session_metadata_writer.cpp
+    # Shared infrastructure
+    src/metric_catalog.cpp
+    src/process_tracking_probe.cpp
     # Orchestrator
     src/profiler_suite.cpp
     # Generated protobuf sources
-    ${TP_PROTO_SRCS}
+    ${MC_PROTO_SRCS}
+    ${MS_PROTO_SRCS}
+    ${PN_PROTO_SRCS}
     ${GPU_PROTO_SRCS}
     ${SYS_PROTO_SRCS}
     ${DISK_PROTO_SRCS}

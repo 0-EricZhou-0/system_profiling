@@ -1,0 +1,104 @@
+# Default panel layout for visualize_all.py / visualize_interactive.py.
+#
+# Format: proto/panels.proto :: PanelLayout. Each `panels` entry
+# declares one subplot whose series are every (FQN, scope_key) tuple
+# in the projected data where the descriptor's FQN matches
+# `series_glob`. Each FQN's scope is read from its MetricDescriptor;
+# Panel.scope is only needed as a tie-breaker when a glob would
+# otherwise match FQNs from multiple scopes (unusual — entity
+# prefixes don't overlap across scopes).
+#
+# Override path via `--panel-layout PATH` on either visualizer.
+
+# ============================================================
+# GPU panels
+# ============================================================
+
+panels {
+    title: "SM Utilization (%)"
+    series_glob: "sm__cycles_active.*.pct_of_peak_*"
+    peak_constant: 100.0
+}
+panels {
+    title: "Active Warps / Cycle"
+    series_glob: "sm__warps_active.*.per_cycle_*"
+    peak_from_gpu_info: "max_warps_per_sm"
+}
+panels {
+    title: "DRAM Bandwidth (% of peak)"
+    series_glob: "dram__*_throughput.*"
+    peak_constant: 100.0
+}
+panels {
+    # title omitted -> auto-derived via metric_suffix.label_for:
+    # "PCIe Read Bytes / s (sum)"
+    series_glob: "pcie__*_bytes.sum.per_second"
+    unit_override: UNIT_BYTES_PER_SEC
+    peak_from_gpu_info: "peak_pcie_bw_bytes_per_s"
+    # Companion panel directly below: cumulative bytes transferred
+    # (∫ bandwidth dt). Auto-scales to KiB / MiB / GiB.
+    aggregation: PANEL_AGGREGATION_INTEGRATE
+}
+panels {
+    # title omitted -> auto-derived
+    series_glob: "nvl*__*.per_second"
+    unit_override: UNIT_BYTES_PER_SEC
+    peak_from_gpu_info: "peak_nvlink_bw_bytes_per_s"
+    # Companion panel: cumulative NVLink bytes (rx + tx).
+    aggregation: PANEL_AGGREGATION_INTEGRATE
+}
+
+# ============================================================
+# CPU panels
+# ============================================================
+
+panels {
+    title: "CPU Utilization (%)"
+    series_glob: "cpu__cycles_*"
+    peak_constant: 100.0
+}
+panels {
+    title: "Per-PID CPU (% of core)"
+    series_glob: "proc__cycles_*"
+    peak_from_expr: "ncpus_x_100"
+}
+
+# ============================================================
+# Memory panels
+# ============================================================
+
+panels {
+    title: "System Memory"
+    series_glob: "mem__*_bytes"
+    unit_override: UNIT_BYTES
+    peak_from_descriptor_ref: "mem__capacity_bytes"
+}
+panels {
+    title: "Per-PID Resident Memory"
+    series_glob: "proc__rss_bytes"
+    unit_override: UNIT_BYTES
+    peak_from_descriptor_ref: "mem__capacity_bytes"
+}
+
+# ============================================================
+# Disk panels — one series per tracked device
+# ============================================================
+
+panels {
+    title: "Disk Bandwidth"
+    series_glob: "disk__*_bytes.*"
+    unit_override: UNIT_BYTES_PER_SEC
+    # Companion panel: cumulative bytes read / written per device.
+    aggregation: PANEL_AGGREGATION_INTEGRATE
+}
+panels {
+    title: "Disk Queue Depth"
+    series_glob: "disk__*_inflight"
+}
+panels {
+    title: "Per-PID I/O"
+    series_glob: "proc__io_*"
+    unit_override: UNIT_BYTES_PER_SEC
+    # Companion panel: cumulative bytes per PID (rchar + wchar).
+    aggregation: PANEL_AGGREGATION_INTEGRATE
+}

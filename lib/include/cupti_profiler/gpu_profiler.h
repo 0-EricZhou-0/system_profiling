@@ -34,7 +34,11 @@ struct CUPTI_PROFILER_API SamplerRange {
 
 /// Configuration for GpuProfiler.
 struct CUPTI_PROFILER_API ProfilerConfig {
-    int deviceIndex = 0;
+    // One CUPTI PM-sampling session is opened per index. Same metric
+    // set + sampling frequency applies to every device. Empty =
+    // device 0 only. All devices' samples are funneled into a single
+    // GPUMetricsTrace stream tagged with `gpu_index`.
+    std::vector<int> deviceIndices;
     uint64_t samplingFrequencyHz = 10000;          // 10 kHz
     size_t hwBufferSize = 512 * 1024 * 1024;    // 512 MB
     uint64_t maxSamples = 50000;
@@ -66,19 +70,24 @@ public:
     GpuProfiler& operator=(GpuProfiler&&) noexcept;
 
     /// Initialize the profiler. Must be called before Start().
-    /// The caller must have an active CUDA context on config.deviceIndex.
+    /// The caller must have active CUDA contexts on every index in
+    /// config.deviceIndices (or on device 0 if the list is empty).
     void Configure(const ProfilerConfig& config);
 
-    /// Start PM sampling, background decode thread, and optional flush thread.
+    /// Start PM sampling, background decode threads (one per device),
+    /// and optional flush thread.
     void Start();
 
     /// Stop PM sampling, join threads, write remaining data.
     void Stop();
 
-    /// Atomically drain all collected samples. Can be called during or after profiling.
+    /// Atomically drain all collected samples from the FIRST configured
+    /// device. Multi-device callers should consume the on-disk
+    /// GPUMetricsTrace stream instead.
     std::vector<SamplerRange> DrainSamples();
 
-    // Device info (available after Configure()).
+    // Device info — single-device convenience accessors. Returns the
+    // values for the FIRST configured device.
     std::string GetDeviceName() const;
     std::string GetChipName() const;
     double GetPeakDramBwGbps() const;

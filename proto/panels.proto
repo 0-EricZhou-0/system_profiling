@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+import "metric_catalog.proto";
+
+// Visualizer panel layout. Loaded by visualize_all.py /
+// visualize_interactive.py at startup; the renderers walk
+// `panels[]` and plot one series per (FQN, scope_key) for every
+// catalog descriptor whose FQN matches `series_glob` and whose
+// scope matches `scope`.
+//
+// The default layout ships as `configs/visualizer_panels.pbtxt`;
+// users override via the `--panel-layout PATH` CLI flag.
+
+// Optional companion-panel aggregation. When set, the renderer emits
+// a second panel directly below the source panel carrying an
+// aggregated form of the same series — useful for turning rates into
+// running totals (e.g. PCIe Bytes/s → cumulative Bytes).
+enum PanelAggregation {
+    PANEL_AGGREGATION_UNSPECIFIED = 0;   // no companion panel
+    // ∫ y dt — integrates the series over time. Best for *.per_second
+    // throughputs; the renderer derives the integrated unit
+    // (BYTES_PER_SEC → BYTES, etc.). Non-rate panels are skipped with
+    // a warning.
+    PANEL_AGGREGATION_INTEGRATE   = 1;
+}
+
+message Panel {
+    // Human-readable header above the panel.
+    string title         = 1;
+
+    // Shell-style glob (supports `*`) matched against
+    // MetricDescriptor.fqn. Each matching descriptor contributes one
+    // series per distinct scope_key seen in the data.
+    string series_glob   = 2;
+
+    Scope  scope         = 3;
+
+    // Optional axis hints — most can be derived from descriptor.unit
+    // but explicit overrides give clean layouts.
+    double y_min         = 4;
+    double y_max         = 5;
+    Unit   unit_override = 6;
+
+    // Peak / reference-line source. Exactly one of these (or none —
+    // auto-scale).
+    oneof peak {
+        double peak_constant             = 7;
+        // FQN of a catalog metric whose latest value is the peak.
+        string peak_from_descriptor_ref  = 8;
+        // Named formula evaluated against TraceHeader (e.g.
+        // "ncpus_x_100" — same allow-list as MetricDescriptor.peak_expr).
+        string peak_from_expr            = 9;
+        // Field name on GPUDeviceInfo (e.g. "peak_dram_bw_bytes_per_s").
+        // SCOPE_GPU panels only.
+        string peak_from_gpu_info        = 10;
+    }
+
+    // Companion-panel aggregation. See enum docs.
+    PanelAggregation aggregation = 11;
+}
+
+message PanelLayout {
+    repeated Panel panels = 1;
+}

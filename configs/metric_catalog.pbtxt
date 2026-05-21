@@ -1,0 +1,214 @@
+# Default metric catalog — 21 non-GPU descriptors emitted by
+# SystemProfiler + DiskProfiler. GPU descriptors are appended at
+# runtime by walking cuptiProfilerHostGetSubMetrics for every FQN in
+# the suite config's gpu.metrics list, so they are NOT listed here.
+#
+# Format: proto/metric_catalog.proto :: MetricCatalog.
+# Users may override the catalog path via:
+#   ./build/examples/full_system_profiling --metric-catalog PATH
+#   python tools/visualize_all.py --catalog PATH ...
+#
+# See docs/metric-model.md for the design rationale and FQN
+# orthography.
+
+# ============================================================
+# CPU — system-wide utilization (Throughput)
+# ============================================================
+
+metrics {
+    fqn: "cpu__cycles_busy.avg.pct_of_peak_sustained_elapsed"
+    type: METRIC_TYPE_THROUGHPUT
+    entity: "cpu"  counter: "cycles_busy"
+    rollup: "avg"  submetric: "pct_of_peak_sustained_elapsed"
+    unit: UNIT_PCT  scope: SCOPE_SYSTEM
+    peak_constant: 100.0
+    smoothable: true
+    description: "Fraction of wall time the CPU was not idle/iowait. From /proc/stat."
+}
+metrics {
+    fqn: "cpu__cycles_user.avg.pct_of_peak_sustained_elapsed"
+    type: METRIC_TYPE_THROUGHPUT
+    entity: "cpu"  counter: "cycles_user"
+    rollup: "avg"  submetric: "pct_of_peak_sustained_elapsed"
+    unit: UNIT_PCT  scope: SCOPE_SYSTEM
+    peak_constant: 100.0
+    smoothable: true
+    description: "Fraction of wall time the CPU was in userspace (user + nice)."
+}
+metrics {
+    fqn: "cpu__cycles_kernel.avg.pct_of_peak_sustained_elapsed"
+    type: METRIC_TYPE_THROUGHPUT
+    entity: "cpu"  counter: "cycles_kernel"
+    rollup: "avg"  submetric: "pct_of_peak_sustained_elapsed"
+    unit: UNIT_PCT  scope: SCOPE_SYSTEM
+    peak_constant: 100.0
+    smoothable: true
+    description: "Fraction of wall time the CPU was in kernel (system + irq + softirq)."
+}
+metrics {
+    fqn: "cpu__cycles_iowait.avg.pct_of_peak_sustained_elapsed"
+    type: METRIC_TYPE_THROUGHPUT
+    entity: "cpu"  counter: "cycles_iowait"
+    rollup: "avg"  submetric: "pct_of_peak_sustained_elapsed"
+    unit: UNIT_PCT  scope: SCOPE_SYSTEM
+    peak_constant: 100.0
+    smoothable: true
+    description: "Fraction of wall time the CPU was idle waiting for I/O."
+}
+
+# ============================================================
+# Memory — system-wide capacity + usage (Counter, bytes)
+# ============================================================
+
+metrics {
+    fqn: "mem__capacity_bytes"
+    type: METRIC_TYPE_COUNTER
+    entity: "mem"  counter: "capacity_bytes"
+    unit: UNIT_BYTES  scope: SCOPE_SYSTEM
+    smoothable: true
+    description: "Total physical memory installed. /proc/meminfo MemTotal. Static across a run; serves as the peak for *_used / *_available."
+}
+metrics {
+    fqn: "mem__used_bytes"
+    type: METRIC_TYPE_COUNTER
+    entity: "mem"  counter: "used_bytes"
+    unit: UNIT_BYTES  scope: SCOPE_SYSTEM
+    peak_ref: "mem__capacity_bytes"
+    smoothable: true
+    description: "MemTotal − MemAvailable. The 'committed-for-real-use' figure."
+}
+metrics {
+    fqn: "mem__available_bytes"
+    type: METRIC_TYPE_COUNTER
+    entity: "mem"  counter: "available_bytes"
+    unit: UNIT_BYTES  scope: SCOPE_SYSTEM
+    peak_ref: "mem__capacity_bytes"
+    smoothable: true
+    description: "/proc/meminfo MemAvailable — what the kernel believes it can give to new allocations without swap."
+}
+metrics {
+    fqn: "mem__buffers_bytes"
+    type: METRIC_TYPE_COUNTER
+    entity: "mem"  counter: "buffers_bytes"
+    unit: UNIT_BYTES  scope: SCOPE_SYSTEM
+    peak_ref: "mem__capacity_bytes"
+    smoothable: true
+    description: "/proc/meminfo Buffers — block-device cache."
+}
+metrics {
+    fqn: "mem__cached_bytes"
+    type: METRIC_TYPE_COUNTER
+    entity: "mem"  counter: "cached_bytes"
+    unit: UNIT_BYTES  scope: SCOPE_SYSTEM
+    peak_ref: "mem__capacity_bytes"
+    smoothable: true
+    description: "/proc/meminfo Cached — page cache."
+}
+
+# ============================================================
+# Per-process CPU — fraction of one core
+# ============================================================
+
+metrics {
+    fqn: "proc__cycles_active.sum.per_second"
+    type: METRIC_TYPE_COUNTER
+    entity: "proc"  counter: "cycles_active"
+    rollup: "sum"  submetric: "per_second"
+    unit: UNIT_PCT_OF_CORE  scope: SCOPE_PROCESS
+    peak_expr: "ncpus_x_100"
+    smoothable: true
+    description: "Per-PID on-CPU time as % of one core. /proc/<pid>/schedstat sum_exec_runtime delta in ns — nanosecond-precise, no CLK_TCK quantization. >100% for multi-threaded tasks; the panel peak_expr caps the axis at ncpus × 100."
+}
+
+# ============================================================
+# Per-process memory — bytes
+# ============================================================
+
+metrics {
+    fqn: "proc__rss_bytes"
+    type: METRIC_TYPE_COUNTER
+    entity: "proc"  counter: "rss_bytes"
+    unit: UNIT_BYTES  scope: SCOPE_PROCESS
+    peak_ref: "mem__capacity_bytes"
+    smoothable: true
+    description: "Resident set size — /proc/<pid>/status VmRSS. Physical pages owned by the PID."
+}
+metrics {
+    fqn: "proc__vms_bytes"
+    type: METRIC_TYPE_COUNTER
+    entity: "proc"  counter: "vms_bytes"
+    unit: UNIT_BYTES  scope: SCOPE_PROCESS
+    smoothable: true
+    description: "Virtual memory size — /proc/<pid>/status VmSize. Can exceed physical RAM (file-backed, overcommit)."
+}
+metrics {
+    fqn: "proc__shared_bytes"
+    type: METRIC_TYPE_COUNTER
+    entity: "proc"  counter: "shared_bytes"
+    unit: UNIT_BYTES  scope: SCOPE_PROCESS
+    peak_ref: "mem__capacity_bytes"
+    smoothable: true
+    description: "Resident shared memory — /proc/<pid>/status RssShmem."
+}
+
+# ============================================================
+# Per-device disk — bandwidth + in-flight queue depth
+# ============================================================
+
+metrics {
+    fqn: "disk__read_bytes.sum.per_second"
+    type: METRIC_TYPE_COUNTER
+    entity: "disk"  counter: "read_bytes"
+    rollup: "sum"  submetric: "per_second"
+    unit: UNIT_BYTES_PER_SEC  scope: SCOPE_DEVICE
+    smoothable: true
+    description: "Per-device read bandwidth. /proc/diskstats sectors_read × 512 / Δt."
+}
+metrics {
+    fqn: "disk__write_bytes.sum.per_second"
+    type: METRIC_TYPE_COUNTER
+    entity: "disk"  counter: "write_bytes"
+    rollup: "sum"  submetric: "per_second"
+    unit: UNIT_BYTES_PER_SEC  scope: SCOPE_DEVICE
+    smoothable: true
+    description: "Per-device write bandwidth. /proc/diskstats sectors_written × 512 / Δt."
+}
+metrics {
+    fqn: "disk__read_inflight"
+    type: METRIC_TYPE_COUNTER
+    entity: "disk"  counter: "read_inflight"
+    unit: UNIT_REQUESTS  scope: SCOPE_DEVICE
+    smoothable: false
+    description: "Currently in-flight read requests. /sys/block/<dev>/inflight first column. Render as step — values are instantaneous, not a rate."
+}
+metrics {
+    fqn: "disk__write_inflight"
+    type: METRIC_TYPE_COUNTER
+    entity: "disk"  counter: "write_inflight"
+    unit: UNIT_REQUESTS  scope: SCOPE_DEVICE
+    smoothable: false
+    description: "Currently in-flight write requests. /sys/block/<dev>/inflight second column. Render as step."
+}
+
+# ============================================================
+# Per-process disk I/O — syscall-layer bytes/s
+# ============================================================
+
+metrics {
+    fqn: "proc__io_rchar.sum.per_second"
+    type: METRIC_TYPE_COUNTER
+    entity: "proc"  counter: "io_rchar"
+    rollup: "sum"  submetric: "per_second"
+    unit: UNIT_BYTES_PER_SEC  scope: SCOPE_PROCESS
+    smoothable: true
+    description: "Per-PID read bandwidth (syscall layer). /proc/<pid>/io rchar delta. INCLUDES page-cache hits — NOT physical-disk reads."
+}
+metrics {
+    fqn: "proc__io_wchar.sum.per_second"
+    type: METRIC_TYPE_COUNTER
+    entity: "proc"  counter: "io_wchar"
+    rollup: "sum"  submetric: "per_second"
+    unit: UNIT_BYTES_PER_SEC  scope: SCOPE_PROCESS
+    smoothable: true
+    description: "Per-PID write bandwidth (syscall layer). /proc/<pid>/io wchar delta. Bytes the process ASKED to write — flush to block layer may differ."
+}

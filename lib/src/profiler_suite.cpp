@@ -1,5 +1,6 @@
 #include <cupti_profiler/profiler_suite.h>
 
+#include "metric_catalog.h"
 #include "profiler_config.pb.h"
 #include "session_metadata.pb.h"
 #include "session_metadata_writer.h"
@@ -10,6 +11,7 @@
 #include <sys/stat.h>
 #include <chrono>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -36,6 +38,10 @@ public:
     bool eventEnabled = false;
 
     std::string sessionMetadataPath;
+    std::string metricCatalogPath;
+
+    // Loaded MetricCatalog. nullopt before Configure().
+    std::unique_ptr<internal::MetricCatalog> catalog;
 
     uint64_t startWallClockEpochNs = 0;
 
@@ -45,6 +51,12 @@ public:
     // between the .pbtxt path (LoadConfig) and the serialized-bytes path
     // used by language bindings (LoadConfigFromBytes).
     void ApplyParsedConfig(const ProfilerSuiteConfig& proto);
+
+    // Build the SessionMetadata message from the parsed config + the
+    // captured wall-clock anchor, and write it (atomically) to disk.
+    // Called from both Start() — so live tailers see the manifest from
+    // second one — and Stop(), which re-emits identical content.
+    void WriteSessionManifest();
 };
 
 ProfilerSuite::ProfilerSuite() : m_impl(std::make_unique<Impl>()) {}
@@ -117,7 +129,10 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     if (proto.has_gpu() && proto.gpu().enabled()) {
         m_impl->gpuEnabled = true;
         const auto& g = proto.gpu();
-        m_impl->gpuConfig.deviceIndex = g.device_index();
+        m_impl->gpuConfig.deviceIndices.clear();
+        for (int idx : g.device_indices()) {
+            m_impl->gpuConfig.deviceIndices.push_back(idx);
+        }
         m_impl->gpuConfig.samplingFrequencyHz = g.sampling_frequency_hz() > 0 ? g.sampling_frequency_hz() : 10000;
         m_impl->gpuConfig.hwBufferSize = g.hw_buffer_size() > 0 ? g.hw_buffer_size() : 512 * 1024 * 1024;
         m_impl->gpuConfig.maxSamples = g.max_samples() > 0 ? g.max_samples() : 50000;
@@ -176,6 +191,10 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         ? std::string("session_metadata.pb")
         : proto.session_metadata_file();
 
+    // Metric catalog path (loaded at Configure()). Empty = default
+    // location next to the binary.
+    m_impl->metricCatalogPath = proto.metric_catalog_path();
+
     // Apply output_dir: prepend to each component's output_file, create dir if needed
     std::string outputDir = proto.output_dir();
     if (!outputDir.empty()) {
@@ -200,15 +219,103 @@ SystemProfiler& ProfilerSuite::GetSystemProfiler() { return m_impl->systemProfil
 DiskProfiler& ProfilerSuite::GetDiskProfiler() { return m_impl->diskProfiler; }
 EventProfiler& ProfilerSuite::GetEventProfiler() { return m_impl->eventProfiler; }
 
+// Resolve the MetricCatalog pbtxt to load. Priority:
+//   1. Explicit ProfilerSuiteConfig.metric_catalog_path.
+//   2. configs/metric_catalog.pbtxt relative to the current working
+//      directory (typical when running an example from the repo root).
+//   3. configs/metric_catalog.pbtxt relative to /proc/self/exe.
+// Exits with a clear message if none of these are readable.
+static std::string ResolveCatalogPath(const std::string& configured) {
+    namespace fs = std::filesystem;
+    if (!configured.empty()) return configured;
+    fs::path candidates[] = {
+        fs::path("configs/metric_catalog.pbtxt"),
+    };
+    for (const auto& p : candidates) {
+        if (fs::exists(p)) return p.string();
+    }
+    // Try sibling of the binary.
+    char exeBuf[4096];
+    ssize_t n = readlink("/proc/self/exe", exeBuf, sizeof(exeBuf) - 1);
+    if (n > 0) {
+        exeBuf[n] = '\0';
+        fs::path exeDir = fs::path(exeBuf).parent_path();
+        fs::path sibling = exeDir / "configs" / "metric_catalog.pbtxt";
+        if (fs::exists(sibling)) return sibling.string();
+        // Walk up looking for a configs/ sibling (handy for build/...
+        // layouts where the binary lives under build/examples/).
+        for (auto cur = exeDir; !cur.empty() && cur != cur.root_path();
+             cur = cur.parent_path()) {
+            fs::path up = cur / "configs" / "metric_catalog.pbtxt";
+            if (fs::exists(up)) return up.string();
+        }
+    }
+    std::cerr << "ProfilerSuite: cannot find metric_catalog.pbtxt. "
+                 "Set ProfilerSuiteConfig.metric_catalog_path to a valid "
+                 "MetricCatalog pbtxt.\n";
+    std::exit(1);
+}
+
 void ProfilerSuite::Configure() {
     if (!m_impl->loaded) {
         std::cerr << "ProfilerSuite::Configure() called before LoadConfig()\n";
         return;
     }
+    // Load the catalog before any probe configures, so probes can
+    // consult it for their ScopeMetricNames registries (full wiring
+    // lands in the descriptor-driven-emit follow-up; this commit just
+    // loads + inlines into SessionMetadata).
+    std::string catalogPath = ResolveCatalogPath(m_impl->metricCatalogPath);
+    m_impl->catalog = std::make_unique<internal::MetricCatalog>(
+        internal::MetricCatalog::LoadFromPbtxt(catalogPath));
+
     if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Configure(m_impl->gpuConfig);
     if (m_impl->sysEnabled)   m_impl->systemProfiler.Configure(m_impl->sysConfig);
     if (m_impl->diskEnabled)  m_impl->diskProfiler.Configure(m_impl->diskConfig);
     if (m_impl->eventEnabled) m_impl->eventProfiler.Configure(m_impl->eventConfig);
+}
+
+void ProfilerSuite::Impl::WriteSessionManifest() {
+    SessionMetadata meta;
+    char hostbuf[256] = {0};
+    gethostname(hostbuf, sizeof(hostbuf));
+    meta.set_hostname(hostbuf);
+    meta.set_wall_clock_epoch_ns(startWallClockEpochNs);
+    {
+        std::time_t secs = startWallClockEpochNs / 1000000000ULL;
+        uint64_t ns_part = startWallClockEpochNs % 1000000000ULL;
+        std::tm tm_utc{};
+        gmtime_r(&secs, &tm_utc);
+        std::ostringstream iso;
+        iso << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S")
+            << "." << std::setw(9) << std::setfill('0') << ns_part << "Z";
+        meta.set_start_iso8601(iso.str());
+    }
+    auto addProbe = [&](ProbeKind kind, const std::string& path, uint64_t hz) {
+        auto* p = meta.add_probes();
+        p->set_kind(kind);
+        p->set_output_file(path);
+        p->set_sampling_frequency_hz(hz);
+    };
+    if (gpuEnabled)
+        addProbe(PROBE_KIND_GPU,    gpuConfig.outputFile,
+                 gpuConfig.samplingFrequencyHz);
+    if (sysEnabled)
+        addProbe(PROBE_KIND_SYSTEM, sysConfig.outputFile,
+                 sysConfig.samplingFrequencyHz);
+    if (diskEnabled)
+        addProbe(PROBE_KIND_DISK,   diskConfig.outputFile,
+                 diskConfig.samplingFrequencyHz);
+    if (eventEnabled)
+        addProbe(PROBE_KIND_EVENTS, eventConfig.outputFile, 0);
+
+    // Inline the active MetricCatalog so the visualizer only needs
+    // one file (session_metadata.pb) to bootstrap.
+    if (catalog) {
+        *meta.mutable_catalog() = catalog->Proto();
+    }
+
+    internal::WriteSessionMetadata(sessionMetadataPath, meta);
 }
 
 void ProfilerSuite::Start() {
@@ -219,6 +326,11 @@ void ProfilerSuite::Start() {
     if (m_impl->sysEnabled)   m_impl->systemProfiler.Start();
     if (m_impl->diskEnabled)  m_impl->diskProfiler.Start();
     if (m_impl->eventEnabled) m_impl->eventProfiler.Start();
+
+    // Emit the manifest now so live tailers (e.g. visualize_interactive.py
+    // --live) have a starting point. Stop() re-emits the identical content
+    // atomically.
+    m_impl->WriteSessionManifest();
 }
 
 void ProfilerSuite::Stop() {
@@ -233,40 +345,18 @@ void ProfilerSuite::Stop() {
     if (m_impl->diskEnabled)  m_impl->diskProfiler.Stop();
     if (m_impl->eventEnabled) m_impl->eventProfiler.Stop();
 
-    // Write the session manifest (one shot, single message).
-    SessionMetadata meta;
-    char hostbuf[256] = {0};
-    gethostname(hostbuf, sizeof(hostbuf));
-    meta.set_hostname(hostbuf);
-    meta.set_wall_clock_epoch_ns(m_impl->startWallClockEpochNs);
-    {
-        std::time_t secs = m_impl->startWallClockEpochNs / 1000000000ULL;
-        uint64_t ns_part = m_impl->startWallClockEpochNs % 1000000000ULL;
-        std::tm tm_utc{};
-        gmtime_r(&secs, &tm_utc);
-        std::ostringstream iso;
-        iso << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S")
-            << "." << std::setw(9) << std::setfill('0') << ns_part << "Z";
-        meta.set_start_iso8601(iso.str());
-    }
-    auto addProbe = [&](ProbeKind kind, const std::string& path, uint64_t hz) {
-        auto* p = meta.add_probes();
-        p->set_kind(kind);
-        p->set_output_file(path);
-        p->set_sampling_frequency_hz(hz);
-    };
-    if (m_impl->gpuEnabled)
-        addProbe(PROBE_KIND_GPU,    m_impl->gpuConfig.outputFile,
-                 m_impl->gpuConfig.samplingFrequencyHz);
-    if (m_impl->sysEnabled)
-        addProbe(PROBE_KIND_SYSTEM, m_impl->sysConfig.outputFile,
-                 m_impl->sysConfig.samplingFrequencyHz);
-    if (m_impl->diskEnabled)
-        addProbe(PROBE_KIND_DISK,   m_impl->diskConfig.outputFile,
-                 m_impl->diskConfig.samplingFrequencyHz);
-    if (m_impl->eventEnabled)
-        addProbe(PROBE_KIND_EVENTS, m_impl->eventConfig.outputFile, 0);
-    internal::WriteSessionMetadata(m_impl->sessionMetadataPath, meta);
+    m_impl->WriteSessionManifest();
+}
+
+void ProfilerSuite::AddTrackedProcess(uint32_t pid, std::string alias) {
+    // Fan out to every probe that supports per-PID sampling.
+    if (m_impl->sysEnabled)  m_impl->systemProfiler.AddTrackedProcess(pid, alias);
+    if (m_impl->diskEnabled) m_impl->diskProfiler.AddTrackedProcess(pid, std::move(alias));
+}
+
+void ProfilerSuite::RemoveTrackedProcess(uint32_t pid) {
+    if (m_impl->sysEnabled)  m_impl->systemProfiler.RemoveTrackedProcess(pid);
+    if (m_impl->diskEnabled) m_impl->diskProfiler.RemoveTrackedProcess(pid);
 }
 
 } // namespace cupti_profiler

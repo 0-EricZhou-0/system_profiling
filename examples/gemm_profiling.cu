@@ -135,7 +135,7 @@ int main(int argc, char* argv[]) {
     }
 
     cupti_profiler::ProfilerConfig config;
-    config.deviceIndex = deviceIndex;
+    config.deviceIndices = {deviceIndex};
     config.samplingFrequencyHz = samplingFrequencyHz;
     config.outputFile = outputFile;
     config.metrics = {
@@ -162,7 +162,7 @@ int main(int argc, char* argv[]) {
     events.Start();
 
     auto t0 = std::chrono::high_resolution_clock::now();
-    RunGemmWorkload(events.GetGpuTracker(), config.deviceIndex);
+    RunGemmWorkload(events.GetGpuTracker(), config.deviceIndices.empty() ? 0 : config.deviceIndices.front());
     auto t1 = std::chrono::high_resolution_clock::now();
 
     double walltime = std::chrono::duration<double>(t1 - t0).count();
