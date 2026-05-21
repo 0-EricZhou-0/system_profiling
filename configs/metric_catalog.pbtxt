@@ -110,34 +110,14 @@ metrics {
 # ============================================================
 
 metrics {
-    fqn: "proc__cycles_user.sum.per_second"
+    fqn: "proc__cycles_active.sum.per_second"
     type: METRIC_TYPE_COUNTER
-    entity: "proc"  counter: "cycles_user"
+    entity: "proc"  counter: "cycles_active"
     rollup: "sum"  submetric: "per_second"
     unit: UNIT_PCT_OF_CORE  scope: SCOPE_PROCESS
     peak_expr: "ncpus_x_100"
     smoothable: true
-    description: "Per-PID userspace CPU time. /proc/<pid>/stat utime delta. 100% = one core fully saturated."
-}
-metrics {
-    fqn: "proc__cycles_kernel.sum.per_second"
-    type: METRIC_TYPE_COUNTER
-    entity: "proc"  counter: "cycles_kernel"
-    rollup: "sum"  submetric: "per_second"
-    unit: UNIT_PCT_OF_CORE  scope: SCOPE_PROCESS
-    peak_expr: "ncpus_x_100"
-    smoothable: true
-    description: "Per-PID kernel CPU time. /proc/<pid>/stat stime delta."
-}
-metrics {
-    fqn: "proc__cycles_iowait.sum.per_second"
-    type: METRIC_TYPE_COUNTER
-    entity: "proc"  counter: "cycles_iowait"
-    rollup: "sum"  submetric: "per_second"
-    unit: UNIT_PCT_OF_CORE  scope: SCOPE_PROCESS
-    peak_expr: "ncpus_x_100"
-    smoothable: true
-    description: "Per-PID iowait time. /proc/<pid>/stat delayacct_blkio_ticks delta. Requires kernel CONFIG_TASK_DELAY_ACCT."
+    description: "Per-PID on-CPU time as % of one core. /proc/<pid>/schedstat sum_exec_runtime delta in ns — nanosecond-precise, no CLK_TCK quantization. >100% for multi-threaded tasks; the panel peak_expr caps the axis at ncpus × 100."
 }
 
 # ============================================================

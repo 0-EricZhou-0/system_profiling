@@ -49,7 +49,7 @@ public:
 
     // Previous snapshots for delta computation
     internal::CPUStatSnapshot prevCPU;
-    std::unordered_map<uint32_t, internal::PIDStatSnapshot> prevPID;
+    std::unordered_map<uint32_t, internal::PIDSchedStatSnapshot> prevPID;
 
     // Per-flush write accounting
     internal::SystemPendingFlushStats flushStatsPending;
@@ -115,7 +115,6 @@ void SystemProfiler::Start() {
     m_impl->stopSample = false;
     m_impl->sampleThread = std::thread([this]() {
         auto& impl = *m_impl;
-        long clkTck = internal::GetCLKTCK();
         long pageSize = internal::GetPageSize();
 
         while (!impl.stopSample) {
@@ -165,7 +164,7 @@ void SystemProfiler::Start() {
                 snapshotPids.insert(pid);
                 if (entry.pending_removal) continue;
 
-                auto curPID = internal::ReadPIDStat(pid);
+                auto curPID = internal::ReadPIDSchedStat(pid);
                 auto it     = impl.prevPID.find(pid);
                 if (it == impl.prevPID.end()) {
                     // Mid-run add — seed the baseline; skip this tick.
@@ -177,15 +176,19 @@ void SystemProfiler::Start() {
                 auto& prev  = it->second;
                 auto statm  = internal::ReadPIDStatm(pid);
 
+                // schedstat field 1 is ns of on-CPU time. (delta_ns /
+                // window_ns) × 100 = % of one core (>100% for multi-
+                // threaded tasks; capped at ncpus × 100 by the panel
+                // peak_expr).
+                const double dtNs = dtSec * 1e9;
                 internal::ProcessTick t;
-                t.timestamp_ns   = tsNs;
-                t.pid            = pid;
-                t.cpu_user_pct   = (double)(curPID.utime - prev.utime) / (dtSec * clkTck) * 100.0;
-                t.cpu_kernel_pct = (double)(curPID.stime - prev.stime) / (dtSec * clkTck) * 100.0;
-                t.cpu_iowait_pct = (double)(curPID.blkioTicks - prev.blkioTicks) / (dtSec * clkTck) * 100.0;
-                t.rss_bytes      = statm.RSSPages    * pageSize;
-                t.vms_bytes      = statm.VMSPages    * pageSize;
-                t.shared_bytes   = statm.sharedPages * pageSize;
+                t.timestamp_ns = tsNs;
+                t.pid          = pid;
+                t.cpu_pct      = (double)(curPID.cpuTimeNs - prev.cpuTimeNs)
+                               / dtNs * 100.0;
+                t.rss_bytes    = statm.RSSPages    * pageSize;
+                t.vms_bytes    = statm.VMSPages    * pageSize;
+                t.shared_bytes = statm.sharedPages * pageSize;
                 prev = curPID;
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);

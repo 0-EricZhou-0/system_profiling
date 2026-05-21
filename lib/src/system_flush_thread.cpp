@@ -28,9 +28,7 @@ static const char* const kSystemFqns[] = {
     "mem__cached_bytes",
 };
 static const char* const kProcessFqns[] = {
-    "proc__cycles_user.sum.per_second",
-    "proc__cycles_kernel.sum.per_second",
-    "proc__cycles_iowait.sum.per_second",
+    "proc__cycles_active.sum.per_second",
     "proc__rss_bytes",
     "proc__vms_bytes",
     "proc__shared_bytes",
@@ -94,9 +92,7 @@ void AppendProcessSample(SystemMetricsTrace& trace, const ProcessTick& t) {
     auto* s = trace.add_process_samples();
     s->set_timestamp_ns(t.timestamp_ns);
     s->set_pid(t.pid);
-    s->add_values(t.cpu_user_pct);
-    s->add_values(t.cpu_kernel_pct);
-    s->add_values(t.cpu_iowait_pct);
+    s->add_values(t.cpu_pct);
     s->add_values(static_cast<double>(t.rss_bytes));
     s->add_values(static_cast<double>(t.vms_bytes));
     s->add_values(static_cast<double>(t.shared_bytes));
