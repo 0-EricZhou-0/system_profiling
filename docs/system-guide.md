@@ -1030,9 +1030,7 @@ Per-process samples (one row per tracked PID per sample tick):
 
 | Field | Source | Units | Notes |
 | ----- | ------ | ----- | ----- |
-| `user_pct` | `/proc/<pid>/stat` utime delta | % of one CPU | Sum of utime across threads |
-| `system_pct` | `/proc/<pid>/stat` stime delta | % of one CPU | Sum of stime across threads |
-| `iowait_pct` | `/proc/<pid>/stat` delayacct_blkio_ticks delta | % of one CPU | Requires kernel `CONFIG_TASK_DELAY_ACCT`; 0 if unavailable |
+| `cpu_pct` | `/proc/<pid>/schedstat` field 1 (`sum_exec_runtime`, ns) | % of one CPU | Total on-CPU time, no user/kernel/iowait split. Nanosecond precision — no 10 ms `CLK_TCK` quantization. |
 | `rss_bytes` | `/proc/<pid>/status` VmRSS | bytes | Resident set size (physical pages) |
 | `vms_bytes` | `/proc/<pid>/status` VmSize | bytes | Virtual memory size |
 | `shared_bytes` | `/proc/<pid>/status` RssShmem | bytes | Resident shared memory |

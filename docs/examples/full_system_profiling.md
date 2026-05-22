@@ -56,17 +56,18 @@ in the current directory, or under `output_dir` if set in the config.
 ## Visualize
 
 ```bash
-python tools/visualize_all.py \
-    --gpu gpu_metrics.pb \
-    --system system_metrics.pb \
-    --disk disk_metrics.pb \
+# Static PNG
+python tools/visualize_all.py profiling_output/session_metadata.pb \
     -o full_profile.png
+
+# Or the Bokeh interactive viewer
+python tools/visualize_interactive.py profiling_output/session_metadata.pb
 ```
 
-Panels (omitted when the corresponding trace is absent):
-region timeline → SM utilization → active warps/cycle → DRAM GB/s →
-PCIe GB/s → NVLink GB/s → CPU % → per-PID CPU % → system memory → per-PID RSS
-→ disk throughput → per-PID disk IO → disk queue depth.
+Both consume the single `session_metadata.pb` and auto-discover the
+per-probe `.pb` files from the manifest. Panel set comes from
+`configs/visualizer_panels.pbtxt`; entries that match no series in
+the trace (e.g. disk panels on a run with no disk probe) are skipped.
 
 ## Permission notes
 

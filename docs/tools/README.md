@@ -76,8 +76,19 @@ python tools/visualize_all.py profiling_output/session_metadata.pb \
 python tools/visualize_all.py session_metadata.pb \
     --catalog       my_catalog.pbtxt \
     --panel-layout  my_layout.pbtxt \
-    --smooth-window-s 0.05
+    --smooth-window-s 0.05 \
+    --display-hz    100
 ```
+
+Quality / size knobs:
+
+- `--smooth-window-s <s>` boxcar-smooths every `smoothable` metric over
+  the given window (per-probe kernel size). `0` (default) = no
+  smoothing. Cumulative companion panels stay raw so their run totals
+  remain faithful.
+- `--display-hz <Hz>` stride-decimates every series to the given
+  display rate after smoothing. `0` (default) keeps the raw sampling
+  rate. Useful for cutting render time on high-frequency GPU traces.
 
 Panels in the default layout (auto-skipped when no series matches):
 SM Util → Active Warps/Cycle → DRAM Bandwidth → PCIe Bandwidth →
@@ -105,6 +116,10 @@ python tools/visualize_interactive.py session_metadata.pb --no-serve
 # Bind to localhost only (default is 0.0.0.0 = all interfaces):
 python tools/visualize_interactive.py session_metadata.pb --host 127.0.0.1
 
+# Dark theme + downsample for faster first paint:
+python tools/visualize_interactive.py session_metadata.pb \
+    --theme dark --display-hz 100 --smooth-window-s 0.01
+
 # Live mode — tail the .pb files and stream new samples into a running
 # Bokeh server. Open the URL in a browser; new data appears every
 # poll-interval-ms (default 1s). Run alongside an active workload.
@@ -112,23 +127,48 @@ python tools/visualize_interactive.py --live \
     /tmp/run/profiling_output/session_metadata.pb
 ```
 
+Flag reference (selected; full list via `--help`):
+
+- `--theme {light,dark}` — `dark` applies Bokeh's `dark_minimal` to
+  every plot and flips the page background, loading overlay, and
+  sticky-strip fills to match. Default `light`.
+- `--render-backend {canvas,webgl,svg}` — output backend per figure.
+  Default `canvas`: ~4-5× faster first paint than `webgl` at our
+  trace volume (some GPU drivers stall on WebGL `ReadPixels`). `webgl`
+  wins on pan/zoom repaint smoothness.
+- `--smooth-window-s <s>` / `--display-hz <Hz>` — same semantics as
+  `visualize_all.py`.
+
 What you get:
 
-- **Synced pan + wheel-zoom** across every panel via a shared X axis
-  (mouse wheel = zoom time on whichever panel the cursor is over).
-- **Synced dashed crosshair**: a vertical gray line follows the
-  cursor's horizontal position and is mirrored on every panel.
-- **Combined hover tooltips** anchored at the bottom edge of each
-  plot — one popup per panel listing every co-plotted series' value
-  at the cursor's x. Triggers regardless of which legend entries you
-  hide.
-- **Click-to-hide legend entries** (legends are docked to the right
-  of each panel so they don't cover glyphs).
+- **Sticky event + region strips** pinned at the top of the page; the
+  metric panels below scroll past behind them. The two strips share
+  one continuous opaque band with a dashed separator at the bottom.
+- **Gesture conventions** that match TensorBoard / NSYS / NCU:
+    - plain mouse scroll → page scroll
+    - **ctrl + scroll** → cursor-anchored x-axis zoom
+    - **click + drag** → box-zoom rectangle (release zooms to that
+      x-region)
+  Pan is still available via the toolbar's pan button on the left.
+- **Unified hover popup** anchored at the bottom edge of each panel:
+  one tooltip per panel listing every co-plotted series's value at
+  the cursor x (interpolated where sampling rates differ). Triggers
+  regardless of which legend entries are hidden.
+- **Click-to-hide legend entries**; legends are docked to the **right**
+  with their left edges aligned across panels (toolbar lives on the
+  left so the right column belongs to the legend).
 - **Y-axis clamps** with dashed reference lines at the theoretical
-  peak (100% SM Util, 64 active warps, peak DRAM / PCIe / NVLink BW,
-  install RAM total).
-- **X-axis clamp**: pan/zoom is bounded to `[0, xmax + 0.8 × duration]`
-  so you can scroll past the data tail but not into infinity.
+  peak (100% SM Util, `max_warps_per_sm` for Active Warps, peak DRAM /
+  PCIe / NVLink BW, installed RAM total).
+- **X-axis clamp**: pan/zoom is bounded to
+  `[0, t_end + 0.4 × current_window_length]`, recomputed live as you
+  zoom. The trace stays at ≥60% of the viewport even when you scroll
+  past the tail. `WheelZoomTool.maintain_focus=False` so cursor-
+  anchored zoom near an edge that already touches a bound absorbs the
+  remaining zoom on the other side instead of being dropped.
+- **Loading overlay** with elapsed-seconds counter + CSS-driven
+  indeterminate bar that animates even while the JS thread is busy in
+  Bokeh hydration; hides as soon as the layout is in the DOM.
 
 Panel set is identical to `visualize_all.py` — see the table in that
 section.

@@ -54,12 +54,7 @@ Named regions + events   ┘
 A run of [`examples/full_system_profiling.py`](examples/full_system_profiling.py)
 (GEMM ramp + `vecAdd` workload) rendered with `visualize_all.py`:
 
-![Full-system profile](docs/images/full_system_profile.png)
-
-Top to bottom: instantaneous-event strip → region timeline strip → GPU
-panels (SM utilization, active warps/cycle, DRAM, PCIe, NVLink) →
-System CPU + memory → per-PID CPU + RSS → per-device disk + per-PID I/O
-+ queue depth → flush-rate panels → write-rate footer.
+![Full-system profile](docs/images/full_system_profile.v0.1.0.png)
 
 ## Repository layout
 
