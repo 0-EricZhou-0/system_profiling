@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace cupti_profiler {
@@ -19,14 +20,13 @@ struct CPUStatSnapshot {
     }
 };
 
-struct PIDSchedStatSnapshot {
-    // /proc/<pid>/schedstat field 1: sum_exec_runtime (nanoseconds the
-    // task has spent on a CPU). Always tracked by the kernel scheduler
-    // regardless of the kernel.sched_schedstats sysctl, so we get
-    // nanosecond-precision per-PID CPU time without the 10 ms quantization
-    // that /proc/<pid>/stat's utime/stime impose.
-    uint64_t cpuTimeNs = 0;
-};
+// Per-thread sum_exec_runtime baselines for a process. Keyed by TID;
+// value is field 1 of /proc/<pid>/task/<tid>/schedstat — nanoseconds
+// the thread has spent on a CPU. Aggregating across the whole thread
+// group is necessary because /proc/<tgid>/schedstat reports only the
+// group leader's task_struct (unlike /proc/<tgid>/stat's utime+stime
+// which the kernel aggregates with whole=1).
+using PIDThreadCpuMap = std::unordered_map<uint32_t, uint64_t>;
 
 struct MemInfoSnapshot {
     uint64_t totalKB = 0;
@@ -45,9 +45,15 @@ struct PIDStatmSnapshot {
 /// Read aggregate CPU stats from /proc/stat (first "cpu" line).
 CPUStatSnapshot ReadCPUStat();
 
-/// Read per-process CPU time from /proc/[pid]/schedstat.
-/// Returns zero-initialized snapshot if the process does not exist.
-PIDSchedStatSnapshot ReadPIDSchedStat(uint32_t pid);
+/// Read per-thread sum_exec_runtime for every thread in the given
+/// process by walking /proc/[pid]/task/. Returns an empty map if the
+/// process directory cannot be opened. Threads that disappear
+/// mid-walk are silently skipped; the caller is expected to diff
+/// successive maps to compute on-CPU deltas (delta = sum over visible
+/// TIDs of cur - prev, treating absent prev as 0). This naturally
+/// absorbs spawned threads and ignores the small slice of CPU time an
+/// exited thread accrued between its last appearance and exit.
+PIDThreadCpuMap ReadPIDSchedStatPerThread(uint32_t pid);
 
 /// Read system memory info from /proc/meminfo.
 MemInfoSnapshot ReadMemInfo();
