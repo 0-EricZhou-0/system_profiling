@@ -61,13 +61,13 @@ IOWait %          = delta(iowait) / delta(total) × 100
 
 **Implementation:** `ReadCPUStat()` in `lib/src/proc_readers.cpp` reads the first line, parses 8 fields into a `CPUStatSnapshot`. Delta computation happens in `SystemProfiler::Impl`'s sample thread.
 
-### Per-process CPU — `/proc/[PID]/schedstat`
+### Per-process CPU — `/proc/[PID]/task/*/schedstat`
 
-**Source:** Three integer fields on one line (kernel docs:
-`scheduler/sched-stats.rst`):
+**Source:** Three integer fields on one line, per thread
+(kernel docs: `scheduler/sched-stats.rst`):
 
 ```text ln:false
-  1: sum_exec_runtime — nanoseconds the task has spent on a CPU
+  1: sum_exec_runtime — nanoseconds the thread has spent on a CPU
   2: run_delay        — nanoseconds spent waiting in the runqueue
                          (gated by `kernel.sched_schedstats` sysctl)
   3: pcount           — number of times scheduled onto a CPU
@@ -77,11 +77,38 @@ The profiler reads only field 1. The other two are intentionally
 ignored — `run_delay` requires a sysctl that defaults to off on
 Linux 4.6+, and `pcount` isn't a metric we surface.
 
+**Why per-thread, not `/proc/[PID]/schedstat`:** the TGID-level
+inode reports the thread-group leader's `task_struct` only — not
+aggregated across the thread group. (Contrast `/proc/[PID]/stat`,
+where the kernel's `do_task_stat(..., whole=1)` aggregates
+`utime+stime` across the group.) Reading only the leader would
+under-report any multi-threaded workload — capped at 100% of one
+core no matter how many cores the process actually consumes — so
+we walk `/proc/[PID]/task/` and sum each thread's
+`sum_exec_runtime`.
+
 **Per-process CPU %:**
 
 ```text ln:false
-Active % = delta(sum_exec_runtime_ns) / dt_ns × 100
+Σ_t∈threads (cur[t] − prev[t])              ← cur[t]: this tick's
+Active % = ──────────────────────────── × 100   sum_exec_runtime for TID t
+                  dt_ns                          (prev[t] = 0 if t is new)
 ```
+
+`dt_ns` is the **actual** wall-clock elapsed between the previous
+sample tick and this one — *not* the nominal sample period.
+`sleep_for` + per-PID `/proc` reads + scheduler jitter make the
+real period strictly ≥ nominal; using the nominal value as the
+denominator would systematically inflate the result (a tick that
+takes 15 ms with the sampler configured at 100 Hz would report a
+fully-busy thread as 150% instead of 100%).
+
+Thread churn handling: TIDs visible only in `cur` are new threads
+— their `sum_exec_runtime` is attributed in full to this window.
+TIDs visible only in `prev` exited mid-window; their last partial
+slice (from previous tick to exit) is discarded, which keeps the
+per-PID baseline bounded with no per-thread bookkeeping beyond
+the live `task/` directory.
 
 > [!IMPORTANT]
 > Per-process CPU % can exceed 100% on multi-core systems (e.g., a
@@ -98,7 +125,9 @@ Active % = delta(sum_exec_runtime_ns) / dt_ns × 100
 > no longer split per-PID time into user / kernel / iowait —
 > `sum_exec_runtime` is total on-CPU time only.
 
-**Implementation:** `ReadPIDSchedStat()` in `lib/src/proc_readers.cpp`.
+**Implementation:** `ReadPIDSchedStatPerThread()` in
+`lib/src/proc_readers.cpp`; per-PID per-thread baselines + actual
+`dt` live on `SystemProfiler::Impl::prevPID`.
 
 ### System memory — `/proc/meminfo`
 
@@ -346,7 +375,7 @@ The `ProfilerSuite::LoadConfig()` method:
 
 | Metric | Unit | Source |
 | ------ | ---- | ------ |
-| `cpu_pct` | % of one core | `delta(sum_exec_runtime_ns) / dt_ns × 100` from `/proc/[PID]/schedstat` field 1 |
+| `cpu_pct` | % of one core | `Σ_t delta(sum_exec_runtime_ns[t]) / actual_dt_ns × 100` summed across every TID under `/proc/[PID]/task/*/schedstat` field 1 |
 
 ### Memory (system-wide)
 
