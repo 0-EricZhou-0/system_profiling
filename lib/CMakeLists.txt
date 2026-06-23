@@ -35,6 +35,7 @@ add_library(cupti_profiler SHARED
     src/session_metadata_writer.cpp
     # Shared infrastructure
     src/metric_catalog.cpp
+    src/metric_catalog_builtins.cpp
     src/process_tracking_probe.cpp
     # Orchestrator
     src/profiler_suite.cpp

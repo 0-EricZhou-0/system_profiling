@@ -1,6 +1,7 @@
 #include <cupti_profiler/profiler_suite.h>
 
 #include "metric_catalog.h"
+#include "metric_catalog_builtins.h"
 #include "profiler_config.pb.h"
 #include "session_metadata.pb.h"
 #include "session_metadata_writer.h"
@@ -11,7 +12,6 @@
 #include <sys/stat.h>
 #include <chrono>
 #include <ctime>
-#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -219,55 +219,28 @@ SystemProfiler& ProfilerSuite::GetSystemProfiler() { return m_impl->systemProfil
 DiskProfiler& ProfilerSuite::GetDiskProfiler() { return m_impl->diskProfiler; }
 EventProfiler& ProfilerSuite::GetEventProfiler() { return m_impl->eventProfiler; }
 
-// Resolve the MetricCatalog pbtxt to load. Priority:
-//   1. Explicit ProfilerSuiteConfig.metric_catalog_path.
-//   2. configs/metric_catalog.pbtxt relative to the current working
-//      directory (typical when running an example from the repo root).
-//   3. configs/metric_catalog.pbtxt relative to /proc/self/exe.
-// Exits with a clear message if none of these are readable.
-static std::string ResolveCatalogPath(const std::string& configured) {
-    namespace fs = std::filesystem;
-    if (!configured.empty()) return configured;
-    fs::path candidates[] = {
-        fs::path("configs/metric_catalog.pbtxt"),
-    };
-    for (const auto& p : candidates) {
-        if (fs::exists(p)) return p.string();
-    }
-    // Try sibling of the binary.
-    char exeBuf[4096];
-    ssize_t n = readlink("/proc/self/exe", exeBuf, sizeof(exeBuf) - 1);
-    if (n > 0) {
-        exeBuf[n] = '\0';
-        fs::path exeDir = fs::path(exeBuf).parent_path();
-        fs::path sibling = exeDir / "configs" / "metric_catalog.pbtxt";
-        if (fs::exists(sibling)) return sibling.string();
-        // Walk up looking for a configs/ sibling (handy for build/...
-        // layouts where the binary lives under build/examples/).
-        for (auto cur = exeDir; !cur.empty() && cur != cur.root_path();
-             cur = cur.parent_path()) {
-            fs::path up = cur / "configs" / "metric_catalog.pbtxt";
-            if (fs::exists(up)) return up.string();
-        }
-    }
-    std::cerr << "ProfilerSuite: cannot find metric_catalog.pbtxt. "
-                 "Set ProfilerSuiteConfig.metric_catalog_path to a valid "
-                 "MetricCatalog pbtxt.\n";
-    std::exit(1);
-}
-
 void ProfilerSuite::Configure() {
     if (!m_impl->loaded) {
         std::cerr << "ProfilerSuite::Configure() called before LoadConfig()\n";
         return;
     }
-    // Load the catalog before any probe configures, so probes can
-    // consult it for their ScopeMetricNames registries (full wiring
-    // lands in the descriptor-driven-emit follow-up; this commit just
-    // loads + inlines into SessionMetadata).
-    std::string catalogPath = ResolveCatalogPath(m_impl->metricCatalogPath);
-    m_impl->catalog = std::make_unique<internal::MetricCatalog>(
-        internal::MetricCatalog::LoadFromPbtxt(catalogPath));
+    // Assemble the MetricCatalog before any probe configures.
+    //
+    //   builtins (every probe's MetricDescriptor<Tick> array)
+    //   + optional pbtxt overrides (merge-by-FQN, opt-in via
+    //     ProfilerSuiteConfig.metric_catalog_path)
+    //   + (later, GPU descriptors from CUPTI enumeration via
+    //     MetricCatalog::AppendDescriptors())
+    //
+    // The seeded catalog is what gets inlined into session_metadata.pb
+    // for the visualizer, so a downstream user that wants to tweak a
+    // description / peak / smoothable only needs to ship a small
+    // override pbtxt — no rebuild, no full catalog copy.
+    m_impl->catalog = std::make_unique<internal::MetricCatalog>();
+    internal::RegisterBuiltinDescriptors(*m_impl->catalog);
+    if (!m_impl->metricCatalogPath.empty()) {
+        m_impl->catalog->MergeOverridesFromPbtxt(m_impl->metricCatalogPath);
+    }
 
     if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Configure(m_impl->gpuConfig);
     if (m_impl->sysEnabled)   m_impl->systemProfiler.Configure(m_impl->sysConfig);
