@@ -36,6 +36,7 @@ add_library(cupti_profiler SHARED
     # Shared infrastructure
     src/metric_catalog.cpp
     src/metric_catalog_builtins.cpp
+    src/builtin_catalog.cpp
     src/process_tracking_probe.cpp
     # Orchestrator
     src/profiler_suite.cpp

@@ -1,1 +1,2 @@
 add_subdirectory(list_pm_metrics)
+add_subdirectory(dump_metric_catalog)
