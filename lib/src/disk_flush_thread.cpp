@@ -5,6 +5,7 @@
 #include <google/protobuf/io/coded_stream.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 
+#include <array>
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -12,16 +13,81 @@
 namespace cupti_profiler {
 namespace internal {
 
-static const char* const kDeviceFqns[] = {
-    "disk__read_bytes.sum.per_second",
-    "disk__write_bytes.sum.per_second",
-    "disk__read_inflight",
-    "disk__write_inflight",
+// One descriptor per emitted column. AppendDeviceSample /
+// AppendProcessSample iterate these arrays in order, calling each
+// `.read` lambda against the tick struct. AddScopeRegistry walks
+// the same arrays to emit ScopeMetricNames in matching order.
+// metric_catalog_builtins.cpp consumes the same arrays via the
+// GetDiskDeviceMetrics / GetDiskProcessMetrics accessors at the
+// bottom of this TU. Adding a metric here threads it into both
+// the trace and the catalog with no second edit.
+
+namespace {
+
+inline constexpr std::array kDeviceMetrics = {
+    MetricDescriptor<DiskDeviceTick>{
+        .fqn         = "disk__read_bytes.sum.per_second",
+        .type        = MetricType::Counter,
+        .entity      = "disk",  .counter = "read_bytes",
+        .rollup      = "sum",   .submetric = "per_second",
+        .unit        = Unit::BytesPerSec,  .scope = Scope::Device,
+        .description = "Per-device read bandwidth. /proc/diskstats sectors_read × 512 / Δt.",
+        .read        = [](const DiskDeviceTick& t){ return t.read_bytes_per_sec; },
+    },
+    MetricDescriptor<DiskDeviceTick>{
+        .fqn         = "disk__write_bytes.sum.per_second",
+        .type        = MetricType::Counter,
+        .entity      = "disk",  .counter = "write_bytes",
+        .rollup      = "sum",   .submetric = "per_second",
+        .unit        = Unit::BytesPerSec,  .scope = Scope::Device,
+        .description = "Per-device write bandwidth. /proc/diskstats sectors_written × 512 / Δt.",
+        .read        = [](const DiskDeviceTick& t){ return t.write_bytes_per_sec; },
+    },
+    MetricDescriptor<DiskDeviceTick>{
+        .fqn         = "disk__read_inflight",
+        .type        = MetricType::Counter,
+        .entity      = "disk",  .counter = "read_inflight",
+        .unit        = Unit::Requests,  .scope = Scope::Device,
+        .smoothable  = false,
+        .description = "Currently in-flight read requests. /sys/block/<dev>/inflight first column. Render as step — values are instantaneous, not a rate.",
+        .read        = [](const DiskDeviceTick& t){ return static_cast<double>(t.read_inflight); },
+    },
+    MetricDescriptor<DiskDeviceTick>{
+        .fqn         = "disk__write_inflight",
+        .type        = MetricType::Counter,
+        .entity      = "disk",  .counter = "write_inflight",
+        .unit        = Unit::Requests,  .scope = Scope::Device,
+        .smoothable  = false,
+        .description = "Currently in-flight write requests. /sys/block/<dev>/inflight second column. Render as step.",
+        .read        = [](const DiskDeviceTick& t){ return static_cast<double>(t.write_inflight); },
+    },
 };
-static const char* const kProcessFqns[] = {
-    "proc__io_rchar.sum.per_second",
-    "proc__io_wchar.sum.per_second",
+
+inline constexpr std::array kProcessMetrics = {
+    MetricDescriptor<DiskProcessTick>{
+        .fqn         = "proc__io_rchar.sum.per_second",
+        .type        = MetricType::Counter,
+        .entity      = "proc",  .counter = "io_rchar",
+        .rollup      = "sum",   .submetric = "per_second",
+        .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
+        .description = "Per-PID read bandwidth (syscall layer). /proc/<pid>/io rchar delta. INCLUDES page-cache hits — NOT physical-disk reads.",
+        .read        = [](const DiskProcessTick& t){ return t.rchar_bytes_per_sec; },
+    },
+    MetricDescriptor<DiskProcessTick>{
+        .fqn         = "proc__io_wchar.sum.per_second",
+        .type        = MetricType::Counter,
+        .entity      = "proc",  .counter = "io_wchar",
+        .rollup      = "sum",   .submetric = "per_second",
+        .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
+        .description = "Per-PID write bandwidth (syscall layer). /proc/<pid>/io wchar delta. Bytes the process ASKED to write — flush to block layer may differ.",
+        .read        = [](const DiskProcessTick& t){ return t.wchar_bytes_per_sec; },
+    },
 };
+
+} // namespace
+
+std::span<const MetricDescriptor<DiskDeviceTick>>  GetDiskDeviceMetrics()  { return kDeviceMetrics;  }
+std::span<const MetricDescriptor<DiskProcessTick>> GetDiskProcessMetrics() { return kProcessMetrics; }
 
 namespace {
 
@@ -44,29 +110,25 @@ void PopulateHeader(DiskMetricsTrace& trace,
 void AddScopeRegistry(DiskMetricsTrace& trace) {
     auto* dev = trace.add_scope_metric_names();
     dev->set_scope(SCOPE_DEVICE);
-    for (const char* f : kDeviceFqns) dev->add_fqns(f);
+    for (const auto& d : kDeviceMetrics) dev->add_fqns(std::string(d.fqn));
 
     auto* proc = trace.add_scope_metric_names();
     proc->set_scope(SCOPE_PROCESS);
-    for (const char* f : kProcessFqns) proc->add_fqns(f);
+    for (const auto& d : kProcessMetrics) proc->add_fqns(std::string(d.fqn));
 }
 
 void AppendDeviceSample(DiskMetricsTrace& trace, const DiskDeviceTick& t) {
     auto* s = trace.add_device_samples();
     s->set_timestamp_ns(t.timestamp_ns);
     s->set_device_name(t.device_name);
-    s->add_values(t.read_bytes_per_sec);
-    s->add_values(t.write_bytes_per_sec);
-    s->add_values(static_cast<double>(t.read_inflight));
-    s->add_values(static_cast<double>(t.write_inflight));
+    for (const auto& d : kDeviceMetrics) s->add_values(d.read(t));
 }
 
 void AppendProcessSample(DiskMetricsTrace& trace, const DiskProcessTick& t) {
     auto* s = trace.add_process_samples();
     s->set_timestamp_ns(t.timestamp_ns);
     s->set_pid(t.pid);
-    s->add_values(t.rchar_bytes_per_sec);
-    s->add_values(t.wchar_bytes_per_sec);
+    for (const auto& d : kProcessMetrics) s->add_values(d.read(t));
 }
 
 } // namespace

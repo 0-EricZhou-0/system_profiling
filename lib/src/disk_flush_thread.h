@@ -5,6 +5,8 @@
 // CommitPendingRemovals().
 #pragma once
 
+#include "metric_descriptor.h"
+
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/process_tracking_probe.h>
 
@@ -12,6 +14,7 @@
 #include <cstdint>
 #include <fstream>
 #include <mutex>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -20,7 +23,8 @@ class DiskMetricsTrace;
 namespace cupti_profiler {
 namespace internal {
 
-// One SCOPE_DEVICE sample at one tick. values[] order matches kDeviceFqns.
+// One SCOPE_DEVICE sample at one tick. values[] column order is driven
+// by GetDiskDeviceMetrics() iteration order (see .cpp).
 struct DiskDeviceTick {
     uint64_t timestamp_ns        = 0;
     std::string device_name;
@@ -30,7 +34,8 @@ struct DiskDeviceTick {
     uint32_t write_inflight      = 0;
 };
 
-// One SCOPE_PROCESS sample at one tick. values[] order matches kProcessFqns.
+// One SCOPE_PROCESS sample at one tick. values[] column order is driven
+// by GetDiskProcessMetrics() iteration order.
 struct DiskProcessTick {
     uint64_t timestamp_ns         = 0;
     uint32_t pid                  = 0;
@@ -42,6 +47,13 @@ struct DiskSampleBatch {
     std::vector<DiskDeviceTick>  deviceTicks;
     std::vector<DiskProcessTick> processTicks;
 };
+
+// Accessors for the descriptor arrays owned by disk_flush_thread.cpp.
+// Same arrays drive trace emission and catalog registration
+// (metric_catalog_builtins.cpp), so wire FQN order and wire values[]
+// order are structurally tied to the catalog.
+std::span<const MetricDescriptor<DiskDeviceTick>>  GetDiskDeviceMetrics();
+std::span<const MetricDescriptor<DiskProcessTick>> GetDiskProcessMetrics();
 
 struct DiskPendingFlushStats {
     uint64_t bytesWritten = 0;
