@@ -10,6 +10,18 @@
 #include <iostream>
 
 int main() {
-    std::cout << cupti_profiler::BuiltinMetricCatalogPbtxt();
+    std::cout
+        << "# AUTO-GENERATED — do not edit by hand.\n"
+        << "# Regenerate: ./build/tools/dump_metric_catalog > lib/data/metric_catalog.pbtxt\n"
+        << "# Source of truth: kSystemMetrics / kProcessMetrics in\n"
+        << "#   lib/src/system_flush_thread.cpp and lib/src/disk_flush_thread.cpp.\n"
+        << "# This file is a human-readable reference only — the runtime seeds\n"
+        << "# its in-memory MetricCatalog from RegisterBuiltinDescriptors() in\n"
+        << "# lib/src/metric_catalog_builtins.cpp, not from this pbtxt.\n"
+        << "#\n"
+        << "# GPU descriptors are NOT included here — they are chip-specific and\n"
+        << "# discovered at runtime via cuptiProfilerHostGetSubMetrics().\n"
+        << "\n"
+        << cupti_profiler::BuiltinMetricCatalogPbtxt();
     return 0;
 }

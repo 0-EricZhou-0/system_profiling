@@ -8,8 +8,9 @@ session_metadata.pb, use tools/visualize_all.py instead.
     python tools/visualize_single.py -i gpu_metrics.pb -o gpu.png
 
 The MetricCatalog is loaded from --catalog (default:
-configs/metric_catalog.pbtxt next to the repo). The panel layout is
-filtered to SCOPE_GPU panels only.
+lib/data/metric_catalog.pbtxt — the auto-generated reference dumped
+from the runtime's built-in registry). The panel layout is filtered
+to SCOPE_GPU panels only.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ def main() -> int:
                         help="Output PNG path (default: gpu_profile.png)")
     parser.add_argument("--catalog", default=None,
                         help="Override MetricCatalog pbtxt (default: "
-                             "configs/metric_catalog.pbtxt)")
+                             "lib/data/metric_catalog.pbtxt)")
     parser.add_argument("--panel-layout", default=None,
                         help="Override PanelLayout pbtxt (default: "
                              "configs/visualizer_panels.pbtxt)")
@@ -66,7 +67,7 @@ def main() -> int:
         return 1
 
     catalog_path = Path(args.catalog) if args.catalog \
-        else _HERE.parent / "configs" / "metric_catalog.pbtxt"
+        else _HERE.parent / "lib" / "data" / "metric_catalog.pbtxt"
     catalog = metric_catalog.load_catalog(catalog_path)
 
     layout_path = Path(args.panel_layout) if args.panel_layout \

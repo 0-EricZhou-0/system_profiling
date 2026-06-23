@@ -57,7 +57,7 @@ with the catalog/layout-resolved GPU panels. Pairs with
 python tools/visualize_single.py -i gpu_metrics.pb -o gpu_metrics.png
 # Optional overrides:
 python tools/visualize_single.py -i gpu_metrics.pb \
-    --catalog       configs/metric_catalog.pbtxt \
+    --catalog       lib/data/metric_catalog.pbtxt \
     --panel-layout  configs/visualizer_panels.pbtxt \
     --smooth-window-s 0.01
 ```

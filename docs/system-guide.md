@@ -654,8 +654,11 @@ A reference config lives in `configs/example.pbtxt`. The minimal shape:
 
 ```protobuf title:"config.pbtxt"
 output_dir: "profiling_output"
-# Optional: path to a MetricCatalog pbtxt. Empty = "configs/metric_catalog.pbtxt"
-# next to the binary.
+# Optional: path to a MetricCatalog pbtxt to OVERLAY onto the built-in
+# registry (see lib/data/metric_catalog.pbtxt for a regenerated dump
+# of what the runtime ships). Descriptors with FQNs already present are
+# replaced; new FQNs are appended. Leave empty to use the built-ins
+# only — no file is needed at runtime.
 metric_catalog_path: ""
 
 gpu {

@@ -58,8 +58,11 @@ message ProfilerSuiteConfig {
     // Empty = "session_metadata.pb" by default at runtime.
     string session_metadata_file = 6;
 
-    // Path to a MetricCatalog pbtxt (see proto/metric_catalog.proto +
-    // configs/metric_catalog.pbtxt). Empty = the suite loads
-    // `configs/metric_catalog.pbtxt` next to the binary.
+    // Optional: path to a MetricCatalog pbtxt to OVERLAY onto the
+    // runtime's built-in registry (see lib/include/cupti_profiler/
+    // builtin_catalog.h and lib/src/{system,disk}_flush_thread.cpp).
+    // Descriptors with matching FQNs are replaced; new FQNs are
+    // appended. Empty = built-ins only — no file is required at
+    // runtime.
     string metric_catalog_path = 7;
 }
