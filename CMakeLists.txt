@@ -1,8 +1,17 @@
 cmake_minimum_required(VERSION 3.18)
 project(cupti-profiler LANGUAGES CXX CUDA)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# CUDA TUs (example .cu files) stay on C++17. They only include the
+# profiler's public headers, which are C++17-compatible by design — every
+# C++20 feature lives behind the library's private .cpp files. CMake 3.22
+# + NVCC 12.8 do not yet wire up cuda_std_20 cleanly, so pinning CUDA
+# explicitly to 17 avoids the "compiler flags to use to enable it" error
+# without losing C++20 in the host library.
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Find CUDA Toolkit (provides CUDA::cudart, CUDA::cublas, include paths)
