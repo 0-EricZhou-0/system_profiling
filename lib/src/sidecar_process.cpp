@@ -195,5 +195,15 @@ ProfilerError SidecarProcess::SendSyncAnchor(uint64_t steady_clock_ref_ns,
     return ReadStatus();
 }
 
+ProfilerError SidecarProcess::SendStart() {
+    if (auto e = WriteMsg(MSG_START, nullptr, 0); e != ProfilerError::Ok) return e;
+    return ReadStatus();
+}
+
+ProfilerError SidecarProcess::SendStop() {
+    if (auto e = WriteMsg(MSG_STOP, nullptr, 0); e != ProfilerError::Ok) return e;
+    return ReadStatus();
+}
+
 } // namespace internal
 } // namespace cupti_profiler

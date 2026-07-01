@@ -54,6 +54,15 @@ public:
     ProfilerError SendSyncAnchor(uint64_t steady_clock_ref_ns,
                                  uint64_t wall_clock_epoch_ns);
 
+    /// Tell the sidecar to build its probes and start sampling.
+    /// Blocks for the sidecar's ack.
+    ProfilerError SendStart();
+
+    /// Tell the sidecar to stop sampling, flush pending trace bytes,
+    /// and exit. Blocks for the sidecar's ack. The destructor's
+    /// SIGTERM path is the fallback if this fails.
+    ProfilerError SendStop();
+
     bool is_running() const { return child_pid_ > 0; }
     pid_t child_pid() const { return child_pid_; }
 

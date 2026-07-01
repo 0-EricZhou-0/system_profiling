@@ -302,13 +302,14 @@ ProfilerError ProfilerSuite::Configure() {
             return e;
         }
     }
-    // Under the current commit's scope, Legacy mode still owns the
-    // in-process Configure() → Start() paths for sys/disk. Later
-    // commits move the sample loops into the sidecar for
-    // SystemProbeMode::Sidecar and skip these lines when the
-    // sidecar has taken over.
-    if (m_impl->sysEnabled)   m_impl->systemProfiler.Configure(m_impl->sysConfig);
-    if (m_impl->diskEnabled)  m_impl->diskProfiler.Configure(m_impl->diskConfig);
+    // Legacy mode configures in-process. Sidecar mode: the sidecar
+    // has already been sent the config over the pipe and will build
+    // its own SystemProfiler / DiskProfiler when it receives
+    // MSG_START (see ProfilerSuite::Start below).
+    if (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy)
+        m_impl->systemProfiler.Configure(m_impl->sysConfig);
+    if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
+        m_impl->diskProfiler.Configure(m_impl->diskConfig);
     if (m_impl->eventEnabled) m_impl->eventProfiler.Configure(m_impl->eventConfig);
     return ProfilerError::Ok;
 }
@@ -361,9 +362,23 @@ void ProfilerSuite::Start() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Start();
-    if (m_impl->sysEnabled)   m_impl->systemProfiler.Start();
-    if (m_impl->diskEnabled)  m_impl->diskProfiler.Start();
+    // Legacy sys/disk start in-process; Sidecar sys/disk are started
+    // by the sidecar on receipt of MSG_START.
+    if (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy)
+        m_impl->systemProfiler.Start();
+    if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
+        m_impl->diskProfiler.Start();
     if (m_impl->eventEnabled) m_impl->eventProfiler.Start();
+
+    // Nudge the sidecar to begin sampling (if one is running). Errors
+    // from this handshake are logged; we don't fail Start() over them
+    // because the in-process probes may still be usefully sampling.
+    if (m_impl->sidecar) {
+        if (auto e = m_impl->sidecar->SendStart(); e != ProfilerError::Ok) {
+            std::cerr << "[ProfilerSuite] sidecar SendStart: "
+                      << ToString(e) << "\n";
+        }
+    }
 
     // Emit the manifest now so live tailers (e.g. visualize_interactive.py
     // --live) have a starting point. Stop() re-emits the identical content
@@ -372,15 +387,31 @@ void ProfilerSuite::Start() {
 }
 
 void ProfilerSuite::Stop() {
-    // Signal all sample threads to stop immediately, before any
-    // slow teardown (e.g., GPU CUPTI cleanup) blocks.
-    if (m_impl->sysEnabled)   m_impl->systemProfiler.SignalStop();
-    if (m_impl->diskEnabled)  m_impl->diskProfiler.SignalStop();
+    // Signal in-process sample threads to stop immediately, before any
+    // slow teardown (e.g., GPU CUPTI cleanup) blocks. Legacy sys/disk
+    // signal here; Sidecar sys/disk signal via MSG_STOP over the pipe
+    // below.
+    if (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy)
+        m_impl->systemProfiler.SignalStop();
+    if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
+        m_impl->diskProfiler.SignalStop();
     if (m_impl->eventEnabled) m_impl->eventProfiler.SignalStop();
 
+    // Tell the sidecar to flush + exit cleanly. The destructor's
+    // SIGTERM path is the fallback if this handshake failed.
+    if (m_impl->sidecar) {
+        if (auto e = m_impl->sidecar->SendStop(); e != ProfilerError::Ok) {
+            std::cerr << "[ProfilerSuite] sidecar SendStop: "
+                      << ToString(e) << "\n";
+        }
+        m_impl->sidecar.reset();
+    }
+
     if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Stop();
-    if (m_impl->sysEnabled)   m_impl->systemProfiler.Stop();
-    if (m_impl->diskEnabled)  m_impl->diskProfiler.Stop();
+    if (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy)
+        m_impl->systemProfiler.Stop();
+    if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
+        m_impl->diskProfiler.Stop();
     if (m_impl->eventEnabled) m_impl->eventProfiler.Stop();
 
     m_impl->WriteSessionManifest();

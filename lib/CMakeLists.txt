@@ -76,6 +76,20 @@ target_link_libraries(cupti_profiler
 
 target_compile_definitions(cupti_profiler PRIVATE CUPTI_PROFILER_EXPORTS)
 
+# The cupti-profiler-sidecar binary needs to parse ProfilerSuiteConfig
+# from the pipe on startup — that requires the proto symbols to be
+# visible in libcupti_profiler.so. The library's default hidden
+# visibility hides them along with everything else; override that for
+# just the generated proto TUs so the sidecar link resolves cleanly.
+# We do NOT link the proto .cc's into the sidecar directly because
+# protobuf's descriptor-database would double-register and abort.
+set_source_files_properties(
+    ${MC_PROTO_SRCS} ${MS_PROTO_SRCS} ${PN_PROTO_SRCS}
+    ${GPU_PROTO_SRCS} ${SYS_PROTO_SRCS} ${DISK_PROTO_SRCS}
+    ${EVT_PROTO_SRCS} ${SESS_PROTO_SRCS} ${CFG_PROTO_SRCS}
+    PROPERTIES COMPILE_FLAGS "-fvisibility=default"
+)
+
 # Baked-in default path for the sidecar binary. Env var
 # CUPTI_PROFILER_SIDECAR overrides at runtime; without either, the
 # library reports SidecarNotFound if a caller requests SIDECAR mode.
