@@ -1,2 +1,3 @@
 add_subdirectory(list_pm_metrics)
 add_subdirectory(dump_metric_catalog)
+add_subdirectory(cupti_profiler_sidecar)
