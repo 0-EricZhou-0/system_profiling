@@ -150,6 +150,10 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         m_impl->sysConfig.samplingFrequencyHz = s.sampling_frequency_hz() > 0 ? s.sampling_frequency_hz() : 100;
         m_impl->sysConfig.flushIntervalMs = s.flush_interval_ms() > 0 ? s.flush_interval_ms() : 5000;
         m_impl->sysConfig.outputFile = s.output_file();
+        m_impl->sysConfig.mode =
+            (s.mode() == SYSTEM_PROBE_MODE_SIDECAR)
+                ? SystemProbeMode::Sidecar
+                : SystemProbeMode::Legacy;
         for (const auto& p : s.processes()) {
             TrackedProcess tp;
             tp.pid   = p.pid();
@@ -166,6 +170,10 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         m_impl->diskConfig.samplingFrequencyHz = d.sampling_frequency_hz() > 0 ? d.sampling_frequency_hz() : 10;
         m_impl->diskConfig.flushIntervalMs = d.flush_interval_ms() > 0 ? d.flush_interval_ms() : 5000;
         m_impl->diskConfig.outputFile = d.output_file();
+        m_impl->diskConfig.mode =
+            (d.mode() == SYSTEM_PROBE_MODE_SIDECAR)
+                ? SystemProbeMode::Sidecar
+                : SystemProbeMode::Legacy;
         for (const auto& dev : d.devices()) {
             m_impl->diskConfig.devices.push_back(dev);
         }

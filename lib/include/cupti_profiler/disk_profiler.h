@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cupti_profiler/process_tracking_probe.h>
+#include <cupti_profiler/system_profiler.h>   // SystemProbeMode
 #include <cupti_profiler/tracked_process.h>
 
 #include <cstdint>
@@ -33,6 +34,7 @@ struct CUPTI_PROFILER_API DiskProfilerConfig {
     std::vector<TrackedProcess> Processes;
     uint64_t flushIntervalMs = 5000;
     std::string outputFile;
+    SystemProbeMode mode = SystemProbeMode::Legacy;
 };
 
 class CUPTI_PROFILER_API DiskProfiler : public ProcessTrackingProbe {

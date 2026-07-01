@@ -25,6 +25,16 @@
 
 namespace cupti_profiler {
 
+// Where the sampler + flush threads live. LEGACY runs them in the
+// workload's address space (existing behavior); SIDECAR moves them
+// to an out-of-process cupti-profiler-sidecar so they don't inflate
+// the workload's per-PID CPU accounting. See
+// proto/profiler_config.proto :: SystemProbeMode for the wire enum.
+enum class SystemProbeMode {
+    Legacy  = 1,
+    Sidecar = 2,
+};
+
 struct CUPTI_PROFILER_API SystemProfilerConfig {
     uint64_t samplingFrequencyHz = 100;             // 100 Hz
     // Processes to track per-process. Empty = system-wide only.
@@ -34,6 +44,7 @@ struct CUPTI_PROFILER_API SystemProfilerConfig {
     std::vector<TrackedProcess> Processes;
     uint64_t flushIntervalMs = 5000;
     std::string outputFile;
+    SystemProbeMode mode = SystemProbeMode::Legacy;
 };
 
 class CUPTI_PROFILER_API SystemProfiler : public ProcessTrackingProbe {

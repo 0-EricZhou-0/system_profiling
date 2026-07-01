@@ -2,6 +2,32 @@ syntax = "proto3";
 
 import "metric_sample.proto";
 
+// How the SystemProfiler / DiskProfiler run. Selects between the
+// legacy in-process path (probes are threads inside the workload's
+// address space) and the sidecar path (probes are threads inside a
+// separately-forked cupti-profiler-sidecar process).
+//
+// Rationale: in the legacy layout, the sampler + flush threads count
+// toward the workload's per-PID CPU accounting — a small but non-zero
+// distortion for benchmarks that care about "what the workload alone
+// would use." SIDECAR mode moves those threads to a distinct PID so
+// they don't appear in the workload's schedstat aggregation, at the
+// cost of an extra process on the host and (with the taskstats
+// backend) a CAP_NET_ADMIN requirement on the sidecar binary.
+//
+// GPU + Events probes stay in-process regardless — CUPTI PM Sampling
+// binds to the workload's CUDA context, and EventTracker records
+// cudaEvents on workload-owned streams; neither can move.
+enum SystemProbeMode {
+    SYSTEM_PROBE_MODE_UNSPECIFIED = 0;
+    // In-process /proc readers (default; preserves the legacy shape).
+    SYSTEM_PROBE_MODE_LEGACY = 1;
+    // Out-of-process sidecar with the taskstats netlink backend.
+    // Requires CAP_NET_ADMIN on the sidecar binary (verified at
+    // Configure()); Configure() returns SidecarMissingCaps otherwise.
+    SYSTEM_PROBE_MODE_SIDECAR = 2;
+}
+
 message GPUProfilerConfig {
     bool enabled = 1;
     // Empty = device 0. Otherwise CUPTI PM Sampling opens one session
@@ -25,6 +51,8 @@ message SystemProfilerConfig {
     repeated TrackedProcessV2 processes = 3;
     uint64 flush_interval_ms = 4;
     string output_file = 5;
+    // Where the sampler + flush threads run. UNSPECIFIED → LEGACY.
+    SystemProbeMode mode = 6;
 }
 
 message DiskProfilerConfig {
@@ -35,6 +63,12 @@ message DiskProfilerConfig {
     repeated TrackedProcessV2 processes = 4;
     uint64 flush_interval_ms = 5;
     string output_file = 6;
+    // Where the sampler + flush threads run. UNSPECIFIED → LEGACY.
+    // If both System and Disk are SIDECAR, one sidecar process serves
+    // both — the taskstats query returns CPU/mem/IO in a single struct,
+    // so the sidecar's SystemProfiler and DiskProfiler share one
+    // TaskstatsClient and one netlink round-trip per PID per tick.
+    SystemProbeMode mode = 7;
 }
 
 message EventsProfilerConfig {
