@@ -237,8 +237,38 @@ int main(int /*argc*/, char** /*argv*/) {
             std::cerr << "[sidecar] MSG_STOP received\n";
             break;
         }
-        if (hdr.type == MSG_ADD_PID || hdr.type == MSG_REMOVE_PID) {
-            // Deferred to commit 5; ack so parent doesn't block.
+        if (hdr.type == MSG_ADD_PID) {
+            // Payload: [uint32 pid][uint32 alias_len][alias bytes]
+            if (payload.size() < 2 * sizeof(uint32_t)) {
+                SendStatus(ProfilerError::SidecarBadHandshake);
+                continue;
+            }
+            uint32_t pid = 0, alias_len = 0;
+            std::memcpy(&pid,       payload.data(),                     sizeof(pid));
+            std::memcpy(&alias_len, payload.data() + sizeof(pid),       sizeof(alias_len));
+            if (payload.size() != 2 * sizeof(uint32_t) + alias_len) {
+                SendStatus(ProfilerError::SidecarBadHandshake);
+                continue;
+            }
+            std::string alias(
+                payload.data() + 2 * sizeof(uint32_t), alias_len);
+            std::cerr << "[sidecar] MSG_ADD_PID pid=" << pid
+                      << " alias=\"" << alias << "\"\n";
+            if (sys) sys->AddTrackedProcess(pid, alias);
+            if (dsk) dsk->AddTrackedProcess(pid, alias);
+            SendStatus(ProfilerError::Ok);
+            continue;
+        }
+        if (hdr.type == MSG_REMOVE_PID) {
+            if (payload.size() != sizeof(uint32_t)) {
+                SendStatus(ProfilerError::SidecarBadHandshake);
+                continue;
+            }
+            uint32_t pid = 0;
+            std::memcpy(&pid, payload.data(), sizeof(pid));
+            std::cerr << "[sidecar] MSG_REMOVE_PID pid=" << pid << "\n";
+            if (sys) sys->RemoveTrackedProcess(pid);
+            if (dsk) dsk->RemoveTrackedProcess(pid);
             SendStatus(ProfilerError::Ok);
             continue;
         }

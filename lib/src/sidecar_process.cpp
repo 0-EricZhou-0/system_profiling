@@ -174,6 +174,7 @@ ProfilerError SidecarProcess::ReadStatus() {
 }
 
 ProfilerError SidecarProcess::SendConfig(const std::string& serialized_config) {
+    std::lock_guard<std::mutex> lk(send_mutex_);
     if (auto e = WriteMsg(MSG_CONFIG, serialized_config.data(),
                           static_cast<uint32_t>(serialized_config.size()));
         e != ProfilerError::Ok)
@@ -186,6 +187,7 @@ ProfilerError SidecarProcess::SendConfig(const std::string& serialized_config) {
 ProfilerError SidecarProcess::SendSyncAnchor(uint64_t steady_clock_ref_ns,
                                              uint64_t wall_clock_epoch_ns)
 {
+    std::lock_guard<std::mutex> lk(send_mutex_);
     SyncAnchorPayload sa{ steady_clock_ref_ns, wall_clock_epoch_ns };
     if (auto e = WriteMsg(MSG_SYNC_ANCHOR, &sa, sizeof(sa));
         e != ProfilerError::Ok)
@@ -196,12 +198,44 @@ ProfilerError SidecarProcess::SendSyncAnchor(uint64_t steady_clock_ref_ns,
 }
 
 ProfilerError SidecarProcess::SendStart() {
+    std::lock_guard<std::mutex> lk(send_mutex_);
     if (auto e = WriteMsg(MSG_START, nullptr, 0); e != ProfilerError::Ok) return e;
     return ReadStatus();
 }
 
 ProfilerError SidecarProcess::SendStop() {
+    std::lock_guard<std::mutex> lk(send_mutex_);
     if (auto e = WriteMsg(MSG_STOP, nullptr, 0); e != ProfilerError::Ok) return e;
+    return ReadStatus();
+}
+
+ProfilerError SidecarProcess::SendAddPid(uint32_t pid, const std::string& alias) {
+    // Payload: [uint32 pid][uint32 alias_len][alias bytes]
+    // Serialise ourselves rather than pulling in a proto — one message,
+    // one write, no framing complications on the sidecar side.
+    std::string buf;
+    buf.reserve(8 + alias.size());
+    uint32_t alias_len = static_cast<uint32_t>(alias.size());
+    buf.append(reinterpret_cast<const char*>(&pid),       sizeof(pid));
+    buf.append(reinterpret_cast<const char*>(&alias_len), sizeof(alias_len));
+    buf.append(alias);
+    std::lock_guard<std::mutex> lk(send_mutex_);
+    if (auto e = WriteMsg(MSG_ADD_PID, buf.data(),
+                          static_cast<uint32_t>(buf.size()));
+        e != ProfilerError::Ok)
+    {
+        return e;
+    }
+    return ReadStatus();
+}
+
+ProfilerError SidecarProcess::SendRemovePid(uint32_t pid) {
+    std::lock_guard<std::mutex> lk(send_mutex_);
+    if (auto e = WriteMsg(MSG_REMOVE_PID, &pid, sizeof(pid));
+        e != ProfilerError::Ok)
+    {
+        return e;
+    }
     return ReadStatus();
 }
 

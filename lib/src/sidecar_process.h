@@ -24,6 +24,7 @@
 #include <cupti_profiler/profiler_error.h>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <sys/types.h>
 
@@ -63,6 +64,16 @@ public:
     /// SIGTERM path is the fallback if this fails.
     ProfilerError SendStop();
 
+    /// Add a PID + alias to the sidecar's tracked set. Thread-safe;
+    /// serialised against other Send* calls by an internal mutex so
+    /// the workload can call AddTrackedProcess concurrently from
+    /// unrelated threads.
+    ProfilerError SendAddPid(uint32_t pid, const std::string& alias);
+
+    /// Remove a PID from the sidecar's tracked set. Same thread-
+    /// safety guarantee as SendAddPid.
+    ProfilerError SendRemovePid(uint32_t pid);
+
     bool is_running() const { return child_pid_ > 0; }
     pid_t child_pid() const { return child_pid_; }
 
@@ -72,6 +83,9 @@ private:
     int   pipe_to_child_   = -1;    // parent writes here
     int   pipe_from_child_ = -1;    // parent reads here
     pid_t child_pid_       = -1;
+    // Serialises Send* calls — the workload can call AddTrackedProcess
+    // from unrelated threads while another Send* is in flight.
+    mutable std::mutex send_mutex_;
 
     // Blocking write of a MsgHeader + payload on pipe_to_child_.
     ProfilerError WriteMsg(uint32_t type, const void* payload, uint32_t length);

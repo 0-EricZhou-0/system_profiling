@@ -418,14 +418,37 @@ void ProfilerSuite::Stop() {
 }
 
 void ProfilerSuite::AddTrackedProcess(uint32_t pid, std::string alias) {
-    // Fan out to every probe that supports per-PID sampling.
-    if (m_impl->sysEnabled)  m_impl->systemProfiler.AddTrackedProcess(pid, alias);
-    if (m_impl->diskEnabled) m_impl->diskProfiler.AddTrackedProcess(pid, std::move(alias));
+    // Fan out to every probe that supports per-PID sampling. Legacy
+    // probes handle it in-process; Sidecar probes' add goes through
+    // the sidecar over the pipe (single message serving both probes
+    // when both are enabled — sidecar fans out on its side).
+    const bool sys_legacy  = m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy;
+    const bool disk_legacy = m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy;
+    if (sys_legacy)  m_impl->systemProfiler.AddTrackedProcess(pid, alias);
+    if (disk_legacy) m_impl->diskProfiler.AddTrackedProcess(pid, alias);
+    if (m_impl->sidecar) {
+        if (auto e = m_impl->sidecar->SendAddPid(pid, alias);
+            e != ProfilerError::Ok)
+        {
+            std::cerr << "[ProfilerSuite] sidecar SendAddPid(pid=" << pid
+                      << "): " << ToString(e) << "\n";
+        }
+    }
 }
 
 void ProfilerSuite::RemoveTrackedProcess(uint32_t pid) {
-    if (m_impl->sysEnabled)  m_impl->systemProfiler.RemoveTrackedProcess(pid);
-    if (m_impl->diskEnabled) m_impl->diskProfiler.RemoveTrackedProcess(pid);
+    const bool sys_legacy  = m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy;
+    const bool disk_legacy = m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy;
+    if (sys_legacy)  m_impl->systemProfiler.RemoveTrackedProcess(pid);
+    if (disk_legacy) m_impl->diskProfiler.RemoveTrackedProcess(pid);
+    if (m_impl->sidecar) {
+        if (auto e = m_impl->sidecar->SendRemovePid(pid);
+            e != ProfilerError::Ok)
+        {
+            std::cerr << "[ProfilerSuite] sidecar SendRemovePid(pid=" << pid
+                      << "): " << ToString(e) << "\n";
+        }
+    }
 }
 
 } // namespace cupti_profiler

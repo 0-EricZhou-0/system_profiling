@@ -32,9 +32,23 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+  #ifdef CUPTI_PROFILER_EXPORTS
+    #define CUPTI_PROFILER_API __declspec(dllexport)
+  #else
+    #define CUPTI_PROFILER_API __declspec(dllimport)
+  #endif
+#else
+  #ifdef CUPTI_PROFILER_EXPORTS
+    #define CUPTI_PROFILER_API __attribute__((visibility("default")))
+  #else
+    #define CUPTI_PROFILER_API
+  #endif
+#endif
+
 namespace cupti_profiler {
 
-class ProcessTrackingProbe {
+class CUPTI_PROFILER_API ProcessTrackingProbe {
 public:
     ProcessTrackingProbe() = default;
     virtual ~ProcessTrackingProbe() = default;
