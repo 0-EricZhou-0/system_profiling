@@ -1,6 +1,8 @@
 #include "proc_readers.h"
 
+#include <cctype>
 #include <cstring>
+#include <dirent.h>
 #include <fstream>
 #include <sstream>
 #include <unistd.h>
@@ -24,20 +26,35 @@ CPUStatSnapshot ReadCPUStat() {
     return s;
 }
 
-PIDSchedStatSnapshot ReadPIDSchedStat(uint32_t pid) {
-    PIDSchedStatSnapshot s;
-    std::string path = "/proc/" + std::to_string(pid) + "/schedstat";
-    std::ifstream f(path);
-    if (!f) return s;
+PIDThreadCpuMap ReadPIDSchedStatPerThread(uint32_t pid) {
+    PIDThreadCpuMap m;
+    std::string taskDir = "/proc/" + std::to_string(pid) + "/task";
+    DIR* d = opendir(taskDir.c_str());
+    if (!d) return m;
 
-    // Format (Documentation/scheduler/sched-stats.rst):
+    // Each /proc/<pid>/task/<tid>/schedstat format
+    // (Documentation/scheduler/sched-stats.rst):
     //   <sum_exec_runtime> <run_delay> <pcount>
-    // We only consume field 1 — the nanoseconds the task has spent
-    // on a CPU. The remaining two fields (runqueue wait, schedule
+    // We only consume field 1 — the nanoseconds this thread has spent
+    // on a CPU. The two trailing fields (runqueue wait, schedule
     // count) are gated by the kernel.sched_schedstats sysctl and not
     // used by this profiler.
-    f >> s.cpuTimeNs;
-    return s;
+    while (struct dirent* e = readdir(d)) {
+        const char* n = e->d_name;
+        if (!std::isdigit(static_cast<unsigned char>(n[0]))) continue;
+        uint32_t tid = static_cast<uint32_t>(std::strtoul(n, nullptr, 10));
+        if (tid == 0) continue;
+
+        std::string path = taskDir + "/" + n + "/schedstat";
+        std::ifstream f(path);
+        if (!f) continue;     // thread exited mid-walk
+        uint64_t ns = 0;
+        f >> ns;
+        if (!f) continue;
+        m.emplace(tid, ns);
+    }
+    closedir(d);
+    return m;
 }
 
 MemInfoSnapshot ReadMemInfo() {

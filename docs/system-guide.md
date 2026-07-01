@@ -1033,7 +1033,7 @@ Per-process samples (one row per tracked PID per sample tick):
 
 | Field | Source | Units | Notes |
 | ----- | ------ | ----- | ----- |
-| `cpu_pct` | `/proc/<pid>/schedstat` field 1 (`sum_exec_runtime`, ns) | % of one CPU | Total on-CPU time, no user/kernel/iowait split. Nanosecond precision — no 10 ms `CLK_TCK` quantization. |
+| `cpu_pct` | `/proc/<pid>/task/*/schedstat` field 1 (`sum_exec_runtime`, ns), summed across threads | % of one CPU | Total on-CPU time across the whole thread group, divided by actual wall-clock elapsed between ticks. No user/kernel/iowait split. Nanosecond precision — no 10 ms `CLK_TCK` quantization. |
 | `rss_bytes` | `/proc/<pid>/status` VmRSS | bytes | Resident set size (physical pages) |
 | `vms_bytes` | `/proc/<pid>/status` VmSize | bytes | Virtual memory size |
 | `shared_bytes` | `/proc/<pid>/status` RssShmem | bytes | Resident shared memory |

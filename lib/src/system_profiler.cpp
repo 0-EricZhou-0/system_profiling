@@ -49,7 +49,19 @@ public:
 
     // Previous snapshots for delta computation
     internal::CPUStatSnapshot prevCPU;
-    std::unordered_map<uint32_t, internal::PIDSchedStatSnapshot> prevPID;
+
+    // Per-tracked-PID baseline carried between sample ticks. tickTsNs
+    // pins the actual wall-clock instant of the previous read (so the
+    // %-of-core denominator uses real elapsed time, not a nominal
+    // sample period). threadCpuNs holds per-TID sum_exec_runtime so
+    // we can attribute on-CPU time across the whole thread group
+    // (process CPU%, not just main-thread CPU%) and stay robust to
+    // threads spawning or exiting between ticks.
+    struct ProcessBaseline {
+        uint64_t tickTsNs = 0;
+        internal::PIDThreadCpuMap threadCpuNs;
+    };
+    std::unordered_map<uint32_t, ProcessBaseline> prevPID;
 
     // Per-flush write accounting
     internal::SystemPendingFlushStats flushStatsPending;
@@ -158,38 +170,58 @@ void SystemProfiler::Start() {
             std::unordered_set<uint32_t> snapshotPids;
             snapshotPids.reserve(snapshot.size());
 
-            double dtSec = 1.0 / impl.config.samplingFrequencyHz;
             for (const auto& entry : snapshot) {
                 uint32_t pid = entry.pid;
                 snapshotPids.insert(pid);
                 if (entry.pending_removal) continue;
 
-                auto curPID = internal::ReadPIDSchedStat(pid);
-                auto it     = impl.prevPID.find(pid);
+                auto curThreads = internal::ReadPIDSchedStatPerThread(pid);
+                auto it         = impl.prevPID.find(pid);
                 if (it == impl.prevPID.end()) {
                     // Mid-run add — seed the baseline; skip this tick.
                     // First emitted sample is one tick later, so the
                     // delta isn't garbage.
-                    impl.prevPID[pid] = curPID;
+                    auto& seed = impl.prevPID[pid];
+                    seed.tickTsNs     = tsNs;
+                    seed.threadCpuNs  = std::move(curThreads);
                     continue;
                 }
                 auto& prev  = it->second;
                 auto statm  = internal::ReadPIDStatm(pid);
 
-                // schedstat field 1 is ns of on-CPU time. (delta_ns /
-                // window_ns) × 100 = % of one core (>100% for multi-
-                // threaded tasks; capped at ncpus × 100 by the panel
-                // peak_expr).
-                const double dtNs = dtSec * 1e9;
+                // Aggregate on-CPU delta across the whole thread group.
+                // For every TID visible this tick: delta = cur - prev,
+                // treating an absent prev as 0 so newly spawned
+                // threads get attributed to this window. Threads that
+                // exited between ticks simply drop out of the sum;
+                // their final partial slice (from prev tick to exit)
+                // is discarded — a tolerable approximation that keeps
+                // the per-PID baseline bounded.
+                uint64_t deltaCpuNs = 0;
+                for (const auto& kv : curThreads) {
+                    auto pit = prev.threadCpuNs.find(kv.first);
+                    uint64_t prevNs = (pit != prev.threadCpuNs.end()) ? pit->second : 0;
+                    if (kv.second > prevNs) deltaCpuNs += (kv.second - prevNs);
+                }
+
+                // Denominator: actual wall-clock elapsed between this
+                // tick and the previous one, not the nominal sample
+                // period — sleep_for/loop overhead/proc-read latency
+                // make actual >= nominal, so dividing by the nominal
+                // period would systematically overestimate %.
+                uint64_t dtNs = (tsNs > prev.tickTsNs) ? (tsNs - prev.tickTsNs) : 0;
+
                 internal::ProcessTick t;
                 t.timestamp_ns = tsNs;
                 t.pid          = pid;
-                t.cpu_pct      = (double)(curPID.cpuTimeNs - prev.cpuTimeNs)
-                               / dtNs * 100.0;
+                t.cpu_pct      = (dtNs > 0) ? (double)deltaCpuNs / (double)dtNs * 100.0
+                                            : 0.0;
                 t.rss_bytes    = statm.RSSPages    * pageSize;
                 t.vms_bytes    = statm.VMSPages    * pageSize;
                 t.shared_bytes = statm.sharedPages * pageSize;
-                prev = curPID;
+
+                prev.tickTsNs    = tsNs;
+                prev.threadCpuNs = std::move(curThreads);
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.processTicks.push_back(std::move(t));
