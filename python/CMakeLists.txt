@@ -33,7 +33,7 @@ pybind11_add_module(cupti_profiler_native MODULE binding.cpp)
 
 set_target_properties(cupti_profiler_native PROPERTIES
     OUTPUT_NAME _native
-    CXX_STANDARD 17
+    CXX_STANDARD 20
 )
 
 target_link_libraries(cupti_profiler_native

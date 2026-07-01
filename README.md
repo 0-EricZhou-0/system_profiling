@@ -130,7 +130,7 @@ its public headers live at `lib/include/cupti_profiler/*.h`.
   `GPU_TIME_INTERVAL` trigger needs Ampere+ for stable sampling.
 - **Linux**, glibc-based. The system profiler reads `/proc`; the disk
   profiler reads `/proc/diskstats` and `/sys/block/*/inflight`.
-- **CMake ≥ 3.18**, **Python ≥ 3.8**, a C++17 compiler.
+- **CMake ≥ 3.18**, **Python ≥ 3.8**, a C++20 compiler (GCC ≥ 10 or Clang ≥ 12).
 - **Per-process disk I/O** (`/proc/<pid>/io`) needs same-UID or
   `CAP_SYS_PTRACE` — the profiler warns once and skips it gracefully
   if unavailable.

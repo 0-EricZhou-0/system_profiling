@@ -35,6 +35,8 @@ add_library(cupti_profiler SHARED
     src/session_metadata_writer.cpp
     # Shared infrastructure
     src/metric_catalog.cpp
+    src/metric_catalog_builtins.cpp
+    src/builtin_catalog.cpp
     src/process_tracking_probe.cpp
     # Orchestrator
     src/profiler_suite.cpp
@@ -73,7 +75,7 @@ target_link_libraries(cupti_profiler
 target_compile_definitions(cupti_profiler PRIVATE CUPTI_PROFILER_EXPORTS)
 
 set_target_properties(cupti_profiler PROPERTIES
-    CXX_STANDARD 17
+    CXX_STANDARD 20
     POSITION_INDEPENDENT_CODE ON
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON

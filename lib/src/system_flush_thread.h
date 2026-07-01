@@ -13,6 +13,8 @@
 // no longer carry them.
 #pragma once
 
+#include "metric_descriptor.h"
+
 #include <cupti_profiler/process_tracking_probe.h>
 #include <cupti_profiler/system_profiler.h>
 
@@ -20,6 +22,7 @@
 #include <cstdint>
 #include <fstream>
 #include <mutex>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -29,7 +32,10 @@ namespace cupti_profiler {
 namespace internal {
 
 // One SCOPE_SYSTEM sample (CPU utilization + system memory) at one tick.
-// values[] column order matches kSystemFqns (see .cpp).
+// values[] column order is driven by GetSystemMetrics() iteration order
+// (see .cpp). Adding a field here without adding a matching descriptor
+// to kSystemMetrics is harmless — the value just won't be emitted; the
+// reverse is a compile error at the descriptor's `.read` lambda.
 struct SystemTick {
     uint64_t timestamp_ns = 0;
     // CPU (%)
@@ -46,7 +52,7 @@ struct SystemTick {
 };
 
 // One SCOPE_PROCESS sample (per-PID CPU + per-PID memory) at one tick.
-// values[] column order matches kProcessFqns (see .cpp).
+// values[] column order is driven by GetProcessMetrics() iteration order.
 struct ProcessTick {
     uint64_t timestamp_ns   = 0;
     uint32_t pid            = 0;
@@ -64,6 +70,13 @@ struct SystemSampleBatch {
     std::vector<SystemTick>  systemTicks;
     std::vector<ProcessTick> processTicks;
 };
+
+// Accessors for the descriptor arrays owned by system_flush_thread.cpp.
+// Same arrays drive trace emission (AppendSystemSample / AddScopeRegistry)
+// and catalog registration (metric_catalog_builtins.cpp). Returning a
+// std::span keeps the storage in one TU while letting other TUs iterate.
+std::span<const MetricDescriptor<SystemTick>>  GetSystemMetrics();
+std::span<const MetricDescriptor<ProcessTick>> GetProcessMetrics();
 
 struct SystemPendingFlushStats {
     uint64_t bytesWritten = 0;

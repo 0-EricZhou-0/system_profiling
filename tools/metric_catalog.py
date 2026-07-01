@@ -75,7 +75,8 @@ def load_catalog(path: str | os.PathLike) -> MetricCatalog:
         raise FileNotFoundError(
             f"metric catalog not found: {p}\n"
             f"  Pass --catalog PATH to point at your own MetricCatalog "
-            f"pbtxt, or use the example at configs/metric_catalog.pbtxt."
+            f"pbtxt, or use the auto-generated reference at "
+            f"lib/data/metric_catalog.pbtxt."
         )
     cat = MetricCatalog()
     text_format.Parse(p.read_text(), cat)
