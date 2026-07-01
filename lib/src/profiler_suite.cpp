@@ -5,6 +5,7 @@
 #include "profiler_config.pb.h"
 #include "session_metadata.pb.h"
 #include "session_metadata_writer.h"
+#include "sidecar_process.h"
 
 #include <google/protobuf/text_format.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
@@ -42,6 +43,16 @@ public:
 
     // Loaded MetricCatalog. nullopt before Configure().
     std::unique_ptr<internal::MetricCatalog> catalog;
+
+    // Sidecar handle, populated when either system or disk config
+    // requested SystemProbeMode::Sidecar. Owned by the suite; joins
+    // + reaps in the destructor.
+    std::unique_ptr<internal::SidecarProcess> sidecar;
+    // Serialized suite config bytes cached across Configure(), used
+    // to feed the sidecar on first handshake. Kept as std::string
+    // (which the proto's SerializeToString hands us) rather than a
+    // std::vector<uint8_t> for zero-copy through the SendConfig API.
+    std::string cachedConfigBytes;
 
     uint64_t startWallClockEpochNs = 0;
 
@@ -107,6 +118,10 @@ void ProfilerSuite::LoadConfig(const std::string& pbtxtPath) {
     }
 
     std::cout << "Loaded config from " << pbtxtPath << "\n";
+    // Serialize back to wire bytes for sidecar forwarding — cheaper
+    // than re-serialising later, and keeps the sidecar's view exactly
+    // as parsed (defaults populated where the .pbtxt omitted fields).
+    proto.SerializeToString(&m_impl->cachedConfigBytes);
     m_impl->ApplyParsedConfig(proto);
 }
 
@@ -119,6 +134,7 @@ void ProfilerSuite::LoadConfigFromBytes(const std::string& serializedProto) {
     }
     std::cout << "Loaded config from serialized protobuf ("
               << serializedProto.size() << " bytes)\n";
+    m_impl->cachedConfigBytes = serializedProto;
     m_impl->ApplyParsedConfig(proto);
 }
 
@@ -227,10 +243,10 @@ SystemProfiler& ProfilerSuite::GetSystemProfiler() { return m_impl->systemProfil
 DiskProfiler& ProfilerSuite::GetDiskProfiler() { return m_impl->diskProfiler; }
 EventProfiler& ProfilerSuite::GetEventProfiler() { return m_impl->eventProfiler; }
 
-void ProfilerSuite::Configure() {
+ProfilerError ProfilerSuite::Configure() {
     if (!m_impl->loaded) {
         std::cerr << "ProfilerSuite::Configure() called before LoadConfig()\n";
-        return;
+        return ProfilerError::NotConfigured;
     }
     // Assemble the MetricCatalog before any probe configures.
     //
@@ -251,9 +267,50 @@ void ProfilerSuite::Configure() {
     }
 
     if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Configure(m_impl->gpuConfig);
+    // Sidecar spawn + handshake, done BEFORE the sys/disk probes
+    // configure so a cap failure surfaces here rather than after
+    // the probes have already started allocating thread state.
+    // Runs when either probe requested Sidecar mode; the sidecar
+    // itself services both when both are enabled.
+    const bool wantSidecar =
+        (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Sidecar) ||
+        (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Sidecar);
+    if (wantSidecar) {
+        m_impl->sidecar = std::make_unique<internal::SidecarProcess>();
+        if (auto e = m_impl->sidecar->Spawn(); e != ProfilerError::Ok) {
+            std::cerr << "[ProfilerSuite] sidecar Spawn: " << ToString(e) << "\n";
+            m_impl->sidecar.reset();
+            return e;
+        }
+        if (auto e = m_impl->sidecar->SendConfig(m_impl->cachedConfigBytes);
+            e != ProfilerError::Ok)
+        {
+            std::cerr << "[ProfilerSuite] sidecar SendConfig: " << ToString(e) << "\n";
+            m_impl->sidecar.reset();
+            return e;
+        }
+        // Steady_clock reference now, so sidecar samples share the
+        // workload's t=0. wall_clock is deferred to Start().
+        uint64_t steady_ref =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (auto e = m_impl->sidecar->SendSyncAnchor(steady_ref, /*wall=*/0);
+            e != ProfilerError::Ok)
+        {
+            std::cerr << "[ProfilerSuite] sidecar SendSyncAnchor: " << ToString(e) << "\n";
+            m_impl->sidecar.reset();
+            return e;
+        }
+    }
+    // Under the current commit's scope, Legacy mode still owns the
+    // in-process Configure() → Start() paths for sys/disk. Later
+    // commits move the sample loops into the sidecar for
+    // SystemProbeMode::Sidecar and skip these lines when the
+    // sidecar has taken over.
     if (m_impl->sysEnabled)   m_impl->systemProfiler.Configure(m_impl->sysConfig);
     if (m_impl->diskEnabled)  m_impl->diskProfiler.Configure(m_impl->diskConfig);
     if (m_impl->eventEnabled) m_impl->eventProfiler.Configure(m_impl->eventConfig);
+    return ProfilerError::Ok;
 }
 
 void ProfilerSuite::Impl::WriteSessionManifest() {

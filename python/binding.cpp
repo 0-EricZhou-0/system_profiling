@@ -247,9 +247,18 @@ PYBIND11_MODULE(_native, m) {
             "(binary wire format). Used by language bindings that build "
             "the config in-process; cupti_profiler.configure_suite() is "
             "the friendly wrapper around this.")
-        .def("configure", &ProfilerSuite::Configure,
+        .def("configure",
+            [](ProfilerSuite& self) {
+                auto err = self.Configure();
+                if (err != ProfilerError::Ok) {
+                    throw std::runtime_error(
+                        std::string("ProfilerSuite::Configure failed: ") + ToString(err));
+                }
+            },
             "Configure all enabled sub-profilers. Must be called after "
-            "load_config*.",
+            "load_config*. Raises RuntimeError if the sidecar spawn or "
+            "capability check fails under SIDECAR mode; Legacy mode "
+            "never raises.",
             py::call_guard<py::gil_scoped_release>())
         .def("start",     &ProfilerSuite::Start,
             "Start all enabled sub-profilers.",

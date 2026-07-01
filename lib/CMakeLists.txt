@@ -37,6 +37,8 @@ add_library(cupti_profiler SHARED
     src/metric_catalog.cpp
     src/metric_catalog_builtins.cpp
     src/builtin_catalog.cpp
+    src/profiler_error.cpp
+    src/sidecar_process.cpp
     src/process_tracking_probe.cpp
     # Orchestrator
     src/profiler_suite.cpp
@@ -73,6 +75,17 @@ target_link_libraries(cupti_profiler
 )
 
 target_compile_definitions(cupti_profiler PRIVATE CUPTI_PROFILER_EXPORTS)
+
+# Baked-in default path for the sidecar binary. Env var
+# CUPTI_PROFILER_SIDECAR overrides at runtime; without either, the
+# library reports SidecarNotFound if a caller requests SIDECAR mode.
+if(NOT CUPTI_PROFILER_SIDECAR_PATH)
+    set(CUPTI_PROFILER_SIDECAR_PATH
+        "${CMAKE_BINARY_DIR}/tools/cupti-profiler-sidecar"
+        CACHE PATH "Absolute path to cupti-profiler-sidecar (default = build tree)")
+endif()
+target_compile_definitions(cupti_profiler PRIVATE
+    CUPTI_PROFILER_SIDECAR_PATH="${CUPTI_PROFILER_SIDECAR_PATH}")
 
 set_target_properties(cupti_profiler PROPERTIES
     CXX_STANDARD 20

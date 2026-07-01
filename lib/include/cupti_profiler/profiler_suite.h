@@ -5,6 +5,7 @@
 #include <cupti_profiler/system_profiler.h>
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/event_profiler.h>
+#include <cupti_profiler/profiler_error.h>
 
 #include <memory>
 #include <string>
@@ -47,7 +48,15 @@ public:
     EventProfiler& GetEventProfiler();
 
     /// Configure all enabled profilers.
-    void Configure();
+    ///
+    /// Under SystemProbeMode::Sidecar, this is where the sidecar
+    /// process is spawned and the initial handshake (config +
+    /// sync anchor) runs — capability failures surface here as
+    /// ProfilerError::SidecarMissingCaps rather than as a silent
+    /// no-sample run. Under Legacy, always returns Ok.
+    /// Returns ProfilerError::NotConfigured if LoadConfig has not
+    /// been called yet.
+    ProfilerError Configure();
 
     /// Start all enabled profilers.
     void Start();
