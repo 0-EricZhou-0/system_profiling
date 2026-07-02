@@ -59,10 +59,17 @@ public:
     /// Blocks for the sidecar's ack.
     ProfilerError SendStart();
 
-    /// Tell the sidecar to stop sampling, flush pending trace bytes,
-    /// and exit. Blocks for the sidecar's ack. The destructor's
-    /// SIGTERM path is the fallback if this fails.
-    ProfilerError SendStop();
+    /// Write MSG_STOP to the sidecar WITHOUT waiting for the ack.
+    /// Lets the parent kick off the sidecar's shutdown early so its
+    /// sample threads can wind down in parallel with any slow
+    /// in-process Stop paths (e.g. GPU flush thread joining an
+    /// uninterruptible sleep_for). Follow up with JoinStopAck() once
+    /// the local work is done to reap the STATUS reply.
+    ProfilerError SignalStop();
+
+    /// Block on the sidecar's MSG_STATUS reply to a preceding
+    /// SignalStop(). Returns the reported error code.
+    ProfilerError JoinStopAck();
 
     /// Add a PID + alias to the sidecar's tracked set. Thread-safe;
     /// serialised against other Send* calls by an internal mutex so

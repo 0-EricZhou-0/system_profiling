@@ -276,6 +276,11 @@ int main(int /*argc*/, char** /*argv*/) {
                   << " len="  << hdr.length << "; ignoring\n";
     }
 
+    // SignalStop first so both probes' sample threads see the flag
+    // in parallel while their flush threads finish their current
+    // sleep_for. Then Stop() joins.
+    if (sys) sys->SignalStop();
+    if (dsk) dsk->SignalStop();
     if (sys) sys->Stop();
     if (dsk) dsk->Stop();
     SendStatus(ProfilerError::Ok);

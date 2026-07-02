@@ -100,6 +100,25 @@ static void ResolvePIDZero(std::vector<TrackedProcess>& processes) {
     }
 }
 
+// Resolve pid:0 → workload getpid() in the proto's per-probe process
+// lists, so the serialised bytes we cache for the sidecar carry the
+// real PID rather than the sentinel. The sidecar (a different PID)
+// otherwise ends up tracking pid=0 (nonexistent /proc/0) and reports
+// all-zero per-PID CPU.
+static void ResolvePID0InProto(ProfilerSuiteConfig& proto) {
+    uint32_t myPID = static_cast<uint32_t>(getpid());
+    if (proto.has_system()) {
+        for (auto& p : *proto.mutable_system()->mutable_processes()) {
+            if (p.pid() == 0) p.set_pid(myPID);
+        }
+    }
+    if (proto.has_disk()) {
+        for (auto& p : *proto.mutable_disk()->mutable_processes()) {
+            if (p.pid() == 0) p.set_pid(myPID);
+        }
+    }
+}
+
 void ProfilerSuite::LoadConfig(const std::string& pbtxtPath) {
     std::ifstream f(pbtxtPath);
     if (!f) {
@@ -118,9 +137,13 @@ void ProfilerSuite::LoadConfig(const std::string& pbtxtPath) {
     }
 
     std::cout << "Loaded config from " << pbtxtPath << "\n";
-    // Serialize back to wire bytes for sidecar forwarding — cheaper
-    // than re-serialising later, and keeps the sidecar's view exactly
-    // as parsed (defaults populated where the .pbtxt omitted fields).
+    // Resolve pid:0 sentinel to the workload's actual PID in the
+    // proto BEFORE we cache the wire bytes — the sidecar (a different
+    // PID) can't do this resolution itself, and would end up tracking
+    // pid=0 (/proc/0 doesn't exist → all-zero cpu_pct). The parent-
+    // side ApplyParsedConfig does the same to the C++ config it
+    // builds for the in-process (Legacy) probes.
+    ResolvePID0InProto(proto);
     proto.SerializeToString(&m_impl->cachedConfigBytes);
     m_impl->ApplyParsedConfig(proto);
 }
@@ -134,7 +157,10 @@ void ProfilerSuite::LoadConfigFromBytes(const std::string& serializedProto) {
     }
     std::cout << "Loaded config from serialized protobuf ("
               << serializedProto.size() << " bytes)\n";
-    m_impl->cachedConfigBytes = serializedProto;
+    // Same pid:0 → workload PID resolution as the pbtxt path; then
+    // re-serialise so the sidecar gets the resolved bytes.
+    ResolvePID0InProto(proto);
+    proto.SerializeToString(&m_impl->cachedConfigBytes);
     m_impl->ApplyParsedConfig(proto);
 }
 
@@ -387,32 +413,47 @@ void ProfilerSuite::Start() {
 }
 
 void ProfilerSuite::Stop() {
-    // Signal in-process sample threads to stop immediately, before any
-    // slow teardown (e.g., GPU CUPTI cleanup) blocks. Legacy sys/disk
-    // signal here; Sidecar sys/disk signal via MSG_STOP over the pipe
-    // below.
+    // Fire off the shutdown signal to EVERY sample thread —
+    // in-process AND the sidecar — as early as possible, so they all
+    // wind down in parallel with our slow local teardown below. The
+    // sidecar signal is fire-and-forget here (write MSG_STOP, don't
+    // wait for the ack); we collect the ack at the very end via
+    // JoinStopAck. Rationale: gpuProfiler.Stop() below may block for
+    // up to flush_interval_ms (10 s in the default config) waiting
+    // for its flush thread to wake from an uninterruptible sleep_for.
+    // If we waited on the sidecar's ack synchronously here, the
+    // sidecar's sample threads wouldn't hear MSG_STOP for that
+    // entire window and would collect ~10 s of samples past the
+    // workload's real end.
     if (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy)
         m_impl->systemProfiler.SignalStop();
     if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
         m_impl->diskProfiler.SignalStop();
     if (m_impl->eventEnabled) m_impl->eventProfiler.SignalStop();
-
-    // Tell the sidecar to flush + exit cleanly. The destructor's
-    // SIGTERM path is the fallback if this handshake failed.
     if (m_impl->sidecar) {
-        if (auto e = m_impl->sidecar->SendStop(); e != ProfilerError::Ok) {
-            std::cerr << "[ProfilerSuite] sidecar SendStop: "
+        if (auto e = m_impl->sidecar->SignalStop(); e != ProfilerError::Ok) {
+            std::cerr << "[ProfilerSuite] sidecar SignalStop: "
+                      << ToString(e) << "\n";
+        }
+    }
+
+    // Now join everything. Order doesn't matter much for timing
+    // correctness (samples were bounded above by the SignalStop
+    // fan-out); we keep the GPU/events → sidecar → sys/disk order
+    // for consistency with the pre-sidecar codebase.
+    if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Stop();
+    if (m_impl->eventEnabled) m_impl->eventProfiler.Stop();
+    if (m_impl->sidecar) {
+        if (auto e = m_impl->sidecar->JoinStopAck(); e != ProfilerError::Ok) {
+            std::cerr << "[ProfilerSuite] sidecar JoinStopAck: "
                       << ToString(e) << "\n";
         }
         m_impl->sidecar.reset();
     }
-
-    if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Stop();
     if (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy)
         m_impl->systemProfiler.Stop();
     if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
         m_impl->diskProfiler.Stop();
-    if (m_impl->eventEnabled) m_impl->eventProfiler.Stop();
 
     m_impl->WriteSessionManifest();
 }

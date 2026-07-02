@@ -203,9 +203,13 @@ ProfilerError SidecarProcess::SendStart() {
     return ReadStatus();
 }
 
-ProfilerError SidecarProcess::SendStop() {
+ProfilerError SidecarProcess::SignalStop() {
     std::lock_guard<std::mutex> lk(send_mutex_);
-    if (auto e = WriteMsg(MSG_STOP, nullptr, 0); e != ProfilerError::Ok) return e;
+    return WriteMsg(MSG_STOP, nullptr, 0);
+}
+
+ProfilerError SidecarProcess::JoinStopAck() {
+    std::lock_guard<std::mutex> lk(send_mutex_);
     return ReadStatus();
 }
 
