@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import http.server
+import os
 import socketserver
 import sys
 import threading
@@ -58,7 +59,7 @@ from bokeh.embed import file_html  # noqa: E402
 from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column  # noqa: E402
 from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
-                          CustomJS, HoverTool, PanTool, Range1d,
+                          CustomJS, Div, HoverTool, PanTool, Range1d,
                           ResetTool, SaveTool, Span, WheelZoomTool)
 from bokeh.palettes import Category10  # noqa: E402
 from bokeh.plotting import figure  # noqa: E402
@@ -114,26 +115,174 @@ def _ingest_probes(
     projector: TraceProjector,
     meta: session_metadata_pb2.SessionMetadata,
     metadata_path: Path,
-) -> dict[str, int]:
+) -> tuple[dict[str, int], dict[str, dict]]:
+    """Ingest each probe's .pb file into the projector.
+
+    Returns (sample_freqs, probes_info) where probes_info holds the
+    per-probe path + first-trace scope info + sample count needed to
+    render the "Write rate" footer. The first trace suffices because
+    ScopeMetricNames is emitted identically on every flush.
+    """
     sample_freqs: dict[str, int] = {}
+    probes_info: dict[str, dict] = {}
     for probe in meta.probes:
         out = _resolve_path(metadata_path, probe.output_file)
         if not out.exists():
             _log(f"  skip {out} (not found)")
             continue
         if probe.kind == session_metadata_pb2.PROBE_KIND_GPU:
-            for t in _read_delimited(out, gpu_metrics_pb2.GPUMetricsTrace):
+            traces = _read_delimited(out, gpu_metrics_pb2.GPUMetricsTrace)
+            for t in traces:
                 projector.ingest_gpu(t)
             sample_freqs["gpu"] = probe.sampling_frequency_hz
+            probes_info["gpu"] = {
+                "path": out,
+                "traces_head": traces[0] if traces else None,
+                "n_samples": sum(len(t.samples) for t in traces),
+            }
         elif probe.kind == session_metadata_pb2.PROBE_KIND_SYSTEM:
-            for t in _read_delimited(out, system_metrics_pb2.SystemMetricsTrace):
+            traces = _read_delimited(out, system_metrics_pb2.SystemMetricsTrace)
+            for t in traces:
                 projector.ingest_system(t)
             sample_freqs["system"] = probe.sampling_frequency_hz
+            n_sys  = sum(len(t.system_samples)  for t in traces)
+            n_proc = sum(len(t.process_samples) for t in traces)
+            probes_info["system"] = {
+                "path": out,
+                "traces_head": traces[0] if traces else None,
+                "n_samples": max(n_sys, n_proc),
+            }
         elif probe.kind == session_metadata_pb2.PROBE_KIND_DISK:
-            for t in _read_delimited(out, disk_metrics_pb2.DiskMetricsTrace):
+            traces = _read_delimited(out, disk_metrics_pb2.DiskMetricsTrace)
+            for t in traces:
                 projector.ingest_disk(t)
             sample_freqs["disk"] = probe.sampling_frequency_hz
-    return sample_freqs
+            n_dev  = sum(len(t.device_samples)  for t in traces)
+            n_proc = sum(len(t.process_samples) for t in traces)
+            probes_info["disk"] = {
+                "path": out,
+                "traces_head": traces[0] if traces else None,
+                "n_samples": max(n_dev, n_proc),
+            }
+        elif probe.kind == session_metadata_pb2.PROBE_KIND_EVENTS:
+            probes_info["events"] = {
+                "path": out,
+                "traces_head": None,
+                "n_samples": 0,   # regions + events counted at render time
+            }
+    return sample_freqs, probes_info
+
+
+# ---------------------------------------------------------------------------
+# Write-rate footer (mirrors visualize_all.py's table)
+# ---------------------------------------------------------------------------
+
+def _fmt_rate(bps: float) -> str:
+    if bps >= 1024 ** 3: return f"{bps / 1024**3:7.2f} GiB/s"
+    if bps >= 1024 ** 2: return f"{bps / 1024**2:7.2f} MiB/s"
+    if bps >= 1024:      return f"{bps / 1024:7.2f} KiB/s"
+    return f"{bps:7.0f}   B/s"
+
+
+def _est_bytes_per_sample(n_metrics: int, extra_tag: int = 0) -> int:
+    # rough: 2 varint timestamps (~10 B) + N doubles (9 B) + ~3 B tag
+    return 2 * 10 + n_metrics * 9 + 3 + extra_tag
+
+
+def _probe_duration_s(projector: TraceProjector, proj, probe_key: str) -> float:
+    ts_min = ts_max = None
+    for (fqn, _k), (ts, _v) in proj.items():
+        src = projector.fqn_to_probe.get(fqn)
+        if src != probe_key or ts.size == 0:
+            continue
+        a, b = int(ts[0]), int(ts[-1])
+        if ts_min is None or a < ts_min: ts_min = a
+        if ts_max is None or b > ts_max: ts_max = b
+    if ts_min is None or ts_max is None or ts_max <= ts_min:
+        return 0.0
+    return (ts_max - ts_min) / 1e9
+
+
+def _build_write_rate_rows(
+    projector: TraceProjector,
+    proj,
+    sample_freqs: dict[str, int],
+    probes_info: dict[str, dict],
+    events_regions: int,
+    events_ns: int,
+    xmax_s: float,
+) -> list[tuple[str, float, float, int]]:
+    """Same rows as visualize_all.py's footer: (label, est_bps, meas_bps, n_samples)."""
+    rows: list[tuple[str, float, float, int]] = []
+
+    # GPU
+    info = probes_info.get("gpu")
+    if info and info["traces_head"] is not None:
+        head = info["traces_head"]
+        n_metrics = sum(len(smn.fqns) for smn in head.scope_metric_names)
+        est = sample_freqs.get("gpu", 0) * _est_bytes_per_sample(n_metrics)
+        dur = _probe_duration_s(projector, proj, "gpu")
+        meas = os.path.getsize(info["path"]) / dur if dur > 0 else 0.0
+        rows.append(("GPU", est, meas, info["n_samples"]))
+
+    # System
+    info = probes_info.get("system")
+    if info and info["traces_head"] is not None:
+        head = info["traces_head"]
+        n_sys_fqns = n_proc_fqns = 0
+        for smn in head.scope_metric_names:
+            if smn.scope == mc_pb.SCOPE_SYSTEM:  n_sys_fqns  = len(smn.fqns)
+            if smn.scope == mc_pb.SCOPE_PROCESS: n_proc_fqns = len(smn.fqns)
+        n_pids = len(head.tracked_processes) or 1
+        bytes_per_tick = (_est_bytes_per_sample(n_sys_fqns)
+                          + n_pids * _est_bytes_per_sample(n_proc_fqns, extra_tag=4))
+        est = sample_freqs.get("system", 0) * bytes_per_tick
+        dur = _probe_duration_s(projector, proj, "system")
+        meas = os.path.getsize(info["path"]) / dur if dur > 0 else 0.0
+        rows.append(("System", est, meas, info["n_samples"]))
+
+    # Disk
+    info = probes_info.get("disk")
+    if info and info["traces_head"] is not None:
+        head = info["traces_head"]
+        n_dev_fqns = n_proc_fqns = 0
+        for smn in head.scope_metric_names:
+            if smn.scope == mc_pb.SCOPE_DEVICE:  n_dev_fqns  = len(smn.fqns)
+            if smn.scope == mc_pb.SCOPE_PROCESS: n_proc_fqns = len(smn.fqns)
+        n_devs = len(head.tracked_devices)   or 1
+        n_pids = len(head.tracked_processes) or 0
+        bytes_per_tick = (n_devs * _est_bytes_per_sample(n_dev_fqns, extra_tag=8)
+                          + n_pids * _est_bytes_per_sample(n_proc_fqns, extra_tag=4))
+        est = sample_freqs.get("disk", 0) * bytes_per_tick
+        dur = _probe_duration_s(projector, proj, "disk")
+        meas = os.path.getsize(info["path"]) / dur if dur > 0 else 0.0
+        rows.append(("Disk", est, meas, info["n_samples"]))
+
+    # Events — no estimated rate (user-driven emission)
+    info = probes_info.get("events")
+    if info and info["path"] and info["path"].exists():
+        n_samp = events_regions + events_ns
+        dur = xmax_s
+        meas = os.path.getsize(info["path"]) / dur if dur > 0 else 0.0
+        rows.append(("Events", 0.0, meas, n_samp))
+
+    return rows
+
+
+def _format_write_rate_footer(rows: list[tuple[str, float, float, int]]) -> str:
+    lines = ["Write rate — estimated vs measured (file_size / trace_duration):"]
+    total_est = total_meas = 0.0
+    total_samp = 0
+    for label, est, meas, n_samp in rows:
+        est_str = _fmt_rate(est) if est > 0 else "      —      "
+        lines.append(f"  {label:<7} est {est_str}   |   measured {_fmt_rate(meas)}   "
+                     f"|   samples {n_samp:>8}")
+        total_est += est
+        total_meas += meas
+        total_samp += n_samp
+    lines.append(f"  {'Total':<7} est {_fmt_rate(total_est)}   |   measured "
+                 f"{_fmt_rate(total_meas)}   |   samples {total_samp:>8}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +1107,7 @@ def _render_static(
     meta: session_metadata_pb2.SessionMetadata,
     metadata_path: Path,
     sample_freqs: dict[str, int],
+    probes_info: dict[str, dict],
     smooth_window_s: float,
     display_hz: float,
 ) -> None:
@@ -1101,6 +1251,27 @@ def _render_static(
         }
         layout_children.append(strip_col)
     layout_children.extend(figs)
+
+    # Write-rate footer (mirrors visualize_all.py's static-PNG table).
+    # Kept at the very bottom of the scrolling column so it doesn't
+    # interfere with the sticky strip band or the metric panels above.
+    footer_rows = _build_write_rate_rows(
+        projector=projector,
+        proj=proj,
+        sample_freqs=sample_freqs,
+        probes_info=probes_info,
+        events_regions=len(regions),
+        events_ns=len(events),
+        xmax_s=(t_end_ns - t0_ns) / 1e9,
+    )
+    if footer_rows:
+        footer_html = ("<pre style=\"margin:12px 0 0 12px;font-family:monospace;"
+                       "font-size:11px;line-height:1.35;color:"
+                       f"{theme.get('axis_label', '#888888')};\">"
+                       + _format_write_rate_footer(footer_rows)
+                       + "</pre>")
+        layout_children.append(Div(text=footer_html, sizing_mode="stretch_width"))
+
     all_figs = strips + figs  # for the loading-overlay panel count
     layout_root = column(layout_children, sizing_mode="stretch_width")
     # file_html silently ignores theme string names — resolve to a
@@ -1230,7 +1401,7 @@ def main() -> int:
 
     projector = TraceProjector(catalog)
     _log("ingesting probes")
-    sample_freqs = _ingest_probes(projector, meta, metadata_path)
+    sample_freqs, probes_info = _ingest_probes(projector, meta, metadata_path)
 
     catalog_index = metric_catalog.build_index(catalog)
     out_path = Path(args.output).resolve()
@@ -1239,6 +1410,7 @@ def main() -> int:
     _render_static(projector, layout, catalog_index, out_path, title,
                    meta, metadata_path,
                    sample_freqs=sample_freqs,
+                   probes_info=probes_info,
                    smooth_window_s=args.smooth_window_s,
                    display_hz=args.display_hz)
 
