@@ -147,6 +147,20 @@ ProfilerError SidecarProcess::Spawn() {
     pipe_to_child_   = down[1];
     pipe_from_child_ = up[0];
     child_pid_       = child;
+
+    // Grant the sidecar ptrace-mode access to us so it can read
+    // /proc/<workload>/io. Under Yama ptrace_scope >= 1 (Ubuntu's
+    // default), descendants can't trace their ancestors without
+    // this hint — the sidecar's DiskProfiler reads of the workload's
+    // I/O counters would return EPERM and silently zero out.
+    // PR_SET_PTRACER is per-target-PID; failure is not fatal, just
+    // means per-PID I/O for the workload won't appear in disk_metrics.pb.
+    if (::prctl(PR_SET_PTRACER, static_cast<unsigned long>(child), 0, 0, 0) != 0) {
+        std::cerr << "[ProfilerSuite] PR_SET_PTRACER(" << child
+                  << ") failed: " << ::strerror(errno)
+                  << " — per-PID I/O may be zero in the sidecar's trace.\n";
+    }
+
     return ProfilerError::Ok;
 }
 
