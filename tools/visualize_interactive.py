@@ -59,7 +59,7 @@ from bokeh.embed import file_html  # noqa: E402
 from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column  # noqa: E402
 from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
-                          CustomJS, Div, HoverTool, PanTool, Range1d,
+                          CustomJS, HoverTool, PanTool, Range1d,
                           ResetTool, SaveTool, Span, WheelZoomTool)
 from bokeh.palettes import Category10  # noqa: E402
 from bokeh.plotting import figure  # noqa: E402
@@ -1072,6 +1072,26 @@ def _loading_overlay_body(n_figures: int) -> str:
     return _LOADING_OVERLAY_BODY_TEMPLATE.replace("__N_FIGS__", str(n_figures))
 
 
+def _inject_write_rate_footer(html: str, text: str, theme: dict) -> str:
+    """Append the write-rate table as a raw <pre> block right before
+    the last </body>. Sidesteps Bokeh's widget layout (which serialises
+    Div/PreText into docs_json but doesn't materialise a DOM node under
+    this Bokeh version) and its Div HTML-escaping.
+    """
+    import html as _html
+    color = theme.get("axis_label", "#888888")
+    footer = (
+        f"<pre style=\"margin:12px 0 12px 12px;font-family:monospace;"
+        f"font-size:11px;line-height:1.35;color:{color};\">"
+        f"{_html.escape(text)}"
+        f"</pre>"
+    )
+    i = html.rfind("</body>")
+    if i < 0:
+        return html
+    return html[:i] + footer + html[i:]
+
+
 def _inject_loading_overlay(html: str, n_figures: int) -> str:
     """Inject a determinate progress overlay into the bokeh-generated
     HTML. Hides once every Bokeh document reports is_ready *and* the
@@ -1079,18 +1099,29 @@ def _inject_loading_overlay(html: str, n_figures: int) -> str:
     `n_figures` — which lets users see real progress (X / N panels +
     elapsed seconds) instead of an indeterminate spinner.
 
-    Anchors on the closing tags `</head>` / `</body>` because the
-    opening `<body>` collides with literal string occurrences inside
-    bokeh's embedded minified JS source (e.g. `must be under <body>`
-    in error messages). The overlay is `position: fixed`, so DOM
-    insertion point doesn't affect its visual placement."""
+    Anchors on the LAST `</head>` / `</body>` in the source, not the
+    first. Bokeh's embedded minified JS contains string literals
+    like `"<body></body></html>"` (DOMParser fallback templates in
+    the sanitizer/DOMPurify code path), and replacing the first
+    occurrence splices the overlay's `</script></body></html>` into
+    the middle of a JS string — corrupting every subsequent JS
+    statement and producing a blank page with 0 canvases. The last
+    occurrence is guaranteed to be the real closing tag because
+    Bokeh emits the doc's `<script>` blocks BEFORE the closing
+    `</body>`. The overlay is `position: fixed`, so DOM insertion
+    point doesn't affect its visual placement.
+    """
+    def _replace_last(hay: str, needle: str, replacement: str) -> str:
+        i = hay.rfind(needle)
+        if i < 0:
+            return hay
+        return hay[:i] + replacement + hay[i + len(needle):]
+
     theme = _THEMES[_THEME]
-    if "</head>" in html:
-        html = html.replace("</head>",
-                            _loading_overlay_head(theme) + "</head>", 1)
-    if "</body>" in html:
-        html = html.replace("</body>",
-                            _loading_overlay_body(n_figures) + "</body>", 1)
+    html = _replace_last(html, "</head>",
+                         _loading_overlay_head(theme) + "</head>")
+    html = _replace_last(html, "</body>",
+                         _loading_overlay_body(n_figures) + "</body>")
     return html
 
 
@@ -1264,13 +1295,12 @@ def _render_static(
         events_ns=len(events),
         xmax_s=(t_end_ns - t0_ns) / 1e9,
     )
-    if footer_rows:
-        footer_html = ("<pre style=\"margin:12px 0 0 12px;font-family:monospace;"
-                       "font-size:11px;line-height:1.35;color:"
-                       f"{theme.get('axis_label', '#888888')};\">"
-                       + _format_write_rate_footer(footer_rows)
-                       + "</pre>")
-        layout_children.append(Div(text=footer_html, sizing_mode="stretch_width"))
+    # Footer text is stashed and injected as raw HTML in _inject_footer
+    # below (after file_html produces the Bokeh document). We tried both
+    # Div (which HTML-escapes) and PreText (which serializes to
+    # docs_json but doesn't materialise into the DOM under this
+    # Bokeh version's widget layout), so we sidestep the widget layer.
+    footer_text = _format_write_rate_footer(footer_rows) if footer_rows else None
 
     all_figs = strips + figs  # for the loading-overlay panel count
     layout_root = column(layout_children, sizing_mode="stretch_width")
@@ -1280,6 +1310,8 @@ def _render_static(
                    if theme["bokeh_theme"] else None)
     html = file_html(layout_root, INLINE, title=title, theme=bokeh_theme)
     html = _inject_loading_overlay(html, len(all_figs))
+    if footer_text:
+        html = _inject_write_rate_footer(html, footer_text, theme)
     out_path.write_text(html)
     _log(f"wrote {out_path}  ({out_path.stat().st_size // 1024} KiB; "
          f"{len(all_figs)} panels)")
