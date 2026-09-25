@@ -40,8 +40,9 @@ add_library(cupti_profiler SHARED
     src/profiler_error.cpp
     src/sidecar_process.cpp
     src/process_tracking_probe.cpp
-    # Descendant tracking
+    # Descendant tracking + opt-in subreaper helper
     src/process_discovery.cpp
+    src/child_subreaper.cpp
     # Orchestrator
     src/profiler_suite.cpp
     # Generated protobuf sources

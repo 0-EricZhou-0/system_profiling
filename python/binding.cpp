@@ -18,6 +18,7 @@
 #include <cupti_profiler/system_profiler.h>
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/tracked_process.h>
+#include <cupti_profiler/child_subreaper.h>
 
 #include <cuda_runtime.h>
 
@@ -302,6 +303,21 @@ PYBIND11_MODULE(_native, m) {
             "Stop tracking a PID. The PID appears one more time in the "
             "next flush with TrackedProcessV2.removed=true (visualizer "
             "renders a removal marker), then is dropped.");
+
+    // -------------------------------------------------------------------
+    // Subreaper helper (opt-in). The user-facing, fully documented entry
+    // point is cupti_profiler.adopt_orphans() in __init__.py.
+    // -------------------------------------------------------------------
+    m.def("enable_child_subreaper", []() {
+            if (!EnableChildSubreaper()) {
+                PyErr_SetFromErrno(PyExc_OSError);   // reads errno
+                throw py::error_already_set();
+            }
+        },
+        "prctl(PR_SET_CHILD_SUBREAPER, 1) on this process and let descendant "
+        "tracking reap the orphans it saw adopted. See cupti_profiler.adopt_orphans().");
+    m.def("child_subreaper_enabled", &ChildSubreaperEnabled,
+        "True once enable_child_subreaper() has succeeded in this process.");
 
     // -------------------------------------------------------------------
     // CUDA stream helpers — let Python tests get a real cudaStream_t

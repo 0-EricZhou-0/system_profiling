@@ -6,6 +6,7 @@
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/event_profiler.h>
 #include <cupti_profiler/profiler_error.h>
+#include <cupti_profiler/child_subreaper.h>
 
 #include <memory>
 #include <string>

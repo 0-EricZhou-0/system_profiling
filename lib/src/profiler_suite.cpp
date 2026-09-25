@@ -361,12 +361,17 @@ ProfilerError ProfilerSuite::Configure() {
     if (m_impl->eventEnabled) m_impl->eventProfiler.Configure(m_impl->eventConfig);
 
     // Descendant tracking for the in-process (LEGACY) probes, fed the
-    // PIDs each probe lists.
+    // PIDs each probe lists. This process is the host, so it reaps the
+    // adopted orphans itself (if adopt_orphans() was called).
     if (m_impl->SysLegacy() || m_impl->DiskLegacy()) {
+        internal::AdoptionReaping reaping;
+        reaping.mode    = internal::AdoptionReaping::Mode::InProcess;
+        reaping.hostPid = static_cast<uint32_t>(::getpid());
         m_impl->discovery = std::make_unique<internal::ProcessDiscovery>(
             m_impl->discoverySettings,
             m_impl->SysLegacy()  ? &m_impl->systemProfiler : nullptr,
-            m_impl->DiskLegacy() ? &m_impl->diskProfiler   : nullptr);
+            m_impl->DiskLegacy() ? &m_impl->diskProfiler   : nullptr,
+            reaping);
         using PD = internal::ProcessDiscovery;
         if (m_impl->SysLegacy())
             for (const auto& p : m_impl->sysConfig.Processes)

@@ -59,6 +59,19 @@ struct DiscoverySettings {
     uint64_t intervalMs = 100;
 };
 
+// What happens when a discovered process that the host (the launcher)
+// adopted as a subreaper exits. See child_subreaper.h.
+struct AdoptionReaping {
+    enum class Mode {
+        None,       // nobody reaps (no host, or no channel to it)
+        InProcess,  // this process is the host: reap it here (LEGACY)
+        Notify,     // write an AdoptedExitNotice to noticeFd (SIDECAR)
+    };
+    Mode     mode     = Mode::None;
+    uint32_t hostPid  = 0;
+    int      noticeFd = -1;
+};
+
 // Fixed-size log-linear histogram of scan durations: 16 buckets per
 // power of two, so a percentile is within 6.25% of the true value.
 class ScanHistogram {
@@ -83,7 +96,8 @@ public:
     // Either probe may be null (disabled, or served by another observer).
     ProcessDiscovery(DiscoverySettings settings,
                      ProcessTrackingProbe* system,
-                     ProcessTrackingProbe* disk);
+                     ProcessTrackingProbe* disk,
+                     AdoptionReaping reaping);
     ~ProcessDiscovery();
 
     ProcessDiscovery(const ProcessDiscovery&) = delete;
@@ -133,6 +147,7 @@ private:
     void ApplyOp(const Op& op);
     void HandleExits();
     void HandleExit(uint32_t pid, Entry& e);
+    void MaybeReapAdopted(uint32_t pid, const Entry& e);
     void Scan();
     bool TryRegister(uint32_t child, uint32_t listedUnder);
     void RefreshComm(uint32_t pid, Entry& e);
@@ -143,6 +158,7 @@ private:
     const DiscoverySettings settings_;
     ProcessTrackingProbe* const system_;
     ProcessTrackingProbe* const disk_;
+    const AdoptionReaping reaping_;
     const std::string procRoot_;
     const uint32_t selfPid_;
 

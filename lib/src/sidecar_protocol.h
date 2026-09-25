@@ -18,6 +18,12 @@ namespace internal {
 // up from argv-independent constants.
 inline constexpr int kSidecarInFd  = 3;   // parent → sidecar
 inline constexpr int kSidecarOutFd = 4;   // sidecar → parent
+// Sidecar → parent, asynchronous: one AdoptedExitNotice
+// (child_subreaper_internal.h) per adopted orphan that exited, for the
+// parent to reap. Kept off kSidecarOutFd, which carries only the
+// synchronous MSG_STATUS replies. The sidecar writes it non-blocking
+// and treats it as optional (absent when fd 5 is not open).
+inline constexpr int kSidecarNoticeFd = 5;
 
 // Message types on either channel. Numeric values are frozen —
 // parent and sidecar are linked separately, so we treat this as a

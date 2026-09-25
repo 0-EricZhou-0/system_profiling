@@ -16,6 +16,13 @@
 //   SendStart() / SendStop() — trivial control messages, no payload.
 //   ~SidecarProcess()  — close pipes, waitpid.
 //
+// Spawn() also opens the notice pipe (sidecar fd kSidecarNoticeFd) and a
+// thread here that blocks reading it: the sidecar's descendant tracking
+// reports adopted orphans that exited, and this process — their parent,
+// if it enabled the subreaper helper — reaps each one individually
+// (child_subreaper_internal.h). The thread is idle otherwise and ends
+// when the sidecar exits.
+//
 // This TU stays synchronous — the sidecar's sample loop is not
 // running until MSG_START, so handshake messages block waiting for
 // the reply without any coordination beyond the pipes.
@@ -28,6 +35,7 @@
 #include <optional>
 #include <string>
 #include <sys/types.h>
+#include <thread>
 
 namespace cupti_profiler {
 namespace internal {
@@ -95,6 +103,8 @@ private:
     int   pipe_to_child_   = -1;    // parent writes here
     int   pipe_from_child_ = -1;    // parent reads here
     pid_t child_pid_       = -1;
+    int   notice_from_child_ = -1;  // adopted-orphan exit notices
+    std::thread notice_reader_;
     // Serialises Send* calls — the workload can call AddTrackedProcess
     // from unrelated threads while another Send* is in flight.
     mutable std::mutex send_mutex_;

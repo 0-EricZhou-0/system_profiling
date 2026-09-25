@@ -1,6 +1,10 @@
 #include "sidecar_process.h"
 #include "sidecar_protocol.h"
 
+#include <cupti_profiler/child_subreaper.h>
+
+#include "child_subreaper_internal.h"
+
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -80,6 +84,10 @@ SidecarProcess::~SidecarProcess() {
         int status = 0;
         ::waitpid(child_pid_, &status, 0);
     }
+    // The sidecar held the only write end of the notice pipe, so the
+    // reader has seen EOF by now.
+    if (notice_reader_.joinable()) notice_reader_.join();
+    if (notice_from_child_ >= 0) ::close(notice_from_child_);
 }
 
 ProfilerError SidecarProcess::Spawn() {
@@ -93,8 +101,17 @@ ProfilerError SidecarProcess::Spawn() {
 
     int down[2];  // parent → child
     int up[2];    // child → parent
+    int note[2];  // child → parent, adopted-orphan exit notices
     if (::pipe(down) != 0 || ::pipe(up) != 0) {
         std::cerr << "[ProfilerSuite] pipe() failed: " << ::strerror(errno) << "\n";
+        return ProfilerError::SidecarSpawnFailed;
+    }
+    // O_CLOEXEC so that no other child this process forks inherits the
+    // write end and holds the pipe open past the sidecar's exit.
+    if (::pipe2(note, O_CLOEXEC) != 0) {
+        std::cerr << "[ProfilerSuite] pipe2() failed: " << ::strerror(errno) << "\n";
+        ::close(down[0]); ::close(down[1]);
+        ::close(up[0]);   ::close(up[1]);
         return ProfilerError::SidecarSpawnFailed;
     }
 
@@ -107,6 +124,7 @@ ProfilerError SidecarProcess::Spawn() {
         std::cerr << "[ProfilerSuite] fork() failed: " << ::strerror(errno) << "\n";
         ::close(down[0]); ::close(down[1]);
         ::close(up[0]);   ::close(up[1]);
+        ::close(note[0]); ::close(note[1]);
         return ProfilerError::SidecarSpawnFailed;
     }
 
@@ -120,15 +138,19 @@ ProfilerError SidecarProcess::Spawn() {
             _exit(1);
         }
 
-        // Remap down[0] → kSidecarInFd, up[1] → kSidecarOutFd. dup2
-        // no-ops if the source is already at the target; we still
-        // close the source afterwards unless it was the target.
-        if (::dup2(down[0], kSidecarInFd)  < 0) _exit(2);
-        if (::dup2(up[1],   kSidecarOutFd) < 0) _exit(2);
-        if (down[0] != kSidecarInFd)  ::close(down[0]);
-        if (up[1]   != kSidecarOutFd) ::close(up[1]);
-        ::close(down[1]);
-        ::close(up[0]);
+        // Remap down[0] → kSidecarInFd, up[1] → kSidecarOutFd,
+        // note[1] → kSidecarNoticeFd. Any pipe fd may already sit on
+        // one of the targets (3/4/5), so first move the three we keep
+        // above them, close every original, then dup2 into place.
+        int in  = ::fcntl(down[0], F_DUPFD, 10);
+        int out = ::fcntl(up[1],   F_DUPFD, 10);
+        int nt  = ::fcntl(note[1], F_DUPFD, 10);
+        if (in < 0 || out < 0 || nt < 0) _exit(2);
+        for (int fd : {down[0], down[1], up[0], up[1], note[0], note[1]}) ::close(fd);
+        if (::dup2(in,  kSidecarInFd)     < 0) _exit(2);
+        if (::dup2(out, kSidecarOutFd)    < 0) _exit(2);
+        if (::dup2(nt,  kSidecarNoticeFd) < 0) _exit(2);
+        ::close(in); ::close(out); ::close(nt);
 
         char* const argv[] = {
             const_cast<char*>(sidecar.c_str()),
@@ -144,9 +166,20 @@ ProfilerError SidecarProcess::Spawn() {
     // Parent --------------------------------------------------------------
     ::close(down[0]);
     ::close(up[1]);
-    pipe_to_child_   = down[1];
-    pipe_from_child_ = up[0];
-    child_pid_       = child;
+    ::close(note[1]);
+    pipe_to_child_     = down[1];
+    pipe_from_child_   = up[0];
+    notice_from_child_ = note[0];
+    child_pid_         = child;
+
+    // Reap adopted orphans the sidecar reports — only if this process
+    // opted in with EnableChildSubreaper(); otherwise drain and ignore.
+    notice_reader_ = std::thread([fd = notice_from_child_] {
+        AdoptedExitNotice n;
+        while (ReadAll(fd, &n, sizeof(n))) {
+            if (ChildSubreaperEnabled()) ReapAdoptedChild(-1, n.pid, n.startTime);
+        }
+    });
 
     // Grant the sidecar ptrace-mode access to us so it can read
     // /proc/<workload>/io. Under Yama ptrace_scope >= 1 (Ubuntu's

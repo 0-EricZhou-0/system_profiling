@@ -1,5 +1,8 @@
 #include "process_discovery.h"
 
+#include <cupti_profiler/child_subreaper.h>
+
+#include "child_subreaper_internal.h"
 #include "proc_readers.h"
 
 #include <cctype>
@@ -84,13 +87,15 @@ uint64_t ScanHistogram::Percentile(double q) const {
 
 ProcessDiscovery::ProcessDiscovery(DiscoverySettings settings,
                                    ProcessTrackingProbe* system,
-                                   ProcessTrackingProbe* disk)
+                                   ProcessTrackingProbe* disk,
+                                   AdoptionReaping reaping)
     : settings_([&] {
           if (settings.intervalMs == 0) settings.intervalMs = 100;
           return settings;
       }()),
       system_(system),
       disk_(disk),
+      reaping_(reaping),
       procRoot_(ProcRootFromEnv()),
       selfPid_(static_cast<uint32_t>(::getpid())) {}
 
@@ -231,11 +236,32 @@ void ProcessDiscovery::HandleExit(uint32_t pid, Entry& e) {
         // Roots belong to the caller, who listed them; only processes
         // discovery registered are removed by it.
         ++exited_;
+        MaybeReapAdopted(pid, e);
         ForEachSink(e.sinks, [&](ProcessTrackingProbe& p) { p.RemoveTrackedProcess(pid); });
         std::cerr << "[discovery] - " << pid << " exited\n";
     }
     if (e.pidfd >= 0) ::close(e.pidfd);
     e.pidfd = -1;
+}
+
+void ProcessDiscovery::MaybeReapAdopted(uint32_t pid, const Entry& e) {
+    if (reaping_.mode == AdoptionReaping::Mode::None || reaping_.hostPid == 0) return;
+    // Discovered as the host's own child: its exit status belongs to
+    // whoever started it (e.g. Popen.wait()). Never touch it.
+    if (e.firstParent == reaping_.hostPid) return;
+    auto st = ReadProcStat(procRoot_, pid);
+    if (!st || st->ppid != reaping_.hostPid) return;   // not adopted by the host
+    if (reaping_.mode == AdoptionReaping::Mode::InProcess) {
+        if (ChildSubreaperEnabled()) ReapAdoptedChild(e.pidfd, pid, e.startTime);
+        return;
+    }
+    AdoptedExitNotice n;
+    n.pid = pid;
+    n.startTime = e.startTime;
+    // Non-blocking: a launcher that is not reading must never stall
+    // the scan. A dropped notice leaves one zombie, nothing worse.
+    ssize_t w;
+    do { w = ::write(reaping_.noticeFd, &n, sizeof(n)); } while (w < 0 && errno == EINTR);
 }
 
 std::vector<uint32_t> ProcessDiscovery::ReadChildren(uint32_t pid) const {

@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -230,6 +231,9 @@ int main(int /*argc*/, char** /*argv*/) {
     }
 
     // Descendant tracking for both probes, fed the listed PIDs of each.
+    // Adopted orphans that exit are reported to the parent (the
+    // launcher, which may be a subreaper) over kSidecarNoticeFd; it
+    // reaps them — we cannot wait on its children.
     std::unique_ptr<ProcessDiscovery> discovery;
     if (sys || dsk) {
         DiscoverySettings ds;
@@ -237,7 +241,13 @@ int main(int /*argc*/, char** /*argv*/) {
         ds.enabled    = pd.enabled();
         ds.recursive  = !pd.direct_children_only();
         ds.intervalMs = pd.scan_interval_ms() > 0 ? pd.scan_interval_ms() : 100;
-        discovery = std::make_unique<ProcessDiscovery>(ds, sys.get(), dsk.get());
+        AdoptionReaping reaping;
+        if (::fcntl(kSidecarNoticeFd, F_SETFL, O_NONBLOCK) == 0) {
+            reaping.mode     = AdoptionReaping::Mode::Notify;
+            reaping.hostPid  = static_cast<uint32_t>(::getppid());
+            reaping.noticeFd = kSidecarNoticeFd;
+        }
+        discovery = std::make_unique<ProcessDiscovery>(ds, sys.get(), dsk.get(), reaping);
         if (sys) for (const auto& p : cfg.system().processes())
             discovery->AddRoot(p.pid(), p.alias(), std::nullopt, ProcessDiscovery::kSystemSink);
         if (dsk) for (const auto& p : cfg.disk().processes())
