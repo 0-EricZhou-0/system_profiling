@@ -304,7 +304,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
         }
         // Now that the removed=true markers have been written, drop
         // those entries so subsequent flushes don't keep emitting them.
-        probe.CommitPendingRemovals();
+        probe.CommitPendingRemovals(processSnapshot);
 
         uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();

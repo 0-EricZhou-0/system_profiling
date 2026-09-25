@@ -227,7 +227,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
             bytes = WriteDelimitedDiskTraceSized(trace, outFile);
             outFile.flush();
         }
-        probe.CommitPendingRemovals();
+        probe.CommitPendingRemovals(processSnapshot);
 
         uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();

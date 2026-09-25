@@ -84,11 +84,12 @@ public:
     /// is one O(N) copy.
     std::vector<ProcessEntry> SnapshotProcesses() const;
 
-    /// Drop every entry currently marked `pending_removal`. Called
-    /// by the flush thread after emitting a successful flush whose
-    /// trace.tracked_processes carried those entries with
-    /// `removed=true`.
-    void CommitPendingRemovals();
+    /// Drop the entries that `emitted` — the snapshot a flush just
+    /// wrote — carried with `pending_removal=true`. Called by the flush
+    /// thread after a successful flush. An entry marked for removal
+    /// after that snapshot was taken is kept, so its removed=true marker
+    /// goes out in the next flush instead of being lost.
+    void CommitPendingRemovals(const std::vector<ProcessEntry>& emitted);
 
 private:
     mutable std::shared_mutex   mutex_;

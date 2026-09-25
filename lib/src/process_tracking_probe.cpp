@@ -1,6 +1,7 @@
 #include <cupti_profiler/process_tracking_probe.h>
 
 #include <algorithm>
+#include <unordered_set>
 
 namespace cupti_profiler {
 
@@ -40,11 +41,16 @@ ProcessTrackingProbe::SnapshotProcesses() const {
     return processes_;
 }
 
-void ProcessTrackingProbe::CommitPendingRemovals() {
+void ProcessTrackingProbe::CommitPendingRemovals(const std::vector<ProcessEntry>& emitted) {
+    std::unordered_set<uint32_t> marked;
+    for (const auto& e : emitted) if (e.pending_removal) marked.insert(e.pid);
+    if (marked.empty()) return;
     std::unique_lock<std::shared_mutex> lk(mutex_);
     processes_.erase(
         std::remove_if(processes_.begin(), processes_.end(),
-                       [](const ProcessEntry& e) { return e.pending_removal; }),
+                       [&](const ProcessEntry& e) {
+                           return e.pending_removal && marked.count(e.pid);
+                       }),
         processes_.end());
 }
 

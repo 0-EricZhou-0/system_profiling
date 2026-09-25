@@ -266,7 +266,7 @@ void DiskProfiler::Stop() {
 
             internal::WriteDelimitedDiskTraceSized(trace, m_impl->outFile);
             m_impl->outFile.flush();
-            CommitPendingRemovals();
+            CommitPendingRemovals(processSnapshot);
         }
         m_impl->outFile.close();
         std::cout << "[Disk] Wrote trace to " << m_impl->config.outputFile << "\n";
