@@ -786,6 +786,7 @@ devices, GPU metrics) are described with their config structs under
 | `track_descendants` (per root) | Python `suite.add_tracked_process(pid, alias, track_descendants=None)`; C++ `ProfilerSuite::AddTrackedProcess(pid, alias, bool trackDescendants)` | `None` / the 2-argument overload = inherit `process_discovery.enabled` | Overrides `enabled` for that root only |
 | `adopt_orphans()` | Python `cupti_profiler.adopt_orphans()`; C++ `EnableChildSubreaper()` (`<cupti_profiler/child_subreaper.h>`) | off; the library never sets it | Makes the calling process (the launcher) a child subreaper, so orphaned descendants are re-parented to it, and reaps those discovery saw adopted. See [what it changes](#what-changes-when-adopt_orphans-is-enabled) |
 | `CUPTI_PROFILER_PROC_ROOT` | environment variable | unset = `/proc` | **Test-only, not supported.** Directory read instead of `/proc` for the process-table reads (`children`, `stat`, `comm`). See [the hook](#testing-hook-cupti_profiler_proc_root) |
+| kill-after-read hook | C++ `testing::KillAfterNextRead(pid)` (`<cupti_profiler/testing.h>`); Python `_native._testing_kill_after_next_read(pid)` | disarmed | **Test-only, not supported.** Kills `pid` right after an in-process System probe reads it and marks that reading foreign, to show the read-then-verify order discards it. Disarmed: one atomic load per reading |
 | flush gate | C++ `<cupti_profiler/testing.h>`; Python `_native._testing_arm_flush_gate()`, `_testing_wait_flush_held()`, `_testing_release_flush_gate()` | disarmed | **Test-only, not supported.** Holds an in-process flush between writing and committing removals. See [the hook](#testing-hook-flush-gate) |
 
 Fixed behaviour, not configurable: exit detection (a pidfd per tracked
@@ -939,11 +940,12 @@ that could bite, and what guards it:
 | Where | Guard |
 |---|---|
 | A listed PID, between the call and registration | the probe opens the pidfd first, reads `/proc/<pid>/stat`, then checks the pidfd is still alive: the recorded start time and parent belong to the process the pidfd pins |
-| Samples: values are read from `/proc` **by number** every tick | **read-then-verify**: each tick reads every process's values first and polls the pidfds after; a reading of a process found gone is dropped. A kept reading was taken while the pinned process still existed (a zombie's number cannot be reused), so it is that process's |
+| Samples: values are read from `/proc` **by number** every tick | **read-then-verify**, for roots and discovered processes alike, with discovery on or off: each tick reads every process's values first and polls the pidfds after. The kernel frees a number only when its process is reaped, which is after it has exited; so a pidfd that still reports the process alive after the reads proves the number was not reused during them, and the data is that process's. A reading followed by a dead pidfd is dropped, and the entry is marked removed with its end time. No extra syscalls: it is the same one `poll()` per tick, placed after the reads |
 | After a tracked process exits | its entry is removed and never sampled again. Per-PID baselines are keyed by the entry, not the number, so a new process never inherits an old one's |
 | Registering a number whose old entry is still awaiting its removal flush | the new process gets its own entry once the old one is flushed and dropped, so a flush never carries one number twice |
 | Discovery: a PID in a `children` file exits and is reused before `pidfd_open` | the parent check (the new owner's parent must be tracked), done after `pidfd_open` and checked against it; the probes duplicate that very pidfd |
-| **Gap A: a discovered process exits and its number is reused before the next scan** (≤ one interval) | documented, not specifically guarded (user decision, 2026-09-25). Before the probes held their own pidfds, this could attribute up to one scan interval of the new process's samples to the old entry. **The probe-level pidfds remove that**: the probe marks the old entry exited at its next tick and never samples it again, whatever discovery does. What remains keyed by number is the **CPU tail** bookkeeping (`CpuTail`): it notices that an exited child has been reaped by its `/proc/<pid>` entry disappearing, and reads a reparented child's new parent by number. If the number is reused within one sampling tick of the reap, that child's tail can be missing or attributed to the wrong parent. `pid_max` is 4,194,304 on the compute nodes and allocation is sequential, so reuse needs the whole PID space to wrap within that window; never observed |
+| **Gap A: a tracked process exits and its number is reused before it is next checked** | **closed** (user decision, 2026-09-25), by the two rows above: a probe never samples an entry once its pidfd reports it gone, and a reading is kept only if the pidfd reports the process alive after it. This used to allow up to one scan interval of a new process's samples under a discovered process's entry, when only discovery watched for exits. Tested by forcing a reuse inside a PID namespace (`test_pid_reuse.py`) and, for a death between a read and the check, with a test-only hook (`test_read_then_verify.py`, `testing::KillAfterNextRead`). |
+| CPU tail bookkeeping (`CpuTail`, discovered processes) | still keyed by number, and outside gap A: it tells that an exited child has been reaped by its `/proc/<pid>` entry disappearing, and looks up a reparented child's new parent by number. A number reused within one sampling tick of that reap could make that child's tail missing or attributed to the wrong parent; it needs the PID space (`pid_max` 4,194,304 on the compute nodes, allocated sequentially) to wrap within ~10 ms. Documented, not guarded |
 
 **Cost.** Per probe and sample tick: one `poll()` over all pidfds. Every
 100 ms: one `/proc/<pid>/comm` read per tracked process. One pidfd per
@@ -1060,9 +1062,7 @@ sidecar's; under LEGACY it is charged to the host process.
   exits is removed like any tracked process (see
   [exit detection](#process-table-and-exit-detection)); its descendants
   stay tracked.
-- **PID reuse within one scan interval** ("gap A"): no longer able to
-  misattribute samples; what remains is described under
-  [PID reuse](#pid-reuse).
+- **PID reuse** ("gap A") is closed; see [PID reuse](#pid-reuse).
 - **Aliases name the process as it is now**: a discovered process's alias
   follows its `comm`, so a reader should take the alias of the latest
   flush (or `comm_history`), not the first one seen.

@@ -337,6 +337,7 @@ PYBIND11_MODULE(_native, m) {
           [](double timeout_s) { return testing::WaitFlushHeld(static_cast<unsigned>(timeout_s * 1000)); },
           py::arg("timeout_s"), py::call_guard<py::gil_scoped_release>());
     m.def("_testing_release_flush_gate", &testing::ReleaseFlushGate);
+    m.def("_testing_kill_after_next_read", &testing::KillAfterNextRead, py::arg("pid"));
     m.def("child_subreaper_enabled", &ChildSubreaperEnabled,
         "True once enable_child_subreaper() has succeeded in this process.");
 

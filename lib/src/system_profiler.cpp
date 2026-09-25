@@ -3,6 +3,7 @@
 #include "proc_readers.h"
 #include "system_flush_thread.h"
 #include "discovery_stats_proto.h"
+#include "testing_hooks.h"
 
 #include "system_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -342,6 +343,9 @@ void SystemProfiler::Start() {
                 // or garbage delta can be emitted.
                 auto curCpuNs = internal::ReadPIDCpuTimeNs(pid);
                 if (!curCpuNs) { impl.NoteExited(pid); continue; }
+                // Test-only: the process dies right after this read, and
+                // the reading stands for its number's next owner.
+                if (internal::PassReadHook(pid)) *curCpuNs += 1000'000'000'000ull;
                 auto it = impl.prevPID.find(pid);
                 const bool haveBase = it != impl.prevPID.end() && it->second.serial == entry.serial;
                 readings.push_back({&entry, *curCpuNs,

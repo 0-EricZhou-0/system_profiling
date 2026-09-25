@@ -35,10 +35,11 @@
 // The discovery thread only starts once some root actually tracks its
 // descendants, so with the feature off it costs nothing.
 //
-// PID reuse within one scan interval (a discovered process exits and its
-// number is reused before the next scan) cannot misattribute samples:
-// the probes watch every entry through their own pidfd and never sample
-// an exited one again. See docs/system-guide.md "PID reuse".
+// PID reuse ("gap A": a discovered process exits and its number is
+// reused before the next scan) is closed in the probes, not here: they
+// watch every entry through their own pidfd, poll it after each tick's
+// reads, and keep a reading only if the process was still alive after
+// it. See docs/system-guide.md "PID reuse".
 //
 // Test-only: CUPTI_PROFILER_PROC_ROOT replaces "/proc" for the reads in
 // steps 1-2 (children, stat, comm) and for the probes' process-table

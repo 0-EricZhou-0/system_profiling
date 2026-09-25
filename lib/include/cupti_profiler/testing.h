@@ -13,6 +13,8 @@
 // Disarmed, the gate costs one relaxed atomic load per flush.
 #pragma once
 
+#include <cstdint>
+
 #include <cupti_profiler/process_tracking_probe.h>   // CUPTI_PROFILER_API
 
 namespace cupti_profiler {
@@ -28,6 +30,16 @@ CUPTI_PROFILER_API bool WaitFlushHeld(unsigned timeoutMs);
 
 /// Let the held flush continue (or disarm a gate nothing reached yet).
 CUPTI_PROFILER_API void ReleaseFlushGate();
+
+/// Death between a read and the liveness check (gap A). One-shot: the
+/// next time an in-process System probe reads `pid`'s CPU clock, the
+/// hook SIGKILLs `pid` right after that read, waits until it has
+/// exited, and marks the reading as another process's (it adds 1000 s
+/// to the CPU value, as if a new owner of the number had been read).
+/// The probe polls its pidfds after the reads, so such a reading must
+/// be discarded and never reach the trace. Applies to in-process
+/// (LEGACY) probes only; the sidecar's code path is the same.
+CUPTI_PROFILER_API void KillAfterNextRead(uint32_t pid);
 
 } // namespace testing
 } // namespace cupti_profiler

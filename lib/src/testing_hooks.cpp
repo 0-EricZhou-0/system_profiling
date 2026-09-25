@@ -6,6 +6,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <poll.h>
+#include <signal.h>
+#include <unistd.h>
+
+#include "proc_readers.h"
 
 namespace cupti_profiler {
 
@@ -16,6 +21,8 @@ std::mutex              g_mu;
 std::condition_variable g_cv;
 bool                    g_held     = false;
 bool                    g_released = false;
+
+std::atomic<uint32_t>   g_killAfterRead{0};
 
 } // namespace
 
@@ -40,6 +47,8 @@ void ReleaseFlushGate() {
     g_cv.notify_all();
 }
 
+void KillAfterNextRead(uint32_t pid) { g_killAfterRead.store(pid); }
+
 } // namespace testing
 
 namespace internal {
@@ -51,6 +60,20 @@ void PassFlushGate() {
     g_held = true;
     g_cv.notify_all();
     g_cv.wait(lk, [] { return g_released; });
+}
+
+bool PassReadHook(uint32_t pid) {
+    if (g_killAfterRead.load(std::memory_order_relaxed) != pid || pid == 0) return false;
+    uint32_t expected = pid;
+    if (!g_killAfterRead.compare_exchange_strong(expected, 0)) return false;
+    int fd = PidfdOpen(pid);
+    ::kill(static_cast<pid_t>(pid), SIGKILL);
+    if (fd >= 0) {
+        struct pollfd p{fd, POLLIN, 0};
+        ::poll(&p, 1, 2000);   // exited (a zombie is enough)
+        ::close(fd);
+    }
+    return true;
 }
 
 } // namespace internal
