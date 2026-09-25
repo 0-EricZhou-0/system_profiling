@@ -1,9 +1,18 @@
 #include "proc_readers.h"
 
+#include <cerrno>
+#include <cstdlib>
 #include <ctime>
+#include <fcntl.h>
 #include <fstream>
+#include <poll.h>
 #include <sstream>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434   // same number on every architecture
+#endif
 
 namespace cupti_profiler {
 namespace internal {
@@ -74,6 +83,56 @@ PIDStatmSnapshot ReadPIDStatm(uint32_t pid) {
     // Format: size resident shared text lib data dt
     f >> s.VMSPages >> s.RSSPages >> s.sharedPages;
     return s;
+}
+
+std::optional<std::string> ReadSmallFile(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return std::nullopt;
+    std::string out;
+    char buf[4096];
+    for (;;) {
+        ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        out.append(buf, static_cast<size_t>(n));
+    }
+    ::close(fd);
+    return out;
+}
+
+std::optional<ProcStat> ReadProcStat(const std::string& procRoot, uint32_t pid) {
+    auto text = ReadSmallFile(procRoot + "/" + std::to_string(pid) + "/stat");
+    if (!text) return std::nullopt;
+    // "pid (comm) state ppid ..." — comm may itself contain spaces and
+    // parentheses, so split at the LAST ')'.
+    size_t open = text->find('(');
+    size_t close = text->rfind(')');
+    if (open == std::string::npos || close == std::string::npos || close < open)
+        return std::nullopt;
+    ProcStat st;
+    st.comm = text->substr(open + 1, close - open - 1);
+    std::istringstream rest(text->substr(close + 1));
+    std::string field;
+    // Fields after comm: index 0 = state (field 3), 1 = ppid (4), ...,
+    // 19 = starttime (22).
+    for (int i = 0; i <= 19 && (rest >> field); ++i) {
+        if (i == 0) st.state = field.empty() ? '?' : field[0];
+        else if (i == 1) st.ppid = static_cast<uint32_t>(std::strtoul(field.c_str(), nullptr, 10));
+        else if (i == 19) st.startTime = std::strtoull(field.c_str(), nullptr, 10);
+    }
+    if (st.state == '?') return std::nullopt;   // truncated or malformed
+    return st;
+}
+
+int PidfdOpen(uint32_t pid) {
+    return static_cast<int>(::syscall(SYS_pidfd_open, static_cast<pid_t>(pid), 0));
+}
+
+bool PidfdExited(int pidfd) {
+    struct pollfd p{pidfd, POLLIN, 0};
+    int r;
+    do { r = ::poll(&p, 1, 0); } while (r < 0 && errno == EINTR);
+    return r > 0;
 }
 
 long GetPageSize() {

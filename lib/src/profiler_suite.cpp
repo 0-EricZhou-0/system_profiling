@@ -2,6 +2,7 @@
 
 #include "metric_catalog.h"
 #include "metric_catalog_builtins.h"
+#include "process_discovery.h"
 #include "profiler_config.pb.h"
 #include "session_metadata.pb.h"
 #include "session_metadata_writer.h"
@@ -16,6 +17,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <unistd.h>
 
@@ -56,7 +58,19 @@ public:
 
     uint64_t startWallClockEpochNs = 0;
 
+    // Descendant tracking (ProfilerSuiteConfig.process_discovery). The
+    // in-process instance serves LEGACY probes; under SIDECAR the
+    // sidecar runs its own from the serialized config.
+    internal::DiscoverySettings discoverySettings;
+    std::unique_ptr<internal::ProcessDiscovery> discovery;
+
     bool loaded = false;
+
+    bool SysLegacy()  const { return sysEnabled  && sysConfig.mode  == SystemProbeMode::Legacy; }
+    bool DiskLegacy() const { return diskEnabled && diskConfig.mode == SystemProbeMode::Legacy; }
+
+    void AddTrackedProcess(uint32_t pid, const std::string& alias,
+                           std::optional<bool> trackDescendants);
 
     // Walk a parsed ProfilerSuiteConfig and populate this Impl. Shared
     // between the .pbtxt path (LoadConfig) and the serialized-bytes path
@@ -245,6 +259,14 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     // location next to the binary.
     m_impl->metricCatalogPath = proto.metric_catalog_path();
 
+    // Descendant tracking — one setting for both system and disk.
+    {
+        const auto& pd = proto.process_discovery();
+        m_impl->discoverySettings.enabled    = pd.enabled();
+        m_impl->discoverySettings.recursive  = !pd.direct_children_only();
+        m_impl->discoverySettings.intervalMs = pd.scan_interval_ms() > 0 ? pd.scan_interval_ms() : 100;
+    }
+
     // Apply output_dir: prepend to each component's output_file, create dir if needed
     std::string outputDir = proto.output_dir();
     if (!outputDir.empty()) {
@@ -337,6 +359,23 @@ ProfilerError ProfilerSuite::Configure() {
     if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
         m_impl->diskProfiler.Configure(m_impl->diskConfig);
     if (m_impl->eventEnabled) m_impl->eventProfiler.Configure(m_impl->eventConfig);
+
+    // Descendant tracking for the in-process (LEGACY) probes, fed the
+    // PIDs each probe lists.
+    if (m_impl->SysLegacy() || m_impl->DiskLegacy()) {
+        m_impl->discovery = std::make_unique<internal::ProcessDiscovery>(
+            m_impl->discoverySettings,
+            m_impl->SysLegacy()  ? &m_impl->systemProfiler : nullptr,
+            m_impl->DiskLegacy() ? &m_impl->diskProfiler   : nullptr);
+        using PD = internal::ProcessDiscovery;
+        if (m_impl->SysLegacy())
+            for (const auto& p : m_impl->sysConfig.Processes)
+                m_impl->discovery->AddRoot(p.pid, p.alias, std::nullopt, PD::kSystemSink);
+        if (m_impl->DiskLegacy())
+            for (const auto& p : m_impl->diskConfig.Processes)
+                m_impl->discovery->AddRoot(p.pid, p.alias, std::nullopt, PD::kDiskSink);
+    }
+
     return ProfilerError::Ok;
 }
 
@@ -395,6 +434,7 @@ void ProfilerSuite::Start() {
     if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
         m_impl->diskProfiler.Start();
     if (m_impl->eventEnabled) m_impl->eventProfiler.Start();
+    if (m_impl->discovery) m_impl->discovery->Start();
 
     // Nudge the sidecar to begin sampling (if one is running). Errors
     // from this handshake are logged; we don't fail Start() over them
@@ -425,6 +465,11 @@ void ProfilerSuite::Stop() {
     // sidecar's sample threads wouldn't hear MSG_STOP for that
     // entire window and would collect ~10 s of samples past the
     // workload's real end.
+    //
+    // Discovery stops first (it only takes a condvar wake + join), so
+    // nothing is registered during teardown and its final stats reach
+    // the probes' last flush.
+    if (m_impl->discovery) m_impl->discovery->Stop();
     if (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy)
         m_impl->systemProfiler.SignalStop();
     if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
@@ -459,16 +504,24 @@ void ProfilerSuite::Stop() {
 }
 
 void ProfilerSuite::AddTrackedProcess(uint32_t pid, std::string alias) {
+    m_impl->AddTrackedProcess(pid, alias, std::nullopt);
+}
+
+void ProfilerSuite::AddTrackedProcess(uint32_t pid, std::string alias, bool trackDescendants) {
+    m_impl->AddTrackedProcess(pid, alias, trackDescendants);
+}
+
+void ProfilerSuite::Impl::AddTrackedProcess(uint32_t pid, const std::string& alias,
+                                            std::optional<bool> trackDescendants) {
     // Fan out to every probe that supports per-PID sampling. Legacy
     // probes handle it in-process; Sidecar probes' add goes through
     // the sidecar over the pipe (single message serving both probes
     // when both are enabled — sidecar fans out on its side).
-    const bool sys_legacy  = m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy;
-    const bool disk_legacy = m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy;
-    if (sys_legacy)  m_impl->systemProfiler.AddTrackedProcess(pid, alias);
-    if (disk_legacy) m_impl->diskProfiler.AddTrackedProcess(pid, alias);
-    if (m_impl->sidecar) {
-        if (auto e = m_impl->sidecar->SendAddPid(pid, alias);
+    if (SysLegacy())  systemProfiler.AddTrackedProcess(pid, alias);
+    if (DiskLegacy()) diskProfiler.AddTrackedProcess(pid, alias);
+    if (discovery) discovery->AddRoot(pid, alias, trackDescendants);
+    if (sidecar) {
+        if (auto e = sidecar->SendAddPid(pid, alias, trackDescendants);
             e != ProfilerError::Ok)
         {
             std::cerr << "[ProfilerSuite] sidecar SendAddPid(pid=" << pid
@@ -482,6 +535,7 @@ void ProfilerSuite::RemoveTrackedProcess(uint32_t pid) {
     const bool disk_legacy = m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy;
     if (sys_legacy)  m_impl->systemProfiler.RemoveTrackedProcess(pid);
     if (disk_legacy) m_impl->diskProfiler.RemoveTrackedProcess(pid);
+    if (m_impl->discovery) m_impl->discovery->RemoveRoot(pid);
     if (m_impl->sidecar) {
         if (auto e = m_impl->sidecar->SendRemovePid(pid);
             e != ProfilerError::Ok)

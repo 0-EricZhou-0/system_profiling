@@ -54,6 +54,31 @@ MemInfoSnapshot ReadMemInfo();
 /// Read per-process memory from /proc/[pid]/statm.
 PIDStatmSnapshot ReadPIDStatm(uint32_t pid);
 
+/// The parts of /proc/<pid>/stat that process discovery needs.
+struct ProcStat {
+    std::string comm;          // field 2, without the parentheses
+    char        state = '?';   // field 3 ('Z' = zombie)
+    uint32_t    ppid  = 0;     // field 4
+    uint64_t    startTime = 0; // field 22, clock ticks since boot
+};
+
+/// Parse <procRoot>/<pid>/stat. procRoot is "/proc" except in tests
+/// (see process_discovery.h). nullopt if missing or malformed.
+std::optional<ProcStat> ReadProcStat(const std::string& procRoot, uint32_t pid);
+
+/// Whole small file (e.g. a /proc entry) as a string; nullopt if it
+/// cannot be opened.
+std::optional<std::string> ReadSmallFile(const std::string& path);
+
+/// pidfd_open(2) via the raw syscall (conda Pythons and older glibcs
+/// lack a wrapper; the syscall itself is in Linux >= 5.3). Returns the
+/// fd (O_CLOEXEC) or -1 with errno set.
+int PidfdOpen(uint32_t pid);
+
+/// True if the process a pidfd refers to has exited (the pidfd polls
+/// readable once the whole thread group is gone, reaped or not).
+bool PidfdExited(int pidfd);
+
 /// Get the system page size in bytes (typically 4096).
 long GetPageSize();
 

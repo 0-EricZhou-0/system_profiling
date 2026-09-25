@@ -17,6 +17,8 @@
 //   3. Parent sends MSG_START. Sidecar configures + starts probes,
 //      replies Ok. Sample loops now run.
 //   4. Parent may send MSG_ADD_PID / MSG_REMOVE_PID at any time.
+//      MSG_ADD_PID may carry a trailing AddPidDescend byte: the per-root
+//      override of descendant tracking.
 //   5. Parent sends MSG_STOP. Sidecar stops probes (flushes final
 //      trace), replies Ok, exits.
 //
@@ -32,6 +34,8 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <unistd.h>
 
@@ -45,6 +49,8 @@
 // Wire protocol shared with the library side (relative include so the
 // sidecar target doesn't need lib/src on its default include path).
 #include "sidecar_protocol.h"
+// Descendant tracking runs here, on the observer side, under SIDECAR.
+#include "process_discovery.h"
 
 using namespace cupti_profiler;
 using namespace cupti_profiler::internal;
@@ -223,11 +229,25 @@ int main(int /*argc*/, char** /*argv*/) {
                   << dc.Processes.size() << " PID(s)\n";
     }
 
+    // Descendant tracking for both probes, fed the listed PIDs of each.
+    std::unique_ptr<ProcessDiscovery> discovery;
+    if (sys || dsk) {
+        DiscoverySettings ds;
+        const auto& pd = cfg.process_discovery();
+        ds.enabled    = pd.enabled();
+        ds.recursive  = !pd.direct_children_only();
+        ds.intervalMs = pd.scan_interval_ms() > 0 ? pd.scan_interval_ms() : 100;
+        discovery = std::make_unique<ProcessDiscovery>(ds, sys.get(), dsk.get());
+        if (sys) for (const auto& p : cfg.system().processes())
+            discovery->AddRoot(p.pid(), p.alias(), std::nullopt, ProcessDiscovery::kSystemSink);
+        if (dsk) for (const auto& p : cfg.disk().processes())
+            discovery->AddRoot(p.pid(), p.alias(), std::nullopt, ProcessDiscovery::kDiskSink);
+        discovery->Start();
+    }
+
     SendStatus(ProfilerError::Ok);
 
-    // 4. Message loop until MSG_STOP. MSG_ADD_PID / MSG_REMOVE_PID
-    //    handling is stubbed for commit 5 — accept + ack for now so
-    //    parent can send them without blocking.
+    // 4. Message loop until MSG_STOP.
     while (true) {
         if (!ReadMsg(hdr, payload)) {
             std::cerr << "[sidecar] pipe closed by parent — shutting down\n";
@@ -239,6 +259,7 @@ int main(int /*argc*/, char** /*argv*/) {
         }
         if (hdr.type == MSG_ADD_PID) {
             // Payload: [uint32 pid][uint32 alias_len][alias bytes]
+            //          [optional AddPidDescend byte]
             if (payload.size() < 2 * sizeof(uint32_t)) {
                 SendStatus(ProfilerError::SidecarBadHandshake);
                 continue;
@@ -246,16 +267,28 @@ int main(int /*argc*/, char** /*argv*/) {
             uint32_t pid = 0, alias_len = 0;
             std::memcpy(&pid,       payload.data(),                     sizeof(pid));
             std::memcpy(&alias_len, payload.data() + sizeof(pid),       sizeof(alias_len));
-            if (payload.size() != 2 * sizeof(uint32_t) + alias_len) {
+            const size_t base = 2 * sizeof(uint32_t) + static_cast<size_t>(alias_len);
+            std::optional<bool> descend;
+            if (payload.size() == base + 1) {
+                const uint8_t b = static_cast<uint8_t>(payload[base]);
+                if (b != ADD_PID_DESCEND_OFF && b != ADD_PID_DESCEND_ON) {
+                    SendStatus(ProfilerError::SidecarBadHandshake);
+                    continue;
+                }
+                descend = (b == ADD_PID_DESCEND_ON);
+            } else if (payload.size() != base) {
                 SendStatus(ProfilerError::SidecarBadHandshake);
                 continue;
             }
             std::string alias(
                 payload.data() + 2 * sizeof(uint32_t), alias_len);
             std::cerr << "[sidecar] MSG_ADD_PID pid=" << pid
-                      << " alias=\"" << alias << "\"\n";
+                      << " alias=\"" << alias << "\""
+                      << (descend ? (*descend ? " descendants=on" : " descendants=off") : "")
+                      << "\n";
             if (sys) sys->AddTrackedProcess(pid, alias);
             if (dsk) dsk->AddTrackedProcess(pid, alias);
+            if (discovery) discovery->AddRoot(pid, alias, descend);
             SendStatus(ProfilerError::Ok);
             continue;
         }
@@ -269,6 +302,7 @@ int main(int /*argc*/, char** /*argv*/) {
             std::cerr << "[sidecar] MSG_REMOVE_PID pid=" << pid << "\n";
             if (sys) sys->RemoveTrackedProcess(pid);
             if (dsk) dsk->RemoveTrackedProcess(pid);
+            if (discovery) discovery->RemoveRoot(pid);
             SendStatus(ProfilerError::Ok);
             continue;
         }
@@ -276,9 +310,11 @@ int main(int /*argc*/, char** /*argv*/) {
                   << " len="  << hdr.length << "; ignoring\n";
     }
 
-    // SignalStop first so both probes' sample threads see the flag
-    // in parallel while their flush threads finish their current
-    // sleep_for. Then Stop() joins.
+    // Discovery first, so nothing is registered during teardown and its
+    // final stats reach the probes' last flush. Then SignalStop both
+    // probes so their sample threads see the flag in parallel while
+    // their flush threads finish their current sleep_for; Stop() joins.
+    if (discovery) discovery->Stop();
     if (sys) sys->SignalStop();
     if (dsk) dsk->SignalStop();
     if (sys) sys->Stop();

@@ -13,10 +13,26 @@ void ProcessTrackingProbe::AddTrackedProcess(uint32_t pid, std::string alias) {
         if (e.pid == pid) {
             e.pending_removal = false;
             if (!alias.empty()) e.alias = std::move(alias);
+            // Listing a discovered process by hand makes it a root.
+            e.discovered = false;
+            e.parent_pid = 0;
             return;
         }
     }
     processes_.push_back({pid, std::move(alias), /*pending_removal=*/false});
+}
+
+void ProcessTrackingProbe::AddDiscoveredProcess(uint32_t pid, std::string alias,
+                                                uint32_t parentPid) {
+    std::unique_lock<std::shared_mutex> lk(mutex_);
+    for (auto& e : processes_) {
+        if (e.pid == pid) {
+            if (e.discovered && !alias.empty()) e.alias = std::move(alias);
+            return;
+        }
+    }
+    processes_.push_back({pid, std::move(alias), /*pending_removal=*/false,
+                          parentPid, /*discovered=*/true});
 }
 
 void ProcessTrackingProbe::RemoveTrackedProcess(uint32_t pid) {
@@ -52,6 +68,16 @@ void ProcessTrackingProbe::CommitPendingRemovals(const std::vector<ProcessEntry>
                            return e.pending_removal && marked.count(e.pid);
                        }),
         processes_.end());
+}
+
+void ProcessTrackingProbe::SetDiscoveryStats(const DiscoveryStats& stats) {
+    std::unique_lock<std::shared_mutex> lk(mutex_);
+    discoveryStats_ = stats;
+}
+
+std::optional<DiscoveryStats> ProcessTrackingProbe::SnapshotDiscoveryStats() const {
+    std::shared_lock<std::shared_mutex> lk(mutex_);
+    return discoveryStats_;
 }
 
 } // namespace cupti_profiler

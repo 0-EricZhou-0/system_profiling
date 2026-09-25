@@ -47,10 +47,34 @@ message GPUSample {
 // Tracked process with a removal marker. After RemoveTrackedProcess()
 // is called, the next flush emits the PID with removed=true once,
 // then the PID is dropped from subsequent flushes.
+//
+// Processes found by descendant tracking (ProcessDiscoveryConfig) carry
+// discovered=true and the parent they had when found, so a reader can
+// draw the tree and tell listed roots from discovered processes. A
+// discovered process that exits is removed the same way (removed=true
+// once, then dropped). Listed roots keep parent_pid=0.
 message TrackedProcessV2 {
-    uint32 pid    = 1;
-    string alias  = 2;
-    bool   removed = 3;
+    uint32 pid        = 1;
+    string alias      = 2;
+    bool   removed    = 3;
+    uint32 parent_pid = 4;   // discovered only: parent PID when found
+    bool   discovered = 5;   // true = found by descendant tracking
+}
+
+// Descendant tracking's own cost, attached to every system/disk flush
+// while discovery runs. Counters and percentiles are cumulative since
+// the probe started, so the last flush of a run summarises all of it.
+// Percentiles come from a log-linear histogram (1/16-octave buckets,
+// <= 6.25% relative error); max is exact.
+message DiscoveryStats {
+    uint64 scan_interval_ns = 1;   // configured interval
+    uint64 scans            = 2;   // scans completed
+    uint64 scan_p50_ns      = 3;   // one scan's wall time, observer side
+    uint64 scan_p99_ns      = 4;
+    uint64 scan_max_ns      = 5;
+    uint64 discovered       = 6;   // processes registered by discovery
+    uint64 exited           = 7;   // discovered processes seen exiting
+    uint64 rejected         = 8;   // PID-reuse guard rejections
 }
 
 // GPU device-specific information. Includes peaks that are

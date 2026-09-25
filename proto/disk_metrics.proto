@@ -19,4 +19,6 @@ message DiskMetricsTrace {
     repeated DeviceSample  device_samples        = 5;
     repeated ProcessSample process_samples       = 6;
     repeated FlushStats    flush_stats           = 7;
+    // Present while descendant tracking runs; see DiscoveryStats.
+    DiscoveryStats   discovery_stats             = 8;
 }

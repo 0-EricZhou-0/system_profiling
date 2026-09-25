@@ -2,6 +2,7 @@
 
 #include "proc_readers.h"
 #include "system_flush_thread.h"
+#include "discovery_stats_proto.h"
 
 #include "system_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -288,6 +289,7 @@ void SystemProfiler::Stop() {
                 m_impl->hostCpuCount,
                 m_impl->steadyClockRefNs, m_impl->wallClockEpochNs,
                 processSnapshot, drained);
+            internal::AttachDiscoveryStats(trace, *this);
             // Attach any pending flush stats from the last background flush cycle.
             if (m_impl->flushStatsPending.valid) {
                 auto* fs = trace.add_flush_stats();

@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <sys/types.h>
 
@@ -75,7 +76,11 @@ public:
     /// serialised against other Send* calls by an internal mutex so
     /// the workload can call AddTrackedProcess concurrently from
     /// unrelated threads.
-    ProfilerError SendAddPid(uint32_t pid, const std::string& alias);
+    /// `trackDescendants` = nullopt sends the original payload (the
+    /// root inherits ProcessDiscoveryConfig.enabled); a bool appends
+    /// the AddPidDescend override byte.
+    ProfilerError SendAddPid(uint32_t pid, const std::string& alias,
+                             std::optional<bool> trackDescendants = std::nullopt);
 
     /// Remove a PID from the sidecar's tracked set. Same thread-
     /// safety guarantee as SendAddPid.

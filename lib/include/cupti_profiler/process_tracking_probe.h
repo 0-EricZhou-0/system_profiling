@@ -23,11 +23,17 @@
 // Derived classes call SnapshotProcesses() from their sample loop and
 // CommitPendingRemovals() from their flush thread after a successful
 // flush.
+//
+// Descendant tracking (lib/src/process_discovery.h) registers what it
+// finds through AddDiscoveredProcess(), which records the parent PID
+// and marks the entry discovered, and publishes its own scan cost
+// through SetDiscoveryStats() for the flush thread to emit.
 
 #pragma once
 
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -47,6 +53,19 @@
 #endif
 
 namespace cupti_profiler {
+
+// Descendant tracking's cumulative self-metrics (see the DiscoveryStats
+// proto in proto/metric_sample.proto for field meanings).
+struct DiscoveryStats {
+    uint64_t scanIntervalNs = 0;
+    uint64_t scans          = 0;
+    uint64_t scanP50Ns      = 0;
+    uint64_t scanP99Ns      = 0;
+    uint64_t scanMaxNs      = 0;
+    uint64_t discovered     = 0;
+    uint64_t exited         = 0;
+    uint64_t rejected       = 0;
+};
 
 class CUPTI_PROFILER_API ProcessTrackingProbe {
 public:
@@ -69,10 +88,19 @@ public:
     /// CommitPendingRemovals() is called. Thread-safe.
     void RemoveTrackedProcess(uint32_t pid);
 
+    /// Register a process found by descendant tracking: like
+    /// AddTrackedProcess, plus the parent it had when found and
+    /// discovered=true. If the PID is already tracked as a listed
+    /// root, the root entry is left as it is; if it is tracked as a
+    /// discovered process, only its alias is refreshed. Thread-safe.
+    void AddDiscoveredProcess(uint32_t pid, std::string alias, uint32_t parentPid);
+
     struct ProcessEntry {
         uint32_t    pid              = 0;
         std::string alias;
         bool        pending_removal  = false;
+        uint32_t    parent_pid       = 0;      // discovered only
+        bool        discovered       = false;
     };
 
     /// Replace the tracked process set in one shot. Called by derived
@@ -91,9 +119,15 @@ public:
     /// goes out in the next flush instead of being lost.
     void CommitPendingRemovals(const std::vector<ProcessEntry>& emitted);
 
+    /// Latest descendant-tracking self-metrics, emitted with every
+    /// flush. nullopt until discovery has published once.
+    void SetDiscoveryStats(const DiscoveryStats& stats);
+    std::optional<DiscoveryStats> SnapshotDiscoveryStats() const;
+
 private:
-    mutable std::shared_mutex   mutex_;
-    std::vector<ProcessEntry>   processes_;
+    mutable std::shared_mutex     mutex_;
+    std::vector<ProcessEntry>     processes_;
+    std::optional<DiscoveryStats> discoveryStats_;
 };
 
 } // namespace cupti_profiler

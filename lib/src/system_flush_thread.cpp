@@ -1,4 +1,5 @@
 #include "system_flush_thread.h"
+#include "discovery_stats_proto.h"
 
 #include "system_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -198,6 +199,8 @@ void AddTrackedProcesses(
         tp->set_pid(p.pid);
         tp->set_alias(p.alias);
         tp->set_removed(p.pending_removal);
+        tp->set_parent_pid(p.parent_pid);
+        tp->set_discovered(p.discovered);
     }
 }
 
@@ -285,6 +288,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
             hostname, samplingFrequencyHz, hostCpuCount,
             steadyClockRefNs, wallClockEpochNs,
             processSnapshot, drained);
+        AttachDiscoveryStats(trace, probe);
 
         {
             std::lock_guard<std::mutex> lock(pendingMutex);

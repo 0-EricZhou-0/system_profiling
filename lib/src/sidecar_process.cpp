@@ -227,8 +227,9 @@ ProfilerError SidecarProcess::JoinStopAck() {
     return ReadStatus();
 }
 
-ProfilerError SidecarProcess::SendAddPid(uint32_t pid, const std::string& alias) {
-    // Payload: [uint32 pid][uint32 alias_len][alias bytes]
+ProfilerError SidecarProcess::SendAddPid(uint32_t pid, const std::string& alias,
+                                         std::optional<bool> trackDescendants) {
+    // Payload: [uint32 pid][uint32 alias_len][alias bytes][AddPidDescend?]
     // Serialise ourselves rather than pulling in a proto — one message,
     // one write, no framing complications on the sidecar side.
     std::string buf;
@@ -237,6 +238,10 @@ ProfilerError SidecarProcess::SendAddPid(uint32_t pid, const std::string& alias)
     buf.append(reinterpret_cast<const char*>(&pid),       sizeof(pid));
     buf.append(reinterpret_cast<const char*>(&alias_len), sizeof(alias_len));
     buf.append(alias);
+    if (trackDescendants) {
+        buf.push_back(static_cast<char>(*trackDescendants ? ADD_PID_DESCEND_ON
+                                                          : ADD_PID_DESCEND_OFF));
+    }
     std::lock_guard<std::mutex> lk(send_mutex_);
     if (auto e = WriteMsg(MSG_ADD_PID, buf.data(),
                           static_cast<uint32_t>(buf.size()));

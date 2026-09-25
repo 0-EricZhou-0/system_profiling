@@ -22,6 +22,7 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -279,13 +280,23 @@ PYBIND11_MODULE(_native, m) {
              py::return_value_policy::reference_internal,
             "Returns the suite-owned EventProfiler.")
         .def("add_tracked_process",
-             [](ProfilerSuite& self, uint32_t pid, std::string alias) {
-                 self.AddTrackedProcess(pid, std::move(alias));
+             [](ProfilerSuite& self, uint32_t pid, std::string alias,
+                std::optional<bool> track_descendants) {
+                 if (track_descendants)
+                     self.AddTrackedProcess(pid, std::move(alias), *track_descendants);
+                 else
+                     self.AddTrackedProcess(pid, std::move(alias));
              },
              py::arg("pid"), py::arg("alias") = std::string{},
+             py::arg("track_descendants") = py::none(),
             "Start tracking a PID mid-run. Fans out to every probe that "
             "supports per-PID sampling (System + Disk). First sample for "
-            "the PID is one sample-tick after this call returns.")
+            "the PID is one sample-tick after this call returns. "
+            "track_descendants=None follows process_discovery.enabled; "
+            "True/False overrides it for this root (True: its children are "
+            "discovered, recursively unless direct_children_only, and "
+            "tracked as '<alias>/<comm>' until they exit).",
+             py::call_guard<py::gil_scoped_release>())
         .def("remove_tracked_process", &ProfilerSuite::RemoveTrackedProcess,
              py::arg("pid"),
             "Stop tracking a PID. The PID appears one more time in the "

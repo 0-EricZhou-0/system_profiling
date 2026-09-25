@@ -1,4 +1,5 @@
 #include "disk_flush_thread.h"
+#include "discovery_stats_proto.h"
 
 #include "disk_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -153,6 +154,8 @@ DiskMetricsTrace BuildDiskTrace(
         tp->set_pid(p.pid);
         tp->set_alias(p.alias);
         tp->set_removed(p.pending_removal);
+        tp->set_parent_pid(p.parent_pid);
+        tp->set_discovered(p.discovered);
     }
     for (const auto& t : drained.deviceTicks)  AppendDeviceSample(trace, t);
     for (const auto& t : drained.processTicks) AppendProcessSample(trace, t);
@@ -210,6 +213,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
             hostname, samplingFrequencyHz, hostCpuCount,
             steadyClockRefNs, wallClockEpochNs,
             devices, processSnapshot, drained);
+        AttachDiscoveryStats(trace, probe);
 
         {
             std::lock_guard<std::mutex> lock(pendingMutex);

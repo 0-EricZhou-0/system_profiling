@@ -66,12 +66,22 @@ public:
 
     /// Begin tracking a PID mid-run. Fans out to every enabled probe
     /// that supports per-PID sampling (currently System + Disk).
-    /// Thread-safe.
+    /// Whether its descendants are tracked follows
+    /// ProfilerSuiteConfig.process_discovery.enabled. Thread-safe.
     void AddTrackedProcess(uint32_t pid, std::string alias = {});
+
+    /// Same, with an explicit per-root choice that overrides
+    /// process_discovery.enabled for this root: trackDescendants=true
+    /// follows its children (recursively unless direct_children_only),
+    /// false traces this PID alone. Use it to follow a spawned server's
+    /// tree without also following the host's own children.
+    void AddTrackedProcess(uint32_t pid, std::string alias, bool trackDescendants);
 
     /// Stop tracking a PID mid-run. The PID appears one more time in
     /// the next flush of each affected probe (with TrackedProcessV2.
-    /// removed=true) before being dropped. Thread-safe.
+    /// removed=true) before being dropped. If it was a root whose
+    /// descendants were tracked, its already-discovered descendants
+    /// stay tracked until they exit. Thread-safe.
     void RemoveTrackedProcess(uint32_t pid);
 
 private:

@@ -22,4 +22,6 @@ message SystemMetricsTrace {
     repeated Sample        system_samples        = 4;
     repeated ProcessSample process_samples       = 5;
     repeated FlushStats    flush_stats           = 6;
+    // Present while descendant tracking runs; see DiscoveryStats.
+    DiscoveryStats   discovery_stats             = 7;
 }

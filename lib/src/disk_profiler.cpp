@@ -2,6 +2,7 @@
 
 #include "disk_readers.h"
 #include "disk_flush_thread.h"
+#include "discovery_stats_proto.h"
 
 #include "disk_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -257,6 +258,7 @@ void DiskProfiler::Stop() {
                 m_impl->hostCpuCount,
                 m_impl->steadyClockRefNs, m_impl->wallClockEpochNs,
                 m_impl->config.devices, processSnapshot, drained);
+            internal::AttachDiscoveryStats(trace, *this);
             if (m_impl->flushStatsPending.valid) {
                 auto* fs = trace.add_flush_stats();
                 fs->set_flush_byte_size(m_impl->flushStatsPending.bytesWritten);

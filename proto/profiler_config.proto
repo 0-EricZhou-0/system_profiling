@@ -77,6 +77,29 @@ message EventsProfilerConfig {
     string output_file = 3;          // events.pb
 }
 
+// Descendant tracking for the System + Disk probes. One setting drives
+// BOTH probes, because they share the tracked-process set. The scan runs
+// on the observer side: in the workload process under LEGACY, inside
+// the sidecar under SIDECAR.
+//
+// Guarantee: a process that is a child of a tracked process for at
+// least one full scan interval is discovered, and once discovered it is
+// tracked until it exits, regardless of reparenting. A child that lives
+// less than one interval may be missed; lower scan_interval_ms to catch
+// it. See docs/system-guide.md "Descendant tracking".
+message ProcessDiscoveryConfig {
+    // false (default): trace the listed PIDs only. A per-root override
+    // (ProfilerSuite::AddTrackedProcess(pid, alias, trackDescendants))
+    // wins over this for that root.
+    bool   enabled              = 1;
+    // false (default) => RECURSIVE: children of discovered processes are
+    // discovered too. true => only direct children of the listed roots.
+    // (proto3 bools default to false, hence the inverted name.)
+    bool   direct_children_only = 2;
+    // How often every tracked process's children are scanned. 0 => 100.
+    uint64 scan_interval_ms     = 3;
+}
+
 message ProfilerSuiteConfig {
     GPUProfilerConfig gpu = 1;
     SystemProfilerConfig system = 2;
@@ -99,4 +122,7 @@ message ProfilerSuiteConfig {
     // appended. Empty = built-ins only — no file is required at
     // runtime.
     string metric_catalog_path = 7;
+
+    // Descendant tracking for the System + Disk probes. Unset = off.
+    ProcessDiscoveryConfig process_discovery = 8;
 }
