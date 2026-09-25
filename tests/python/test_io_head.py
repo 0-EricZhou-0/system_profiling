@@ -109,12 +109,16 @@ def test_io_before_tracking(tmp_path, mode):
         s = sums(frames, pid)
         for k in COUNTERS:
             head = getattr(tp.io_before_tracking, k)
-            # Counters at the report = head + samples up to the report; the
-            # report itself (one line, one /proc read) is the only slack.
+            # Counters at the report = head + samples up to the report. Slack:
+            # the report itself (one line, one /proc read), and the first
+            # sample, whose interval sums() can only take as the nominal
+            # 1/HZ (the seeding reading's time is not in the trace): 10% of
+            # its bytes (5 ms of 50 ms).
             upto = head + sum(b for _, b in s[k])
+            slack = 64 * KiB + 0.1 * (s[k][0][1] if s[k] else 0)
             print(f"{mode} {who:5s} {k:22s} head {head / MiB:8.3f} MiB  head+samples "
                   f"{upto / MiB:8.3f} MiB  /proc {rep['io'][k] / MiB:8.3f} MiB")
-            if not -64 * KiB <= upto - rep["io"][k] <= 64 * KiB:
+            if not -slack <= upto - rep["io"][k] <= slack:
                 failures.append((who, k, head, upto, rep["io"][k]))
         if who == "root":
             # The 8 MiB read before tracking is in the head, not a sample.

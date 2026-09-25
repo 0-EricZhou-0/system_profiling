@@ -224,11 +224,15 @@ def check(res, frames, want_children, expect_c_in_g):
         extra = unsub if (expect_c_in_g and unsub) else 0
         if not -1 <= rem - extra <= 64 * KiB:
             failures.append(("remainder", k, rem, extra))
-        # last_seen = io_before_tracking + the samples (the I/O head).
+        # last_seen = io_before_tracking + the samples (the I/O head). Exact
+        # but for the first sample, whose interval series() can only take as
+        # the nominal 1/HZ (the seeding reading's time is not in the trace):
+        # allow 2% of that sample's bytes (10 ms of 500 ms).
         for ch in a.children:
             head = getattr(table[ch.pid].io_before_tracking, k)
             seen = getattr(ch.last_seen, k)
-            if abs(head + total(ser[ch.pid][k]) - seen) > 2 + 1e-9 * seen:
+            first = ser[ch.pid][k][0][1] if ser[ch.pid][k] else 0
+            if abs(head + total(ser[ch.pid][k]) - seen) > 2 + 1e-9 * seen + 0.02 * first:
                 failures.append(("head + samples != last_seen", ch.pid, k, head,
                                  total(ser[ch.pid][k]), seen))
         # Each process's samples + heads against the kernel's view of G's
