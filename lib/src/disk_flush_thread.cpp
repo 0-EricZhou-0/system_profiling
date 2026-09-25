@@ -65,6 +65,10 @@ inline constexpr std::array kDeviceMetrics = {
     },
 };
 
+// The five byte counters of /proc/<pid>/io, each under its own name.
+// Syscall layer (rchar/wchar) and storage layer (read_bytes/write_bytes/
+// cancelled_write_bytes) see different things; the table in
+// docs/metric-model.md ("Per-PID I/O counters") gives measured examples.
 inline constexpr std::array kProcessMetrics = {
     MetricDescriptor<DiskProcessTick>{
         .fqn         = "proc__io_rchar.sum.per_second",
@@ -72,7 +76,7 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "io_rchar",
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
-        .description = "Per-PID read bandwidth (syscall layer). /proc/<pid>/io rchar delta. INCLUDES page-cache hits — NOT physical-disk reads.",
+        .description = "Per-PID syscall-layer read rate: /proc/<pid>/io rchar delta over the actual interval. Bytes returned by read()-family calls (read, pread, readv, sendfile, ...) on ANY fd — files, pipes, sockets, ttys — whether they came from the page cache or from storage. Never counts mmap: pages touched through a mapping are invisible here.",
         .read        = [](const DiskProcessTick& t){ return t.rchar_bytes_per_sec; },
     },
     MetricDescriptor<DiskProcessTick>{
@@ -81,8 +85,35 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "io_wchar",
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
-        .description = "Per-PID write bandwidth (syscall layer). /proc/<pid>/io wchar delta. Bytes the process ASKED to write — flush to block layer may differ.",
+        .description = "Per-PID syscall-layer write rate: /proc/<pid>/io wchar delta over the actual interval. Bytes accepted by write()-family calls on ANY fd (files, pipes, sockets, ttys), counted at the call, not when (or whether) they reach storage. Never counts stores through an mmap.",
         .read        = [](const DiskProcessTick& t){ return t.wchar_bytes_per_sec; },
+    },
+    MetricDescriptor<DiskProcessTick>{
+        .fqn         = "proc__io_read_bytes.sum.per_second",
+        .type        = MetricType::Counter,
+        .entity      = "proc",  .counter = "io_read_bytes",
+        .rollup      = "sum",   .submetric = "per_second",
+        .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
+        .description = "Per-PID storage-layer read rate: /proc/<pid>/io read_bytes delta over the actual interval. Bytes this process caused to be fetched from storage — read() misses AND page faults on mmap'd files that miss the page cache. Page-cache hits count 0, so a warm read or a warm mmap shows nothing.",
+        .read        = [](const DiskProcessTick& t){ return t.read_bytes_per_sec; },
+    },
+    MetricDescriptor<DiskProcessTick>{
+        .fqn         = "proc__io_write_bytes.sum.per_second",
+        .type        = MetricType::Counter,
+        .entity      = "proc",  .counter = "io_write_bytes",
+        .rollup      = "sum",   .submetric = "per_second",
+        .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
+        .description = "Per-PID storage-layer write rate: /proc/<pid>/io write_bytes delta over the actual interval. Bytes of file pages this process DIRTIED in the page cache, counted when dirtied, not at writeback (which may happen much later, or never — see io_cancelled_write_bytes). Writes to pipes and sockets count 0.",
+        .read        = [](const DiskProcessTick& t){ return t.write_bytes_per_sec; },
+    },
+    MetricDescriptor<DiskProcessTick>{
+        .fqn         = "proc__io_cancelled_write_bytes.sum.per_second",
+        .type        = MetricType::Counter,
+        .entity      = "proc",  .counter = "io_cancelled_write_bytes",
+        .rollup      = "sum",   .submetric = "per_second",
+        .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
+        .description = "Per-PID rate of dirtied-then-discarded bytes: /proc/<pid>/io cancelled_write_bytes delta over the actual interval. Pages counted in io_write_bytes that were thrown away before writeback (file truncated or deleted while dirty). Bytes that actually reached storage ~= io_write_bytes - io_cancelled_write_bytes.",
+        .read        = [](const DiskProcessTick& t){ return t.cancelled_write_bytes_per_sec; },
     },
 };
 

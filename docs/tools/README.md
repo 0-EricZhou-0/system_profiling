@@ -93,8 +93,8 @@ Quality / size knobs:
 Panels in the default layout (auto-skipped when no series matches):
 SM Util → Active Warps/Cycle → DRAM Bandwidth → PCIe Bandwidth →
 NVLink Bandwidth → CPU Utilization → System Memory → Per-PID CPU →
-Per-PID Resident Memory → Per-PID I/O → Disk Bandwidth → Disk Queue
-Depth.
+Per-PID Resident Memory → Per-PID I/O (syscall layer) → Per-PID I/O
+(storage layer) → Disk Bandwidth → Disk Queue Depth.
 
 ## `visualize_interactive.py`
 

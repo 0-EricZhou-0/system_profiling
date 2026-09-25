@@ -3,14 +3,16 @@ syntax = "proto3";
 import "metric_sample.proto";
 
 // Disk trace — per-device bandwidth + in-flight queue depth plus
-// per-PID syscall-layer I/O. DiskProfiler emits one length-delimited
+// per-PID I/O (the five /proc/<pid>/io byte counters). DiskProfiler emits one length-delimited
 // DiskMetricsTrace per flush.
 //
 // Two scopes appear simultaneously:
 //   SCOPE_DEVICE  — one DeviceSample per tracked device per tick.
 //                   values[] combines bandwidth + queue-depth.
 //   SCOPE_PROCESS — one ProcessSample per tracked PID per tick.
-//                   values[] combines rchar/wchar bandwidth.
+//                   values[] holds the rates of rchar, wchar,
+//                   read_bytes, write_bytes and cancelled_write_bytes
+//                   (docs/metric-model.md, "Per-PID I/O counters").
 message DiskMetricsTrace {
     TraceHeader header                           = 1;
     repeated ScopeMetricNames scope_metric_names = 2;

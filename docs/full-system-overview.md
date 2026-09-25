@@ -171,13 +171,15 @@ the layout — there is no hand-coded row table. See
 reference and [`docs/metric-model.md`](metric-model.md) for the
 underlying type system.
 
-The default layout produces 12 panels (some auto-skipped when no
+The default layout produces 13 panels (some auto-skipped when no
 series matches): SM Utilization, Active Warps / Cycle, DRAM
 Bandwidth, PCIe Bandwidth, NVLink Bandwidth, CPU Utilization, Per-PID
 CPU, System Memory, Per-PID Resident Memory, Disk Bandwidth, Disk
-Queue Depth, Per-PID I/O. Panels with `aggregation:
-PANEL_AGGREGATION_INTEGRATE` (PCIe / NVLink / Disk Bandwidth /
-Per-PID I/O) add a companion cumulative-total panel directly below.
+Queue Depth, Per-PID I/O (syscall layer: `rchar`/`wchar`), Per-PID I/O
+(storage layer: `read_bytes`/`write_bytes`/`cancelled_write_bytes`).
+Panels with `aggregation: PANEL_AGGREGATION_INTEGRATE` (PCIe / NVLink /
+Disk Bandwidth / both Per-PID I/O panels) add a companion
+cumulative-total panel directly below.
 Region annotations (shaded spans) overlay every metric panel.
 
 ---

@@ -94,7 +94,7 @@ Each profiler runs independently with its own sampling frequency, flush interval
 │ ┌───┴────────────┐    ┌───────┴───────────────┐   │
 │ │ proc_readers   │    │ disk_readers          │   │
 │ │ (CPU + memory  │    │ (diskstats, inflight, │   │
-│ │  delta calc)   │    │  per-PID rchar/wchar) │   │
+│ │  delta calc)   │    │  per-PID io counters) │   │
 │ └────────────────┘    └───────────────────────┘   │
 │                                                   │
 │ ┌──────────────────────┐  ┌──────────────────┐    │
@@ -166,7 +166,7 @@ Length-delimited protobuf → system_metrics.pb
 ```text ln:false
 /proc/diskstats           (per-device byte counters)
 /sys/block/<dev>/inflight (read/write queue depth)
-/proc/<pid>/io            (per-PID rchar/wchar)
+/proc/<pid>/io            (per-PID rchar/wchar/read_bytes/write_bytes/cancelled_write_bytes)
         ↓  (read at 1 / samplingFrequencyHz cadence)
 disk_readers — compute bytes/sec vs. previous sample
         ↓
@@ -541,11 +541,11 @@ public:
 | ----- | ----------- |
 | `samplingFrequencyHz` | Polling rate for `/proc/diskstats` and `/sys/block/<dev>/inflight`. Disk counters update relatively slowly — 10 Hz is usually sufficient. |
 | `devices` | Block devices to sample. Names match `/sys/block/<name>/`. Use `lsblk` or `cat /proc/diskstats` to enumerate. |
-| `Processes` | PIDs to sample for `/proc/<pid>/io` (rchar/wchar). Empty = device-only sampling. |
+| `Processes` | PIDs to sample for `/proc/<pid>/io` (all five byte counters). Empty = device-only sampling. |
 | `flushIntervalMs` / `outputFile` | Same semantics as `SystemProfilerConfig`. |
 
 > [!NOTE]
-> `/proc/<pid>/io` reports cumulative `rchar`/`wchar` (bytes read/written through the syscall layer, including page-cache hits). The profiler converts these into bytes-per-second using inter-sample wall time. This is **not** the same as physical disk traffic — for that, use the per-device samples.
+> `/proc/<pid>/io` reports five cumulative byte counters: `rchar`/`wchar` (syscall layer, any fd, page-cache hits included, never `mmap`) and `read_bytes`/`write_bytes`/`cancelled_write_bytes` (storage layer: fetches from storage including `mmap` misses, pages dirtied, dirty pages discarded). The profiler emits each as its own bytes-per-second rate over the actual inter-sample time. What each one sees, with measured examples, is in [metric-model.md, "Per-PID I/O counters"](metric-model.md#per-pid-io-counters-who-records-what).
 
 ### `EventProfilerConfig`, `EventProfiler` & `EventTracker`
 
@@ -1119,7 +1119,7 @@ message CpuTail { uint64 timestamp_ns; uint32 parent_pid;
 ```protobuf title:"proto/disk_metrics.proto"
 message DiskMetricsTrace {
     TraceHeader header                           = 1;
-    // Two entries: SCOPE_DEVICE (BW + inflight) and SCOPE_PROCESS (per-PID rchar/wchar).
+    // Two entries: SCOPE_DEVICE (BW + inflight) and SCOPE_PROCESS (the five per-PID /proc/<pid>/io counters).
     repeated ScopeMetricNames scope_metric_names = 2;
     repeated TrackedProcessV2 tracked_processes  = 3;
     repeated string  tracked_devices             = 4;
@@ -1371,15 +1371,18 @@ Per-device samples (one row per tracked device per sample tick):
 | `read_queue_depth` | `/sys/block/<dev>/inflight` | requests | Currently in-flight read requests |
 | `write_queue_depth` | `/sys/block/<dev>/inflight` | requests | Currently in-flight write requests |
 
-Per-process samples:
+Per-process samples (one column per `/proc/<pid>/io` counter; rates over the actual Δt since the PID's previous sample):
 
-| Field | Source | Units | Notes |
+| FQN | Source | Units | Sees |
 | ----- | ------ | ----- | ----- |
-| `read_bytes_per_sec` | `/proc/<pid>/io` rchar delta / Δt | B/s | Includes page-cache hits — *not* physical disk reads |
-| `write_bytes_per_sec` | `/proc/<pid>/io` wchar delta / Δt | B/s | Bytes the process *asked* to write, regardless of where they ended up |
+| `proc__io_rchar.sum.per_second` | `rchar` delta / Δt | B/s | Bytes returned by `read`-family syscalls on any fd; page-cache hits included; never `mmap` |
+| `proc__io_wchar.sum.per_second` | `wchar` delta / Δt | B/s | Bytes accepted by `write`-family syscalls on any fd (pipes and sockets too) |
+| `proc__io_read_bytes.sum.per_second` | `read_bytes` delta / Δt | B/s | Bytes fetched from storage, including `mmap` faults that miss the cache; cache hits are 0 |
+| `proc__io_write_bytes.sum.per_second` | `write_bytes` delta / Δt | B/s | File pages dirtied (counted at dirtying, not writeback) |
+| `proc__io_cancelled_write_bytes.sum.per_second` | `cancelled_write_bytes` delta / Δt | B/s | Dirtied pages discarded before writeback (truncate/delete) |
 
 > [!IMPORTANT]
-> Per-PID I/O uses `rchar`/`wchar` (the syscall-layer counters), not `read_bytes`/`write_bytes` (the block-layer counters). The syscall counters always work; the block counters are 0 for buffered I/O. The visualizer plots both per-device and per-PID rows, so the gap between them is exactly the page-cache contribution.
+> The two layers answer different questions; see [metric-model.md, "Per-PID I/O counters"](metric-model.md#per-pid-io-counters-who-records-what) for a measured table. In short: `rchar` − `read_bytes` is the page cache's contribution to `read()` I/O; warm `mmap` reads (e.g. model weights already in the page cache) are invisible to all of them; true disk writes ≈ `write_bytes` − `cancelled_write_bytes`. Traces written before 2026-09-25 carried `read_bytes`/`write_bytes` under the names `proc__io_rchar`/`proc__io_wchar`.
 
 ### Permissions for per-PID I/O
 
@@ -1390,7 +1393,7 @@ $ ls -la /proc/<pid>/io
 -r--------  <user>  <user>  /proc/<pid>/io        ← owner-only, 0400
 ```
 
-Symptom when permissions are missing: `disk_metrics.pb` is produced, per-device samples are populated normally, but **every per-PID `read_bytes_per_sec` and `write_bytes_per_sec` reads as `0`** (or the profiler logs `EACCES` reading `/proc/<pid>/io`). Per-PID *CPU* and *memory* are unaffected because `/proc/<pid>/stat` and `/proc/<pid>/status` are world-readable.
+Symptom when permissions are missing: `disk_metrics.pb` is produced, per-device samples are populated normally, but **every per-PID `proc__io_*` rate reads as `0`** (or the profiler logs `EACCES` reading `/proc/<pid>/io`). Per-PID *CPU* and *memory* are unaffected because `/proc/<pid>/stat` and `/proc/<pid>/status` are world-readable.
 
 **Fixes** (any one of):
 

@@ -39,8 +39,13 @@ struct DiskDeviceTick {
 struct DiskProcessTick {
     uint64_t timestamp_ns         = 0;
     uint32_t pid                  = 0;
-    double   rchar_bytes_per_sec  = 0.0;
-    double   wchar_bytes_per_sec  = 0.0;
+    // Rates (bytes/s over the actual interval) of the five
+    // /proc/<pid>/io counters, each named for the counter it carries.
+    double   rchar_bytes_per_sec                 = 0.0;
+    double   wchar_bytes_per_sec                 = 0.0;
+    double   read_bytes_per_sec                  = 0.0;
+    double   write_bytes_per_sec                 = 0.0;
+    double   cancelled_write_bytes_per_sec       = 0.0;
 };
 
 struct DiskSampleBatch {

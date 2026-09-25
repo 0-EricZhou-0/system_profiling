@@ -222,13 +222,16 @@ This gives the instantaneous number of in-flight read and write requests, which 
 **Source:** Key-value pairs.
 
 ```text ln:false
-rchar: 12345678          ← logical reads (includes page cache)
-wchar: 87654321          ← logical writes
-read_bytes: 4096000      ← physical reads (actual storage I/O)
-write_bytes: 2048000     ← physical writes
+rchar: 12345678                ← syscall-layer reads (any fd; includes page cache hits; never mmap)
+wchar: 87654321                ← syscall-layer writes (any fd)
+syscr: 1234
+syscw: 5678
+read_bytes: 4096000            ← fetched from storage (read() misses and mmap faults that miss)
+write_bytes: 2048000           ← file pages dirtied
+cancelled_write_bytes: 0       ← dirtied pages discarded before writeback
 ```
 
-We use `read_bytes` and `write_bytes` (physical I/O) rather than `rchar`/`wchar` (which include page cache hits).
+We emit all five byte counters, each as its own metric (`proc__io_rchar`, `proc__io_wchar`, `proc__io_read_bytes`, `proc__io_write_bytes`, `proc__io_cancelled_write_bytes`, all `.sum.per_second`). What each sees is in [metric-model.md, "Per-PID I/O counters"](metric-model.md#per-pid-io-counters-who-records-what).
 
 > [!WARNING]
 > This file requires **same-UID** ownership or `CAP_SYS_PTRACE`. If access is denied, the profiler logs a warning once per PID and skips per-process disk data rather than crashing.
@@ -421,8 +424,11 @@ The `ProfilerSuite::LoadConfig()` method:
 
 | Metric | Unit | Source |
 | ------ | ---- | ------ |
-| `read_bytes_per_sec` | bytes/s | `delta(read_bytes) / dt` from `/proc/[PID]/io` |
-| `write_bytes_per_sec` | bytes/s | `delta(write_bytes) / dt` |
+| `proc__io_rchar.sum.per_second` | bytes/s | `delta(rchar) / dt` from `/proc/[PID]/io` |
+| `proc__io_wchar.sum.per_second` | bytes/s | `delta(wchar) / dt` |
+| `proc__io_read_bytes.sum.per_second` | bytes/s | `delta(read_bytes) / dt` |
+| `proc__io_write_bytes.sum.per_second` | bytes/s | `delta(write_bytes) / dt` |
+| `proc__io_cancelled_write_bytes.sum.per_second` | bytes/s | `delta(cancelled_write_bytes) / dt` |
 
 ---
 

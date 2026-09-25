@@ -264,18 +264,79 @@ Today's `DiskDeviceSample`:
 | `read_queue_depth` | `disk__read_inflight` | Counter | REQUESTS | — | `DEVICE("nvme0n1")` |
 | `write_queue_depth` | `disk__write_inflight` | Counter | REQUESTS | — | `DEVICE("nvme0n1")` |
 
-Today's `DiskProcessSample`:
+Today's `DiskProcessSample` — the five byte counters of `/proc/<pid>/io`,
+each under the name of the counter it carries:
 
-| Legacy field | Catalog FQN | Type | Unit | Peak | Scope |
+| `/proc/<pid>/io` counter | Catalog FQN | Type | Unit | Peak | Scope |
 | ------------- | ------------ | ---- | ---- | ---- | ----- |
-| `read_bytes_per_sec` | `proc__io_rchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
-| `write_bytes_per_sec` | `proc__io_wchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `rchar` | `proc__io_rchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `wchar` | `proc__io_wchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `read_bytes` | `proc__io_read_bytes.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `write_bytes` | `proc__io_write_bytes.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `cancelled_write_bytes` | `proc__io_cancelled_write_bytes.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
 
-> The per-PID counters are syscall-layer (`rchar` / `wchar`), not
-> block-layer (`read_bytes` / `write_bytes`). Encoding the source in the
-> counter name (`io_rchar`, not `read_bytes`) makes that explicit and
-> matches the existing system-guide warning that the two aren't
-> comparable.
+Each rate is the counter's delta over the actual interval since the PID's
+previous sample.
+
+> [!IMPORTANT]
+> **Changed on `feature/sidecar-mode` (2026-09-25).** Until then the
+> trace had only `proc__io_rchar` / `proc__io_wchar`, and despite those
+> names they carried `read_bytes` / `write_bytes` (they had since the
+> initial commit). They now carry real `rchar` / `wchar`. There is no
+> compatibility alias: in an older trace, read `proc__io_rchar` as
+> `read_bytes` and `proc__io_wchar` as `write_bytes`.
+
+#### Per-PID I/O counters: who records what
+
+The kernel updates the five counters at two different layers:
+
+- **`rchar` / `wchar` — the syscall layer.** Every `read`/`write`-family
+  call (`read`, `pread`, `readv`, `write`, `sendfile`, ...) adds the bytes
+  it transferred, **on any kind of fd**: files, pipes, sockets, ttys. Page
+  cache hits count in full. **`mmap` never counts**: touching pages
+  through a mapping makes no syscall.
+- **`read_bytes` — the storage layer.** Bytes this process caused to be
+  fetched from storage: `read()` misses **and** page faults on an
+  `mmap`'d file that miss the page cache. **Page cache hits count 0**,
+  however the file is read.
+- **`write_bytes` — when pages are dirtied, not at writeback.** A
+  buffered `write()` to a file counts here immediately, even though the
+  data may reach the disk seconds later (or never, see next).
+  Writes to pipes and sockets count 0.
+- **`cancelled_write_bytes` — dirtied, then discarded.** Pages counted
+  in `write_bytes` that were thrown away before writeback because the
+  file was truncated or deleted while they were dirty. Bytes that
+  actually reached storage ≈ `write_bytes` − `cancelled_write_bytes`.
+
+Measured on ext4 (a 64 MiB file; values in MiB; "cold" = page cache
+dropped with `posix_fadvise(POSIX_FADV_DONTNEED)` and checked with
+`mincore`):
+
+| Pattern | `rchar` | `read_bytes` | `wchar` | `write_bytes` | `cancelled_write_bytes` |
+|---|---|---|---|---|---|
+| `write()` + `fsync` | 0 | 0 | 64 | 64 | 0 |
+| `read()`, page cache warm | 64 | 0 | 0 | 0 | 0 |
+| `read()`, page cache cold | 64 | 64 | 0 | 0 | 0 |
+| `mmap` + touch pages, cold | 0 | 64 | 0 | 0 | 0 |
+| `mmap` + touch pages, warm | 0 | 0 | 0 | 0 | 0 |
+| `write()` to a pipe | — | 0 | 8 | 0 | 0 |
+| `write()` 32 MiB, delete before flush | 0 | 0 | 32 | 32 | 32 |
+
+(The pipe row wrote 8 MiB, and the delete row 32 MiB.)
+
+Consequences:
+
+- The gap between `rchar` and `read_bytes` is the page cache's
+  contribution (for `read()`-style I/O).
+- **A model loaded by `mmap` from a warm page cache is invisible to all
+  four read/write counters.** That is the usual case for torch /
+  safetensors weight loading (vLLM included) on a second run: neither
+  layer sees it. A cold `mmap` load shows up in `read_bytes` only.
+- `wchar` includes pipe and socket traffic (e.g. a server's responses,
+  or a process's stdout), so it is not a file-write rate.
+- Per-device `disk__*_bytes` counts what the block device did, for every
+  process; the per-PID storage counters are the closest per-process
+  equivalent, attributed to whoever dirtied or faulted the pages.
 
 ### 2.5 — Generic post-processing pipeline
 

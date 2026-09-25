@@ -189,11 +189,19 @@ void DiskProfiler::Start() {
                 // An unreadable tick keeps the baseline, so this spans it.
                 const double dtSec = (double)(tsNs - it->second.tickTsNs) / 1e9;
 
+                // Every counter is monotonic for the life of the process.
+                auto rate = [&](uint64_t internal::PIDIOSnapshot::* c) {
+                    const uint64_t cur = curIO.*c, was = prev.*c;
+                    return cur > was ? (double)(cur - was) / dtSec : 0.0;
+                };
                 internal::DiskProcessTick t;
-                t.timestamp_ns        = tsNs;
-                t.pid                 = pid;
-                t.rchar_bytes_per_sec = (double)(curIO.readBytes - prev.readBytes) / dtSec;
-                t.wchar_bytes_per_sec = (double)(curIO.writeBytes - prev.writeBytes) / dtSec;
+                t.timestamp_ns                  = tsNs;
+                t.pid                           = pid;
+                t.rchar_bytes_per_sec           = rate(&internal::PIDIOSnapshot::rchar);
+                t.wchar_bytes_per_sec           = rate(&internal::PIDIOSnapshot::wchar);
+                t.read_bytes_per_sec            = rate(&internal::PIDIOSnapshot::readBytes);
+                t.write_bytes_per_sec           = rate(&internal::PIDIOSnapshot::writeBytes);
+                t.cancelled_write_bytes_per_sec = rate(&internal::PIDIOSnapshot::cancelledWriteBytes);
                 it->second = {curIO, tsNs};
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);

@@ -68,14 +68,22 @@ PIDIOSnapshot ReadPIDIO(uint32_t pid) {
         return s;
     }
 
-    // Format: key: value (one per line)
-    // We want: read_bytes and write_bytes (physical I/O)
+    // Format: "key: value", one per line.
+    struct Field { const char* key; size_t len; uint64_t PIDIOSnapshot::* dst; };
+    static constexpr Field kFields[] = {
+        {"rchar: ",                 7, &PIDIOSnapshot::rchar},
+        {"wchar: ",                 7, &PIDIOSnapshot::wchar},
+        {"read_bytes: ",           12, &PIDIOSnapshot::readBytes},
+        {"write_bytes: ",          13, &PIDIOSnapshot::writeBytes},
+        {"cancelled_write_bytes: ", 23, &PIDIOSnapshot::cancelledWriteBytes},
+    };
     std::string line;
     while (std::getline(f, line)) {
-        if (line.compare(0, 12, "read_bytes: ") == 0) {
-            std::istringstream(line.substr(12)) >> s.readBytes;
-        } else if (line.compare(0, 13, "write_bytes: ") == 0) {
-            std::istringstream(line.substr(13)) >> s.writeBytes;
+        for (const auto& k : kFields) {
+            if (line.compare(0, k.len, k.key) == 0) {
+                std::istringstream(line.substr(k.len)) >> s.*k.dst;
+                break;
+            }
         }
     }
     return s;
