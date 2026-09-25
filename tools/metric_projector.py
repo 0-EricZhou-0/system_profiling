@@ -65,6 +65,8 @@ class TrackedProcess:
     pid: int = 0
     alias: str = ""
     removed: bool = False
+    discovered: bool = False   # found by descendant tracking (not a listed root)
+    parent_pid: int = 0        # the tracked parent it was found under
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +172,8 @@ class TraceProjector:
         for e in entries:
             tp = self.tracked_processes.get(e.pid)
             if tp is None:
-                tp = TrackedProcess(pid=e.pid, alias=e.alias, removed=e.removed)
+                tp = TrackedProcess(pid=e.pid, alias=e.alias, removed=e.removed,
+                                    discovered=e.discovered, parent_pid=e.parent_pid)
                 self.tracked_processes[e.pid] = tp
             else:
                 # Alias may be set on first appearance only; later

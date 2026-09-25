@@ -305,9 +305,12 @@ def _series_label(series: metric_layout.ResolvedSeries,
         return base
     if series.scope == mc_pb.SCOPE_PROCESS:
         tp = projector.tracked_processes.get(int(key))
+        # Discovered processes name the tracked parent they were found
+        # under, so they read apart from the listed roots.
+        found = f", child of {tp.parent_pid}" if tp and tp.discovered else ""
         if tp and tp.alias:
-            return f"{base}  [{tp.alias} (PID {key})]"
-        return f"{base}  [PID {key}]"
+            return f"{base}  [{tp.alias} (PID {key}{found})]"
+        return f"{base}  [PID {key}{found}]"
     if series.scope == mc_pb.SCOPE_DEVICE:
         return f"{base}  [{key}]"
     if series.scope == mc_pb.SCOPE_GPU:
@@ -359,6 +362,56 @@ def _trapz_cumulative(ts_ns: np.ndarray, vals: np.ndarray) -> np.ndarray:
 
 _COLOR_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
+# A per-PID panel can hold several metrics of one process (the I/O
+# panels: rchar and wchar; read_bytes, write_bytes and cancelled). The
+# colour stays the PID's, the same in every panel; the line style tells
+# its metrics apart: the n-th distinct metric of the panel gets the n-th
+# style. Panels with a single metric per process keep solid lines.
+_METRIC_LINESTYLES = ["-", "--", ":", "-."]
+
+
+def _series_linestyles(series_list: list[metric_layout.ResolvedSeries]) -> dict:
+    fqns = list(dict.fromkeys(s.fqn for s in series_list if s.scope == mc_pb.SCOPE_PROCESS))
+    styles = {}
+    for s in series_list:
+        styles[(s.fqn, s.scope_key)] = (
+            _METRIC_LINESTYLES[fqns.index(s.fqn) % len(_METRIC_LINESTYLES)]
+            if len(fqns) > 1 and s.scope == mc_pb.SCOPE_PROCESS else "-")
+    return styles
+
+
+def _process_label(projector: TraceProjector, key) -> str:
+    tp = projector.tracked_processes.get(int(key))
+    found = f", child of {tp.parent_pid}" if tp and tp.discovered else ""
+    name = f"{tp.alias} " if tp and tp.alias else ""
+    return f"{name}(PID {key}{found})"
+
+
+def _panel_legend(ax, series_list, projector, label_bases, linestyles, loc) -> None:
+    """With several metrics per process (line styles in use), a legend of
+    processes x metrics grows as their product; list each process's
+    colour once and each metric's line style once instead."""
+    styled = [s for s in series_list if linestyles[(s.fqn, s.scope_key)] != "-"]
+    if not styled:
+        ax.legend(loc=loc, fontsize=7, framealpha=0.85)
+        return
+    from matplotlib.lines import Line2D
+    colors, styles = {}, {}
+    for line in ax.get_lines():
+        key = getattr(line, "_series_key", None)
+        if key is None:
+            continue
+        fqn, scope_key = key
+        colors.setdefault(scope_key, line.get_color())
+        styles.setdefault(fqn, line.get_linestyle())
+    base = {s.fqn: label_bases[(s.fqn, s.scope_key)] for s in series_list}
+    handles = [Line2D([], [], color=c, lw=1.5, label=_process_label(projector, k))
+               for k, c in colors.items()]
+    handles += [Line2D([], [], color="black", lw=1.0, linestyle=ls, label=base[f])
+                for f, ls in styles.items()]
+    ax.legend(handles=handles, loc=loc, fontsize=7, framealpha=0.85,
+              ncol=2 if len(handles) > 8 else 1)
+
 
 def _panel_title(panel, series_list: list[metric_layout.ResolvedSeries]) -> str:
     """Use the pbtxt-supplied title verbatim if set; otherwise derive
@@ -397,6 +450,7 @@ def _render_metric_panel(
     ax.set_ylabel(ylabel)
 
     label_bases = metric_layout.disambiguate_short_labels(series_list)
+    linestyles = _series_linestyles(series_list)
 
     color_idx = 0
     for series in series_list:
@@ -421,10 +475,12 @@ def _render_metric_panel(
         ts_ns, vals = _decimate_to_hz(ts_ns, vals, sample_freq_hz, display_hz)
 
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
-        ax.plot(time_s, scale_fn(vals),
-                color=color, linewidth=0.9,
-                label=_series_label(series, projector,
-                                    base=label_bases[(series.fqn, series.scope_key)]))
+        line, = ax.plot(time_s, scale_fn(vals),
+                        color=color, linewidth=0.9,
+                        linestyle=linestyles[(series.fqn, series.scope_key)],
+                        label=_series_label(series, projector,
+                                            base=label_bases[(series.fqn, series.scope_key)]))
+        line._series_key = (series.fqn, series.scope_key)
 
     peak_scaled = None
     if peak_hint is not None and peak_hint > 0:
@@ -458,7 +514,7 @@ def _render_metric_panel(
         fmt.set_scientific(False)
         axis.set_major_formatter(fmt)
 
-    ax.legend(loc="upper right", fontsize=7, framealpha=0.85)
+    _panel_legend(ax, series_list, projector, label_bases, linestyles, "upper right")
     ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
@@ -506,6 +562,7 @@ def _render_integrated_panel(
     ax.set_ylabel(ylabel)
 
     label_bases = metric_layout.disambiguate_short_labels(series_list)
+    linestyles = _series_linestyles(series_list)
 
     color_idx = 0
     for series, ts_ns, cum in series_cumulatives:
@@ -521,14 +578,32 @@ def _render_integrated_panel(
         ts_plot, cum_plot = _decimate_to_hz(ts_ns, cum,
                                             sample_freq_hz, display_hz)
         time_s = (ts_plot.astype(np.int64) - t0_ns) / 1e9
-        ax.plot(time_s, scale_fn(cum_plot),
-                color=color, linewidth=0.9,
-                label=_series_label(series, projector,
-                                    base=label_bases[(series.fqn, series.scope_key)]))
+        line, = ax.plot(time_s, scale_fn(cum_plot),
+                        color=color, linewidth=0.9,
+                        linestyle=linestyles[(series.fqn, series.scope_key)],
+                        label=_series_label(series, projector,
+                                            base=label_bases[(series.fqn, series.scope_key)]))
+        line._series_key = (series.fqn, series.scope_key)
 
     # Annotate each series' run total at the right edge so the
     # cumulative value is readable without squinting at the axis.
-    if series_cumulatives:
+    unit_sfx = f" {ylabel}" if ylabel else ""
+    if series_cumulatives and any(ls != "-" for ls in linestyles.values()):
+        # Several metrics per process: one line per process, listing
+        # its non-zero totals; processes with none are left out.
+        per_proc: dict = {}
+        for series, _ts, cum in series_cumulatives:
+            v = float(cum[-1]) if cum.size else 0.0
+            if v > 0:
+                per_proc.setdefault(series.scope_key, []).append(
+                    f"{label_bases[(series.fqn, series.scope_key)]} "
+                    f"{_fmt_plain(scale_fn(v))}{unit_sfx}")
+        total_label_lines = [f"{_process_label(projector, k)}: " + ", ".join(v)
+                             for k, v in per_proc.items()]
+        n_zero = len({s.scope_key for s, _t, _c in series_cumulatives}) - len(per_proc)
+        if n_zero:
+            total_label_lines.append(f"{n_zero} more process(es): 0")
+    elif series_cumulatives:
         total_label_lines = []
         for series, _ts, cum in series_cumulatives:
             if cum.size == 0:
@@ -536,8 +611,9 @@ def _render_integrated_panel(
             total_label_lines.append(
                 f"{_series_label(series, projector, base=label_bases[(series.fqn, series.scope_key)])} = "
                 f"{_fmt_plain(scale_fn(float(cum[-1])))}"
-                f"{(' ' + ylabel) if ylabel else ''}"
+                f"{unit_sfx}"
             )
+    if series_cumulatives:
         if total_label_lines:
             ax.text(0.99, 0.04, "\n".join(total_label_lines),
                     transform=ax.transAxes, ha="right", va="bottom",
@@ -551,7 +627,7 @@ def _render_integrated_panel(
         fmt = ticker.ScalarFormatter(useOffset=False, useMathText=False)
         fmt.set_scientific(False)
         axis.set_major_formatter(fmt)
-    ax.legend(loc="upper left", fontsize=7, framealpha=0.85)
+    _panel_legend(ax, series_list, projector, label_bases, linestyles, "upper left")
     ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
