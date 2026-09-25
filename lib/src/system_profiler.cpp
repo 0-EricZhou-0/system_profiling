@@ -345,7 +345,7 @@ void SystemProfiler::Start() {
                 if (!curCpuNs) { impl.NoteExited(pid); continue; }
                 // Test-only: the process dies right after this read, and
                 // the reading stands for its number's next owner.
-                if (internal::PassReadHook(pid)) *curCpuNs += 1000'000'000'000ull;
+                if (internal::PassReadHook(pid, testing::ReadProbe::System)) *curCpuNs += 1000'000'000'000ull;
                 auto it = impl.prevPID.find(pid);
                 const bool haveBase = it != impl.prevPID.end() && it->second.serial == entry.serial;
                 readings.push_back({&entry, *curCpuNs,

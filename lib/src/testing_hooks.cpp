@@ -5,6 +5,9 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <poll.h>
 #include <signal.h>
@@ -22,7 +25,25 @@ std::condition_variable g_cv;
 bool                    g_held     = false;
 bool                    g_released = false;
 
-std::atomic<uint32_t>   g_killAfterRead{0};
+// Kill-after-read, one per probe: the target PID (0 = disarmed) and how
+// many of its reads to let through first. Each is read only by that
+// probe's sampling thread.
+struct ReadHook {
+    std::atomic<uint32_t> pid{0};
+    std::atomic<uint32_t> skip{0};
+};
+ReadHook g_readHook[2];
+
+ReadHook& HookFor(testing::ReadProbe probe) {
+    return g_readHook[probe == testing::ReadProbe::Disk ? 1 : 0];
+}
+
+void Arm(testing::ReadProbe probe, uint32_t pid, uint32_t skip) {
+    auto& h = HookFor(probe);
+    h.pid.store(0);
+    h.skip.store(skip);
+    h.pid.store(pid);
+}
 
 } // namespace
 
@@ -47,7 +68,22 @@ void ReleaseFlushGate() {
     g_cv.notify_all();
 }
 
-void KillAfterNextRead(uint32_t pid) { g_killAfterRead.store(pid); }
+void KillAfterNextRead(uint32_t pid, ReadProbe probe) { Arm(probe, pid, 0); }
+
+bool ArmKillAfterReadFromEnv() {
+    const char* env = std::getenv("CUPTI_PROFILER_TEST_KILL_AFTER_READ");
+    if (!env || !*env) return false;
+    char probe[16] = {};
+    unsigned pid = 0, n = 0;
+    if (std::sscanf(env, "%15[a-z]:%u:%u", probe, &pid, &n) != 3 || pid == 0 || n == 0 ||
+        (std::strcmp(probe, "system") != 0 && std::strcmp(probe, "disk") != 0)) {
+        std::fprintf(stderr, "[testing] ignoring malformed CUPTI_PROFILER_TEST_KILL_AFTER_READ=%s\n", env);
+        return false;
+    }
+    Arm(std::strcmp(probe, "disk") == 0 ? ReadProbe::Disk : ReadProbe::System, pid, n - 1);
+    std::fprintf(stderr, "[testing] kill-after-read armed: %s probe, pid %u, read %u\n", probe, pid, n);
+    return true;
+}
 
 } // namespace testing
 
@@ -62,10 +98,12 @@ void PassFlushGate() {
     g_cv.wait(lk, [] { return g_released; });
 }
 
-bool PassReadHook(uint32_t pid) {
-    if (g_killAfterRead.load(std::memory_order_relaxed) != pid || pid == 0) return false;
+bool PassReadHook(uint32_t pid, testing::ReadProbe probe) {
+    auto& h = HookFor(probe);
+    if (h.pid.load(std::memory_order_relaxed) != pid || pid == 0) return false;
+    if (h.skip.load() > 0) { h.skip.fetch_sub(1); return false; }
     uint32_t expected = pid;
-    if (!g_killAfterRead.compare_exchange_strong(expected, 0)) return false;
+    if (!h.pid.compare_exchange_strong(expected, 0)) return false;
     int fd = PidfdOpen(pid);
     ::kill(static_cast<pid_t>(pid), SIGKILL);
     if (fd >= 0) {

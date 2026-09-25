@@ -3,6 +3,7 @@
 #include "disk_readers.h"
 #include "disk_flush_thread.h"
 #include "discovery_stats_proto.h"
+#include "testing_hooks.h"
 
 #include "disk_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -176,7 +177,16 @@ void DiskProfiler::Start() {
             for (const auto& entry : snapshot) {
                 snapshotPids.insert(entry.pid);
                 if (entry.pending_removal) continue;
-                readings.emplace_back(&entry, internal::ReadPIDIO(entry.pid));
+                auto io = internal::ReadPIDIO(entry.pid);
+                // Test-only: the process dies right after this read, and
+                // the reading stands for its number's next owner.
+                if (internal::PassReadHook(entry.pid, testing::ReadProbe::Disk)) {
+                    constexpr uint64_t kForeign = 1000'000'000'000ull;
+                    io.rchar += kForeign; io.wchar += kForeign;
+                    io.readBytes += kForeign; io.writeBytes += kForeign;
+                    io.cancelledWriteBytes += kForeign;
+                }
+                readings.emplace_back(&entry, io);
             }
             const auto goneList = this->PollTracked();
             const std::unordered_set<uint64_t> gone(goneList.begin(), goneList.end());

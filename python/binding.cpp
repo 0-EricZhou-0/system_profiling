@@ -337,7 +337,14 @@ PYBIND11_MODULE(_native, m) {
           [](double timeout_s) { return testing::WaitFlushHeld(static_cast<unsigned>(timeout_s * 1000)); },
           py::arg("timeout_s"), py::call_guard<py::gil_scoped_release>());
     m.def("_testing_release_flush_gate", &testing::ReleaseFlushGate);
-    m.def("_testing_kill_after_next_read", &testing::KillAfterNextRead, py::arg("pid"));
+    m.def("_testing_kill_after_next_read",
+          [](uint32_t pid, const std::string& probe) {
+              if (probe != "system" && probe != "disk")
+                  throw py::value_error("probe must be 'system' or 'disk'");
+              testing::KillAfterNextRead(pid, probe == "disk" ? testing::ReadProbe::Disk
+                                                              : testing::ReadProbe::System);
+          },
+          py::arg("pid"), py::arg("probe") = "system");
     m.def("child_subreaper_enabled", &ChildSubreaperEnabled,
         "True once enable_child_subreaper() has succeeded in this process.");
 

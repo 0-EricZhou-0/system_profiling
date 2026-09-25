@@ -64,6 +64,7 @@
 
 #include <cupti_profiler/profiler_error.h>
 #include <cupti_profiler/system_profiler.h>
+#include <cupti_profiler/testing.h>
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/tracked_process.h>
 
@@ -199,6 +200,9 @@ int main(int argc, char** argv) {
               << " parent=" << ::getppid() << "\n";
 
     ::signal(SIGPIPE, SIG_IGN);
+
+    // Test-only (CUPTI_PROFILER_TEST_KILL_AFTER_READ); unset does nothing.
+    cupti_profiler::testing::ArmKillAfterReadFromEnv();
 
     // SIGTERM/SIGINT -> graceful stop. Blocked before any thread exists,
     // so every probe thread inherits the mask and the signal is only
