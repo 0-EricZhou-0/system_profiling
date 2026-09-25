@@ -454,6 +454,13 @@ int main(int argc, char** argv) {
             SendStatus(ProfilerError::Ok);
             continue;
         }
+        if (hdr.type == MSG_HOST_REAPER) {
+            std::cerr << "[sidecar] MSG_HOST_REAPER: parent " << ::getppid()
+                      << " reaps the adopted orphans reported to it\n";
+            if (dsk) dsk->SetHostReaper(static_cast<uint32_t>(::getppid()));
+            SendStatus(ProfilerError::Ok);
+            continue;
+        }
         if (hdr.type == MSG_REMOVE_PID) {
             if (payload.size() != sizeof(uint32_t)) {
                 SendStatus(ProfilerError::SidecarBadHandshake);

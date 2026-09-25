@@ -90,6 +90,10 @@ public:
     /// safety guarantee as SendAddPid.
     ProfilerError SendRemovePid(uint32_t pid);
 
+    /// Tell the sidecar that this process reaps the adopted orphans it
+    /// reports (MSG_HOST_REAPER). Same thread-safety as SendAddPid.
+    ProfilerError SendHostReaper();
+
     /// Reap the sidecar if it has already exited and say how it
     /// ended ("exited with status 0 ...", "killed by signal 9 ...",
     /// or "still running"). For logging a failed exchange.

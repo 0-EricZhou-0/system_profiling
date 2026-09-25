@@ -193,6 +193,8 @@ void ProcessTrackingProbe::SetIoBeforeTracking(uint32_t pid, const IoCounters& i
     }
 }
 
+void ProcessTrackingProbe::NoteAdoptedExit(uint32_t, uint64_t) {}
+
 void ProcessTrackingProbe::SetInitialProcesses(std::vector<ProcessEntry> entries) {
     std::vector<std::pair<ProcessEntry, int>> made;
     made.reserve(entries.size());

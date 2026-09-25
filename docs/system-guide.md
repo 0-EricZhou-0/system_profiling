@@ -1158,12 +1158,52 @@ and discovered processes alike:
   the parent's reading of that tick is **not used** — it keeps its
   baseline, and its next sample spans both intervals and certainly
   includes the reap. That parent has one sample fewer.
+- **Chains.** The kernel's reap (`wait_task_zombie` in `kernel/exit.c`;
+  checked in the source of the compute nodes' kernel, Ubuntu
+  5.15.0-134) folds the reaped process's own counters **and everything
+  already folded into it** — the children it had reaped — into the
+  reaper. So if a tracked P reaps its tracked child C and then exits and
+  is reaped by a tracked G, all before the probe reads P again (one
+  sampling interval), G's reading holds P's and C's I/O. The probe
+  follows a reaped child up through watched parents that were reaped
+  too, to the first live tracked ancestor, and subtracts every child in
+  that chain there; the `IoReapAdjustment` lists them all, each with
+  `reaped_by` (C: P; P: G). If P is a zombie that G has not reaped yet, C
+  waits for P's reap.
+- **Did P reap C, or exit first?** Had P exited before reaping C, C was
+  re-parented (to a subreaper or init) and its I/O went there, not into
+  P. No reading after the fact tells the two apart, so it is decided with
+  the launcher's orphan reaper (`adopt_orphans()`):
+  - C was reaped by that reaper (descendant tracking reports every PID it
+    hands to it, before the reap): **not subtracted**, not listed — its
+    I/O is in the launcher;
+  - the reaper runs (`adopt_orphans()` called and descendant tracking on)
+    and C's tree hangs under the launcher (its root's parent is the
+    launcher): an orphan of P would have been adopted and reaped by the
+    launcher, so P reaped C — **subtracted**;
+  - otherwise: C is listed with **`ambiguous = true` and not subtracted**,
+    and the record has `ambiguous = true`. If P did reap C, C's I/O is
+    then counted twice (in C's samples and in G's remainder); the record
+    says so and holds everything needed to decide later. Nothing is
+    guessed.
+
+  The launcher tells the probe it reaps once it is a subreaper: in
+  process under LEGACY, by one `MSG_HOST_REAPER` message to the sidecar
+  under SIDECAR (at `Start()`, or at the first `add_tracked_process()`
+  after `adopt_orphans()`).
 - A child is not subtracted if it was never read (its I/O was never
   counted separately, so folding into its parent is right), or if its
-  parent is not tracked or stops being tracked first (then no parent
-  sample can include the reap: e.g. a parent that reaps a child and
-  exits within one sampling interval; if the grandparent is tracked, that
-  child's I/O then lands in the grandparent's remainder).
+  parent is not tracked or stops being tracked while alive (then no
+  tracked reading includes the reap).
+
+Limits: a parent that ignores `SIGCHLD` (`SIG_IGN` or `SA_NOCLDWAIT`) has
+its children auto-reaped, and the kernel then folds **nothing** into it
+(`exit_notify` releases the child without `wait_task_zombie`); the probe
+cannot see that without reading `/proc/<pid>/status` at each reap, and
+would subtract a child that was never added (the sample is clamped at 0;
+the negative remainder shows it). The reaper rule also assumes no
+process between the launcher and the reaping tracked ancestor is itself
+a subreaper.
 
 So per-PID I/O is **the process's own I/O, excluding tracked children it
 reaped**, and differs from the raw `/proc/<pid>/io` delta exactly by the
@@ -1177,7 +1217,10 @@ reads each process's `/proc/<pid>/io` and learns of exits from its
 pidfds; the watch adds two `/proc/<pid>/stat` reads per sample tick for
 each watched child, from its exit until its reap (one tick for a parent
 blocked in `wait()`), and one list of watched children to check per
-tick. It shares nothing with the system probe's CPU-tail bookkeeping:
+tick. Resolving chains adds no reads: it walks the watched children's
+recorded parents, only on ticks when something is watched, and consults
+the reaper's reported PIDs (pruned once nothing tracks or watches the
+PID). It shares nothing with the system probe's CPU-tail bookkeeping:
 each probe runs its own.
 
 ### I/O head
@@ -1367,8 +1410,9 @@ message DiskMetricsTrace {
     repeated IoReapAdjustment io_reap_adjustments = 9;
 }
 message IoReapAdjustment { uint64 timestamp_ns; uint32 parent_pid;   // the parent's sample
-                           repeated Child children;                  // { pid, IoCounters last_seen }
-                           IoCounterDeltas remainder; }              // raw delta − Σ last_seen
+                           repeated Child children;   // { pid, IoCounters last_seen, reaped_by, ambiguous }
+                           IoCounterDeltas remainder; // raw delta − Σ last_seen of the non-ambiguous
+                           bool ambiguous; }          // some child is: listed, not subtracted
 ```
 
 ### Shared sample shape

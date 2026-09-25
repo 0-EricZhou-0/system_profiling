@@ -44,6 +44,9 @@ enum MsgType : uint32_t {
                               // payload is exactly the original format,
                               // and the root inherits the config.
     MSG_REMOVE_PID  = 0x06,   // uint32 pid
+    MSG_HOST_REAPER = 0x07,   // no payload — the parent is a child subreaper
+                              // (adopt_orphans()) and reaps the orphans
+                              // reported on kSidecarNoticeFd. Sent once.
 
     // Sidecar → parent
     MSG_STATUS      = 0x80,   // uint32 ProfilerError code; sent after each

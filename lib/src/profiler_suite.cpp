@@ -7,6 +7,7 @@
 #include "session_metadata.pb.h"
 #include "session_metadata_writer.h"
 #include "sidecar_process.h"
+#include <cupti_profiler/child_subreaper.h>
 #include "situation_report.h"
 
 #include <google/protobuf/text_format.h>
@@ -87,6 +88,15 @@ public:
     void AddTrackedProcess(uint32_t pid, const std::string& alias,
                            std::optional<bool> trackDescendants);
     void RecordRootSituation(uint32_t pid, std::optional<bool> trackDescendants);
+
+    // Once this process is a child subreaper (adopt_orphans()), tell the
+    // disk probe — in-process, or in the sidecar — so it can resolve
+    // reap chains (DiskProfiler::SetHostReaper). adopt_orphans() comes
+    // before the workload is spawned, so checking at Start() and at
+    // every AddTrackedProcess() catches it before any root's tree runs.
+    bool hostReaperSent = false;
+    bool started        = false;   // the sidecar takes messages only after MSG_START
+    void SyncHostReaper();
 
     // Walk a parsed ProfilerSuiteConfig and populate this Impl. Shared
     // between the .pbtxt path (LoadConfig) and the serialized-bytes path
@@ -529,6 +539,9 @@ ProfilerError ProfilerSuite::Start() {
         }
     }
 
+    m_impl->started = true;
+    m_impl->SyncHostReaper();
+
     // Emit the manifest now so live tailers (e.g. visualize_interactive.py
     // --live) have a starting point. Stop() re-emits the identical content
     // atomically.
@@ -602,8 +615,21 @@ void ProfilerSuite::AddTrackedProcess(uint32_t pid, std::string alias, bool trac
     m_impl->AddTrackedProcess(pid, alias, trackDescendants);
 }
 
+void ProfilerSuite::Impl::SyncHostReaper() {
+    if (hostReaperSent || !started || !ChildSubreaperEnabled()) return;
+    if (DiskLegacy()) diskProfiler.SetHostReaper(static_cast<uint32_t>(::getpid()));
+    if (sidecar && diskEnabled && !DiskLegacy()) {
+        if (auto e = sidecar->SendHostReaper(); e != ProfilerError::Ok) {
+            std::cerr << "[ProfilerSuite] sidecar SendHostReaper: " << ToString(e) << "\n";
+            return;
+        }
+    }
+    hostReaperSent = true;
+}
+
 void ProfilerSuite::Impl::AddTrackedProcess(uint32_t pid, const std::string& alias,
                                             std::optional<bool> trackDescendants) {
+    SyncHostReaper();
     // Fan out to every probe that supports per-PID sampling. Legacy
     // probes handle it in-process; Sidecar probes' add goes through
     // the sidecar over the pipe (single message serving both probes

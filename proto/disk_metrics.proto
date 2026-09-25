@@ -49,9 +49,30 @@ message IoCounterDeltas {
 // of its last reading are subtracted from the parent's delta, and one
 // IoReapAdjustment records it.
 //
+// Chains. The kernel's reap folds the reaped process's own counters AND
+// everything already folded into it (its reaped children, their reaped
+// children, ...) into the reaper (kernel/exit.c, wait_task_zombie). So
+// when a tracked process P reaps a tracked child C and then exits and is
+// reaped by a tracked G before the probe could read P again, G's sample
+// holds P's and C's I/O: both are subtracted there, and both are listed
+// here, C with reaped_by = P.
+//
+// Whether P reaped C cannot always be known: if P exited first, C was
+// re-parented (to a subreaper or init) and its I/O went there, not into
+// P. It is decided like this:
+//   * C was reaped by this library's orphan reaper (adopt_orphans()):
+//     not in P, not subtracted, not listed;
+//   * the orphan reaper runs (adopt_orphans() in the launcher, and
+//     descendant tracking on) and C descends from a root the launcher
+//     started: an orphan of P would have been adopted and reaped by the
+//     launcher, so P reaped C — subtracted;
+//   * otherwise: listed with ambiguous = true and NOT subtracted (its
+//     I/O is then counted twice if P did reap it: in C's samples, and in
+//     G's remainder), and the record has ambiguous = true.
+//
 // The raw /proc value stays reconstructable: the parent's raw delta over
 // that sample's interval is
-//     children[*].last_seen (summed)  +  remainder
+//     children[*].last_seen (summed over the non-ambiguous)  +  remainder
 // and `remainder` is exactly what the parent's sample carries (its rates
 // times the interval). It mixes the parent's own I/O in that interval
 // with the children's I/O after their last reading, which no reading can
@@ -67,18 +88,26 @@ message IoCounterDeltas {
 //   * the parent is the one the child had as a zombie (its ppid), or, if
 //     it was reaped before the probe could look, the one it was
 //     registered with; a parent that is not tracked gets no adjustment;
-//   * a child whose reap no accepted parent reading includes (the parent
-//     reaps it and exits within one sampling interval) is not subtracted
-//     there; if the grandparent is tracked, that child's I/O is then in
-//     the parent's last_seen-to-exit growth, i.e. the grandparent's
-//     remainder.
+//   * a parent that ignores SIGCHLD has its children auto-reaped: the
+//     kernel folds nothing into it, and subtracting would be wrong. Not
+//     detected (it would need a per-reap read of /proc/<pid>/status);
+//   * the reaper rule assumes no process between the launcher and the
+//     reaping tracked ancestor is itself a subreaper.
 message IoReapAdjustment {
     uint64 timestamp_ns            = 1;  // the parent sample it applies to
     uint32 parent_pid              = 2;
     message Child {
         uint32     pid             = 1;
-        IoCounters last_seen       = 2;  // subtracted from the parent
+        IoCounters last_seen       = 2;  // subtracted from the parent, unless ambiguous
+        // The process that reaped it: parent_pid, or (a chain) another
+        // child listed in this record.
+        uint32     reaped_by       = 3;
+        // reaped_by exited in the same interval, and whether it reaped
+        // this child before exiting is unknown (see above): not subtracted.
+        bool       ambiguous       = 4;
     }
     repeated Child  children       = 3;
     IoCounterDeltas remainder      = 4;
+    bool            ambiguous      = 5;  // some child is ambiguous
 }
+

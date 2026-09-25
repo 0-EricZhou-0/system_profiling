@@ -66,10 +66,14 @@ public:
     // serial (per-PID baselines only) is the tracked entry's
     // ProcessEntry::serial: a new process that got an old one's PID
     // never inherits its baseline.
+    // startNs / rootParent (per-PID baselines only) are set at the
+    // first reading: see ReapWatch.
     template <typename Snapshot> struct Baseline {
         Snapshot s;
         uint64_t tickTsNs = 0;
         uint64_t serial = 0;
+        uint64_t startNs = 0;
+        uint32_t rootParent = 0;
     };
     std::unordered_map<std::string, Baseline<internal::DiskStatSnapshot>> prevDisk;
     std::unordered_map<uint32_t, Baseline<internal::PIDIOSnapshot>> prevPIDIO;
@@ -85,17 +89,49 @@ public:
     //     to be reaped already.
     //   reapNoted: serials already handed to reapWatch (or found to need
     //     no watch), while they stay in the snapshot.
+    // A watched process whose parent is itself watched (exited, or left
+    // the tracked set) is part of a chain: its I/O reaches a tracked
+    // ancestor only through that parent's reap, and only if that parent
+    // reaped it (Resolve).
     struct ReapWatch {
         uint32_t parent     = 0;
         uint64_t startTicks = 0;   // /proc/<pid>/stat field 22, once seen
         internal::PIDIOSnapshot lastSeen;
         bool     reaped     = false;
+        uint64_t startNs    = 0;   // ProcessEntry::start_time_ns: identity for `adopted`
+        uint32_t rootParent = 0;   // parent of the listed root it descends from; 0 = unknown
     };
     std::unordered_map<uint32_t, ReapWatch> reapWatch;
     std::unordered_set<uint64_t>            reapNoted;
 
+    // The host's orphan reaper (adopt_orphans()): the host's PID once it
+    // is known to be a subreaper that reaps, and the discovered processes
+    // it was asked to reap (pid -> start time on the trace clock), which
+    // descendant tracking reports before the reap. `adopted` is the
+    // sample thread's copy, pruned once nothing can look a PID up.
+    std::atomic<uint32_t> hostReaper{0};
+    std::mutex adoptedMutex;
+    std::vector<std::pair<uint32_t, uint64_t>> adoptedIncoming;
+    std::unordered_map<uint32_t, uint64_t> adopted;
+
     bool Reaped(uint32_t pid, ReapWatch& w);
     void NoteGone(uint32_t pid, uint64_t serial, uint32_t parent);
+    bool Adopted(uint32_t pid, uint64_t startNs) const;
+
+    // Where a watched process's I/O ends up. At: in `anchor`'s next
+    // reading (unsure: the anchor's reading this tick may or may not
+    // include it; ambiguous: listed there but not subtracted). Wait: not
+    // there yet (not reaped, or reaped by a watched process that is not
+    // reaped yet). Drop: in no tracked process's reading.
+    struct Resolution {
+        enum Kind { Wait, Drop, At } kind = Drop;
+        uint32_t anchor    = 0;
+        bool     unsure    = false;
+        bool     ambiguous = false;
+    };
+    Resolution Resolve(uint32_t pid, const std::unordered_set<uint32_t>& liveTracked,
+                       const std::unordered_set<uint32_t>& reapedAfter,
+                       bool reaperOn, uint32_t host) const;
 
     // Per-flush write accounting
     internal::DiskPendingFlushStats flushStatsPending;
@@ -121,7 +157,73 @@ void DiskProfiler::Impl::NoteGone(uint32_t pid, uint64_t serial, uint32_t parent
     if (!reapNoted.insert(serial).second) return;
     auto b = prevPIDIO.find(pid);
     if (b == prevPIDIO.end() || b->second.serial != serial) return;
-    reapWatch[pid] = {parent, 0, b->second.s, false};
+    reapWatch[pid] = {parent, 0, b->second.s, false, b->second.startNs, b->second.rootParent};
+}
+
+// Did the host's orphan reaper reap this process? Matched by PID and
+// start time (both conversions of the same kernel start tick, so within
+// microseconds of each other; a later owner of the number started at
+// least one 10 ms tick later).
+bool DiskProfiler::Impl::Adopted(uint32_t pid, uint64_t startNs) const {
+    auto it = adopted.find(pid);
+    if (it == adopted.end()) return false;
+    if (startNs == 0 || it->second == 0) return true;
+    const uint64_t d = startNs > it->second ? startNs - it->second : it->second - startNs;
+    return d < 5'000'000;
+}
+
+// Follow the watched process up through watched parents to the first
+// live tracked one. Each step up from a reaped process C to a watched
+// parent P asks whether P reaped C — only then is C's I/O inside P's,
+// and so inside whatever reaps P (kernel/exit.c, wait_task_zombie: the
+// reaper gets P's own counters plus everything P had reaped). P may
+// instead have exited first, leaving C to a subreaper or init:
+//   * C in `adopted`: the host's reaper reaped it -> Drop;
+//   * the host's reaper runs and C's tree hangs under the host (its
+//     root's parent is the host): an orphan of P would have gone to the
+//     host and been reaped by it, so P reaped C;
+//   * else unknown: ambiguous (listed, not subtracted).
+// Bookkeeping only: no reads.
+DiskProfiler::Impl::Resolution DiskProfiler::Impl::Resolve(
+    uint32_t pid, const std::unordered_set<uint32_t>& liveTracked,
+    const std::unordered_set<uint32_t>& reapedAfter, bool reaperOn, uint32_t host) const
+{
+    Resolution r;
+    const ReapWatch* w = &reapWatch.at(pid);
+    bool pending = !w->reaped;
+    r.unsure = reapedAfter.count(pid) > 0;
+    uint32_t cur = pid;
+    for (int depth = 0; depth < 64; ++depth) {
+        const uint32_t par = w->parent;
+        if (liveTracked.count(par)) {
+            r.kind   = pending ? Resolution::Wait : Resolution::At;
+            r.anchor = par;
+            return r;
+        }
+        auto pw = reapWatch.find(par);
+        if (pw == reapWatch.end()) return r;   // Drop: an untracked parent counts it once
+        if (!pending) {
+            if (Adopted(cur, w->startNs)) return r;   // Drop
+            if (!(reaperOn && w->rootParent == host)) r.ambiguous = true;
+            if (!pw->second.reaped) pending = true;   // arrives with par's reap
+            else if (reapedAfter.count(par)) r.unsure = true;
+        }
+        cur = par;
+        w   = &pw->second;
+    }
+    return r;   // Drop (no cycle is expected; bounded anyway)
+}
+
+void DiskProfiler::SetHostReaper(uint32_t hostPid) {
+    uint32_t none = 0;
+    if (m_impl->hostReaper.compare_exchange_strong(none, hostPid) && hostPid != 0)
+        std::cerr << "[Disk] host " << hostPid << " reaps adopted orphans: reap chains "
+                     "are resolved with its reaped set\n";
+}
+
+void DiskProfiler::NoteAdoptedExit(uint32_t pid, uint64_t startTimeTicks) {
+    std::lock_guard<std::mutex> lk(m_impl->adoptedMutex);
+    m_impl->adoptedIncoming.emplace_back(pid, internal::BootTicksToSteadyNs(startTimeTicks));
 }
 
 DiskProfiler::DiskProfiler() : m_impl(std::make_unique<Impl>()) {}
@@ -279,15 +381,46 @@ void DiskProfiler::Start() {
                 impl.NoteGone(it->first, it->second.serial, 0);
                 it = impl.prevPIDIO.erase(it);
             }
-            std::unordered_set<uint32_t> unsureParents;
-            std::unordered_map<uint32_t, std::vector<uint32_t>> reapedUnder;   // parent -> children
+            std::unordered_set<uint32_t> reapedAfter;
             for (auto& [pid, w] : impl.reapWatch) {
-                if (reapedBefore.count(pid)) {
-                    reapedUnder[w.parent].push_back(pid);
-                } else if (impl.Reaped(pid, w)) {
+                if (!reapedBefore.count(pid) && impl.Reaped(pid, w)) {
                     w.reaped = true;
-                    unsureParents.insert(w.parent);
+                    reapedAfter.insert(pid);
                 }
+            }
+            {
+                std::lock_guard<std::mutex> lk(impl.adoptedMutex);
+                for (const auto& [p, ns] : impl.adoptedIncoming) impl.adopted[p] = ns;
+                impl.adoptedIncoming.clear();
+            }
+
+            // Where each watched process's I/O is (Impl::Resolve): the
+            // children whose reap a live tracked process's reading
+            // includes, and the readings that may or may not include one
+            // (an unsure reading is not used: the process keeps its
+            // baseline, and its next sample spans both intervals and
+            // certainly includes the reap). A watch ends when no tracked
+            // process's reading can include it.
+            std::unordered_set<uint32_t> unsureAnchors;
+            std::unordered_map<uint32_t, std::vector<internal::IoReapRecord::Child>> reapedUnder;
+            if (!impl.reapWatch.empty()) {
+                std::unordered_set<uint32_t> liveTracked;
+                for (const auto& entry : snapshot)
+                    if (!entry.pending_removal && !gone.count(entry.serial)) liveTracked.insert(entry.pid);
+                const uint32_t host = impl.hostReaper.load();
+                const bool reaperOn = host != 0 && this->SnapshotDiscoveryStats().has_value();
+                std::vector<uint32_t> ended;
+                for (const auto& [pid, w] : impl.reapWatch) {
+                    const auto r = impl.Resolve(pid, liveTracked, reapedAfter, reaperOn, host);
+                    if (r.kind == Impl::Resolution::Drop) { ended.push_back(pid); continue; }
+                    if (r.kind != Impl::Resolution::At) continue;
+                    if (r.unsure) unsureAnchors.insert(r.anchor);
+                    const auto& l = w.lastSeen;
+                    reapedUnder[r.anchor].push_back({pid, {l.rchar, l.wchar, l.readBytes, l.writeBytes,
+                                                           l.cancelledWriteBytes},
+                                                     w.parent, r.ambiguous});
+                }
+                for (uint32_t pid : ended) impl.reapWatch.erase(pid);
             }
 
             for (const auto& [ep, curIO] : readings) {
@@ -304,38 +437,51 @@ void DiskProfiler::Start() {
                     continue;
                 }
 
-                if (unsureParents.count(pid)) continue;   // see above
+                if (unsureAnchors.count(pid)) continue;   // see above
 
                 // Tracked children whose reap this reading includes.
-                std::vector<uint32_t> kids;
-                if (auto k = reapedUnder.find(pid); k != reapedUnder.end()) kids = k->second;
+                std::vector<internal::IoReapRecord::Child> kids;
+                if (auto k = reapedUnder.find(pid); k != reapedUnder.end()) kids = std::move(k->second);
 
                 auto it = impl.prevPIDIO.find(pid);
                 if (it == impl.prevPIDIO.end() || it->second.serial != entry.serial) {
                     // Mid-run add — seed baseline, skip this tick. A reap
                     // this reading includes is inside the baseline, so
                     // there is nothing to subtract.
-                    impl.prevPIDIO[pid] = {curIO, tsNs, entry.serial};
                     // Its counters now are its I/O before tracking (the
-                    // head), recorded once, never folded into a sample.
+                    // head); its tree's root's parent tells a later reap
+                    // chain whether the host's reaper covers it.
+                    uint32_t rootParent = 0;
+                    const auto* cur = &entry;
+                    for (int depth = 0; depth < 64; ++depth) {
+                        if (!cur->discovered) { rootParent = cur->parent_pid; break; }
+                        auto up = std::find_if(snapshot.begin(), snapshot.end(),
+                            [&](const auto& e) { return e.pid == cur->parent_pid; });
+                        if (up == snapshot.end()) break;
+                        cur = &*up;
+                    }
+                    impl.prevPIDIO[pid] = {curIO, tsNs, entry.serial, entry.start_time_ns, rootParent};
                     this->SetIoBeforeTracking(pid, {curIO.rchar, curIO.wchar, curIO.readBytes,
                                                     curIO.writeBytes, curIO.cancelledWriteBytes});
-                    for (uint32_t c : kids) impl.reapWatch.erase(c);
+                    for (const auto& c : kids) impl.reapWatch.erase(c.pid);
                     continue;
                 }
-                auto& prev = it->second.s;
+                auto& base = it->second;
+                auto& prev = base.s;
                 // An unreadable tick keeps the baseline, so this spans it.
                 const double dtSec = (double)(tsNs - it->second.tickTsNs) / 1e9;
 
                 // Every counter is monotonic for the life of the process.
                 // The process's own I/O: the delta minus the last reading
-                // of each tracked child it reaped in this interval.
+                // of each tracked child whose reap this interval brought
+                // in (directly, or through a chain), unless ambiguous.
                 int64_t own[5];
                 for (int k = 0; k < 5; ++k) {
                     const auto c = kIoCounters[k];
                     own[k] = curIO.*c > prev.*c ? static_cast<int64_t>(curIO.*c - prev.*c) : 0;
-                    for (uint32_t kid : kids)
-                        own[k] -= static_cast<int64_t>(impl.reapWatch[kid].lastSeen.*c);
+                    for (const auto& kid : kids)
+                        if (!kid.ambiguous)
+                            own[k] -= static_cast<int64_t>(impl.reapWatch[kid.pid].lastSeen.*c);
                 }
                 auto rate = [&](int k) { return own[k] > 0 ? (double)own[k] / dtSec : 0.0; };
                 internal::DiskProcessTick t;
@@ -346,19 +492,19 @@ void DiskProfiler::Start() {
                 t.read_bytes_per_sec            = rate(2);
                 t.write_bytes_per_sec           = rate(3);
                 t.cancelled_write_bytes_per_sec = rate(4);
-                it->second = {curIO, tsNs, entry.serial};
+                base.s = curIO;
+                base.tickTsNs = tsNs;
 
                 std::optional<internal::IoReapRecord> reap;
                 if (!kids.empty()) {
                     reap.emplace();
                     reap->timestamp_ns = tsNs;
                     reap->parent_pid   = pid;
-                    for (uint32_t c : kids) {
-                        const auto& l = impl.reapWatch[c].lastSeen;
-                        reap->children.push_back({c, {l.rchar, l.wchar, l.readBytes,
-                                                      l.writeBytes, l.cancelledWriteBytes}});
-                        impl.reapWatch.erase(c);
+                    for (const auto& c : kids) {
+                        reap->ambiguous = reap->ambiguous || c.ambiguous;
+                        impl.reapWatch.erase(c.pid);
                     }
+                    reap->children = std::move(kids);
                     std::copy(std::begin(own), std::end(own), reap->remainder);
                 }
 
@@ -367,19 +513,16 @@ void DiskProfiler::Start() {
                 if (reap) impl.batch.ioReaps.push_back(std::move(*reap));
             }
 
-            // A watch ends when its parent is not a tracked live process:
-            // no later reading of it can include the reap (and a parent
-            // that is not tracked counts the child's I/O only once).
-            if (!impl.reapWatch.empty() || !impl.reapNoted.empty()) {
-                std::unordered_set<uint32_t> liveTracked;
+            if (!impl.reapNoted.empty()) {
                 std::unordered_set<uint64_t> serials;
-                for (const auto& entry : snapshot) {
-                    serials.insert(entry.serial);
-                    if (!entry.pending_removal && !gone.count(entry.serial)) liveTracked.insert(entry.pid);
-                }
-                std::erase_if(impl.reapWatch, [&](const auto& kv) { return !liveTracked.count(kv.second.parent); });
+                for (const auto& entry : snapshot) serials.insert(entry.serial);
                 std::erase_if(impl.reapNoted, [&](uint64_t s) { return !serials.count(s); });
             }
+            // A reaped PID nothing tracks or watches any more is never
+            // looked up again.
+            std::erase_if(impl.adopted, [&](const auto& kv) {
+                return !snapshotPids.count(kv.first) && !impl.reapWatch.count(kv.first);
+            });
 
         }
     });

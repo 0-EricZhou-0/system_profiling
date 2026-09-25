@@ -325,6 +325,12 @@ ProfilerError SidecarProcess::SendAddPid(uint32_t pid, const std::string& alias,
     return ReadStatus();
 }
 
+ProfilerError SidecarProcess::SendHostReaper() {
+    std::lock_guard<std::mutex> lk(send_mutex_);
+    if (auto e = WriteMsg(MSG_HOST_REAPER, nullptr, 0); e != ProfilerError::Ok) return e;
+    return ReadStatus();
+}
+
 ProfilerError SidecarProcess::SendRemovePid(uint32_t pid) {
     std::lock_guard<std::mutex> lk(send_mutex_);
     if (auto e = WriteMsg(MSG_REMOVE_PID, &pid, sizeof(pid));

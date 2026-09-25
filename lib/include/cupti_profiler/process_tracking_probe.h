@@ -195,6 +195,14 @@ public:
     /// tracked. Thread-safe.
     void SetIoBeforeTracking(uint32_t pid, const IoCounters& io);
 
+    /// Descendant tracking calls this for a discovered process that
+    /// exited adopted by the host (the launcher, a subreaper), right
+    /// before the host's orphan reaper is asked to reap it: its I/O goes
+    /// to the host, not to any tracked process. `startTimeTicks` is
+    /// /proc/<pid>/stat field 22. Default: nothing (the disk probe uses
+    /// it, see DiskProfiler). Thread-safe.
+    virtual void NoteAdoptedExit(uint32_t pid, uint64_t startTimeTicks);
+
     /// Replace the tracked process set in one shot with these roots
     /// (pid and alias are used; each is registered as by
     /// AddTrackedProcess). Called by derived classes from Configure() to

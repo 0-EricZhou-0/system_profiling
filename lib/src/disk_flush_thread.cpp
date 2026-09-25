@@ -201,9 +201,13 @@ DiskMetricsTrace BuildDiskTrace(
         auto* a = trace.add_io_reap_adjustments();
         a->set_timestamp_ns(r.timestamp_ns);
         a->set_parent_pid(r.parent_pid);
-        for (const auto& [pid, v] : r.children) {
+        a->set_ambiguous(r.ambiguous);
+        for (const auto& ch : r.children) {
+            const auto& v = ch.lastSeen;
             auto* c = a->add_children();
-            c->set_pid(pid);
+            c->set_pid(ch.pid);
+            c->set_reaped_by(ch.reapedBy);
+            c->set_ambiguous(ch.ambiguous);
             auto* l = c->mutable_last_seen();
             l->set_rchar(v.rchar);
             l->set_wchar(v.wchar);

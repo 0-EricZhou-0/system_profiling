@@ -243,6 +243,9 @@ void ProcessDiscovery::MaybeReapAdopted(uint32_t pid, const Entry& e) {
     if (e.firstParent == reaping_.hostPid) return;
     auto st = ReadProcStat(procRoot_, pid);
     if (!st || st->ppid != reaping_.hostPid) return;   // not adopted by the host
+    // Before the reap: a probe that later finds it gone must be able to
+    // tell that its I/O went to the host (DiskProfiler's reap chains).
+    ForEachSink(e.sinks, [&](ProcessTrackingProbe& p) { p.NoteAdoptedExit(pid, e.startTime); });
     if (reaping_.mode == AdoptionReaping::Mode::InProcess) {
         if (ChildSubreaperEnabled()) ReapAdoptedChild(e.pidfd, pid, e.startTime);
         return;
