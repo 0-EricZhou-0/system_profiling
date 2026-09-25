@@ -6,6 +6,8 @@
 
 #include "metric_sample.pb.h"
 
+#include <vector>
+
 namespace cupti_profiler {
 namespace internal {
 
@@ -25,6 +27,15 @@ inline void FillTrackedProcess(TrackedProcessV2* tp,
         h->set_timestamp_ns(c.timestamp_ns);
         h->set_comm(c.comm);
     }
+}
+
+// Does this snapshot carry a removal marker (an entry with
+// pending_removal)? A flush goes out for it even with no samples: a probe
+// whose only process exited has none, and the marker would otherwise wait
+// for the final flush at Stop().
+inline bool HasRemovalMarker(const std::vector<ProcessTrackingProbe::ProcessEntry>& snapshot) {
+    for (const auto& p : snapshot) if (p.pending_removal) return true;
+    return false;
 }
 
 } // namespace internal

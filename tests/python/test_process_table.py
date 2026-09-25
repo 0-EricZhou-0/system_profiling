@@ -87,6 +87,30 @@ def test_root_exit_detected_without_discovery(tmp_path, mode):
 
 
 @pytest.mark.parametrize("mode", MODES)
+def test_removal_marker_flushed_without_samples(tmp_path, mode):
+    # A disk probe with no devices whose only process exits has no samples
+    # left to flush. Its removal marker must still go out with the next
+    # flush, not wait for stop(). At 2 Hz sampling and 50 ms flushes the
+    # root's last sample is always flushed before the tick that sees it
+    # gone, so without that the marker would never be flushed while running.
+    with tree(EXITS_ON_LINE) as t:
+        with running_suite(tmp_path, mode, processes=[(t.pid, "root")], disk=True,
+                           disk_hz=2, hz=HZ, flush_ms=50):
+            t.read("ready")
+            time.sleep(1.2)
+            t.proc.stdin.write(b"exit\n")
+            t.proc.stdin.flush()
+            t.read("exiting")
+            time.sleep(1.0)                      # >= one 500 ms tick + a flush
+            running = disk_frames(tmp_path)      # what was flushed while running
+            t.proc.wait()
+    assert sample_times(running, t.pid), "premise: the root was sampled"
+    removed = [tp for _, tp in rows(running, t.pid) if tp.removed]
+    assert len(removed) == 1 and removed[0].end_time_ns > 0, \
+        "the removal marker was not flushed while running"
+
+
+@pytest.mark.parametrize("mode", MODES)
 def test_remove_tracked_process_still_works(tmp_path, mode):
     with tree(EXITS_ON_LINE) as t:
         with running_suite(tmp_path, mode, processes=[(t.pid, "root")],

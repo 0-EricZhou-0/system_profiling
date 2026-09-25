@@ -2,6 +2,7 @@
 
 #include "proc_readers.h"
 #include "system_flush_thread.h"
+#include "tracked_process_proto.h"
 #include "discovery_stats_proto.h"
 #include "testing_hooks.h"
 
@@ -479,6 +480,7 @@ void SystemProfiler::Stop() {
         auto processSnapshot = SnapshotProcesses();
         if (!drained.systemTicks.empty() || !drained.processTicks.empty() ||
             !drained.cpuTails.empty() ||
+            internal::HasRemovalMarker(processSnapshot) ||
             m_impl->flushStatsPending.valid) {
             SystemMetricsTrace trace = internal::BuildSystemTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz,

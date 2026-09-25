@@ -290,7 +290,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
 
         auto processSnapshot = probe.SnapshotProcesses();
         if (drained.systemTicks.empty() && drained.processTicks.empty() &&
-            drained.cpuTails.empty()) continue;
+            drained.cpuTails.empty() && !HasRemovalMarker(processSnapshot)) continue;
 
         SystemMetricsTrace trace = BuildSystemTrace(
             hostname, samplingFrequencyHz, hostCpuCount,

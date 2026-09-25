@@ -258,7 +258,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
 
         auto processSnapshot = probe.SnapshotProcesses();
         if (drained.deviceTicks.empty() && drained.processTicks.empty() &&
-            drained.ioReaps.empty()) continue;
+            drained.ioReaps.empty() && !HasRemovalMarker(processSnapshot)) continue;
 
         DiskMetricsTrace trace = BuildDiskTrace(
             hostname, samplingFrequencyHz, hostCpuCount,

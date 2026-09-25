@@ -3,6 +3,7 @@
 #include "disk_readers.h"
 #include "proc_readers.h"
 #include "disk_flush_thread.h"
+#include "tracked_process_proto.h"
 #include "discovery_stats_proto.h"
 #include "testing_hooks.h"
 
@@ -434,6 +435,7 @@ void DiskProfiler::Stop() {
         auto processSnapshot = SnapshotProcesses();
         if (!drained.deviceTicks.empty() || !drained.processTicks.empty() ||
             !drained.ioReaps.empty() ||
+            internal::HasRemovalMarker(processSnapshot) ||
             m_impl->flushStatsPending.valid) {
             DiskMetricsTrace trace = internal::BuildDiskTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz,
