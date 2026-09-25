@@ -56,13 +56,23 @@ A run of [`examples/full_system_profiling.py`](examples/full_system_profiling.py
 
 ![Full-system profile](docs/images/full_system_profile.v0.1.0.png)
 
+A live vLLM server (`Qwen/Qwen3.5-0.8B`, startup then six request batches),
+traced process by process from a launcher with
+[`examples/vllm_serving_profiling.py`](examples/vllm_serving_profiling.py):
+the API server, `VLLM::EngineCore` (under its renamed comm), the
+multiprocessing helper and the startup workers are each their own series,
+found by descendant tracking; the GPU panels are device-wide counters.
+How to run it and read it: [docs/examples/vllm_serving.md](docs/examples/vllm_serving.md).
+
+![vLLM serving profile](docs/images/vllm_serving.png)
+
 ## Repository layout
 
 ```
 cupti-profiler/
 ├── lib/                  C++ shared library (the actual profiler core)
 ├── python/               pybind11 wrapper + pyproject.toml-installable package
-├── examples/             gemm_profiling.cu, full_system_profiling.{cu,py}
+├── examples/             gemm_profiling.cu, full_system_profiling.{cu,py}, vllm_serving_profiling.py
 ├── tools/                CLI utilities (visualizers, list_pm_metrics)
 ├── proto/                .proto schemas (data + config)
 ├── tests/                pytest smoke test for the Python wrapper
@@ -238,7 +248,8 @@ read shows up in none of them). Where to read more:
 - [Sidecar mode](docs/system-guide.md#sidecar-mode),
   [Process table and exit detection](docs/system-guide.md#process-table-and-exit-detection),
   [Descendant tracking](docs/system-guide.md#descendant-tracking);
-- [Per-PID I/O counters](docs/metric-model.md#per-pid-io-counters-who-records-what).
+- [Per-PID I/O counters](docs/metric-model.md#per-pid-io-counters-who-records-what);
+- a complete example on a vLLM server: [docs/examples/vllm_serving.md](docs/examples/vllm_serving.md).
 
 ## Tools
 

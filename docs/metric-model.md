@@ -329,9 +329,25 @@ Consequences:
 - The gap between `rchar` and `read_bytes` is the page cache's
   contribution (for `read()`-style I/O).
 - **A model loaded by `mmap` from a warm page cache is invisible to all
-  four read/write counters.** That is the usual case for torch /
-  safetensors weight loading (vLLM included) on a second run: neither
-  layer sees it. A cold `mmap` load shows up in `read_bytes` only.
+  four read/write counters**: neither layer sees it. A cold `mmap` load
+  shows up in `read_bytes` only. Whether a framework maps or reads its
+  weights varies: vLLM 0.29's default safetensors loader **reads** them
+  (measured 2026-09-25: its EngineCore's `rchar` grew by 1.629 GiB during
+  the load of a 1.627 GiB checkpoint, with `read_bytes` 0 from a warm
+  cache), so there the load shows in the syscall layer only.
+- **A parent's counters include the children it has reaped.** When a
+  process reaps a child (`wait`), the kernel adds the child's lifetime
+  I/O to the parent's `/proc/<pid>/io` (all five counters; verified on
+  kernel 5.15: a parent's `rchar` grew by exactly the 64.3 MiB its child
+  had read, at the reap). So the per-PID rate of a parent shows a spike
+  when a child exits and is reaped, equal to everything that child did,
+  and when both are traced (descendant tracking) that I/O appears twice:
+  once under the child while it ran, once under the parent at the reap.
+  Summing the per-PID I/O of a traced tree over-counts by the I/O of
+  every traced child reaped by a traced parent. Untraced short-lived
+  children's I/O appears only this way, under their parent.
+  (Per-PID CPU has no such effect: it is the process's own CPU clock,
+  which excludes children; see [head and tail CPU](system-guide.md#head-and-tail-cpu).)
 - `wchar` includes pipe and socket traffic (e.g. a server's responses,
   or a process's stdout), so it is not a file-write rate.
 - Per-device `disk__*_bytes` counts what the block device did, for every

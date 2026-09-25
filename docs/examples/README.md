@@ -1,6 +1,6 @@
 # Examples
 
-Three programs ship with the library. The two `full_system_profiling`
+Four programs ship with the library. The two `full_system_profiling`
 examples (C++ and Python) load the **same** [`configs/example.pbtxt`](../../configs/example.pbtxt)
 by default, with the path resolved relative to each source file's own
 directory — so running them from any working directory just works. The
@@ -12,15 +12,17 @@ for quick metric studies.
 | [`gemm_profiling`](gemm_profiling.md) | C++ | GPU only | Hardcoded in C++; `-o` picks output file | 1 (`gpu_metrics.pb`) |
 | [`full_system_profiling`](full_system_profiling.md) | C++ | GPU + CPU/Mem + Disk + Events | `configs/example.pbtxt` (resolved via `__FILE__`) | 5 (incl. `events.pb`, `session_metadata.pb`) |
 | [`full_system_profiling.py`](full_system_profiling_python.md) | Python | GPU + CPU/Mem + Disk + Events | `configs/example.pbtxt` (resolved via `__file__`) | 5 (same set as above) |
+| [`vllm_serving_profiling.py`](vllm_serving.md) | Python | a `vllm serve` process tree: CPU/Mem + Disk per process (SIDECAR, descendant tracking) + Events; GPU with `--gpu` | built in Python from arguments; panel layout `configs/vllm_serving_panels.pbtxt` | 4–5 + `vllm.log` + the figure |
 
 ## Picking one
 
 - **GPU only, want to tweak metrics in code, minimal moving parts** → `gemm_profiling`
 - **Whole-machine correlated trace, config-file driven C++** → `full_system_profiling.cu`
 - **Whole-machine trace driven from a Python workload (PyTorch / JAX / serving)** → `full_system_profiling.py`
+- **A server you launch, traced process by process (its forked workers included)** → `vllm_serving_profiling.py`
 
-All three link against the same `libcupti_profiler.so`; the Python
-example goes through the pybind11 wrapper at `python/binding.cpp`.
+All of them link against the same `libcupti_profiler.so`; the Python
+examples go through the pybind11 wrapper at `python/binding.cpp`.
 `ProfilerSuite` is just composition over the individual profilers in
 every case.
 
