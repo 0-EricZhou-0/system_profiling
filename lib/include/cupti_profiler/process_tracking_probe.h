@@ -89,6 +89,15 @@ struct DiscoveryStats {
     uint64_t rejected       = 0;
 };
 
+// The five /proc/<pid>/io counters of one reading, in bytes.
+struct IoCounters {
+    uint64_t rchar                 = 0;
+    uint64_t wchar                 = 0;
+    uint64_t read_bytes            = 0;
+    uint64_t write_bytes           = 0;
+    uint64_t cancelled_write_bytes = 0;
+};
+
 // One comm a tracked process had, and when the probe first saw it
 // (trace clock, ns). The first entry is the comm at registration.
 struct CommChange {
@@ -154,6 +163,9 @@ public:
         // tick after registration — the CPU it used before tracking began
         // (for a root started long before, its whole CPU up to attach).
         uint64_t    cpu_before_tracking_ns = 0;
+        // Disk probe: the /proc/<pid>/io counters at its first reading —
+        // the I/O it did before tracking began. nullopt until read.
+        std::optional<IoCounters> io_before_tracking;
         // Identity of this registration within the probe; never reused.
         // Per-PID baselines are keyed by it, so a new process that got
         // an old one's number never inherits its baseline.
@@ -177,6 +189,11 @@ public:
     /// (ProcessEntry::cpu_before_tracking_ns). No-op if it is no longer
     /// tracked. Thread-safe.
     void SetCpuBeforeTracking(uint32_t pid, uint64_t ns);
+
+    /// Record a process's I/O before its first sample
+    /// (ProcessEntry::io_before_tracking). No-op if it is no longer
+    /// tracked. Thread-safe.
+    void SetIoBeforeTracking(uint32_t pid, const IoCounters& io);
 
     /// Replace the tracked process set in one shot with these roots
     /// (pid and alias are used; each is registered as by

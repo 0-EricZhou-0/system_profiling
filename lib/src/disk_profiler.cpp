@@ -316,6 +316,10 @@ void DiskProfiler::Start() {
                     // this reading includes is inside the baseline, so
                     // there is nothing to subtract.
                     impl.prevPIDIO[pid] = {curIO, tsNs, entry.serial};
+                    // Its counters now are its I/O before tracking (the
+                    // head), recorded once, never folded into a sample.
+                    this->SetIoBeforeTracking(pid, {curIO.rchar, curIO.wchar, curIO.readBytes,
+                                                    curIO.writeBytes, curIO.cancelledWriteBytes});
                     for (uint32_t c : kids) impl.reapWatch.erase(c);
                     continue;
                 }

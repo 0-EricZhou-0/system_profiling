@@ -31,15 +31,6 @@ message DiskMetricsTrace {
     repeated IoReapAdjustment io_reap_adjustments = 9;
 }
 
-// The five /proc/<pid>/io counters, in bytes.
-message IoCounters {
-    uint64 rchar                 = 1;
-    uint64 wchar                 = 2;
-    uint64 read_bytes            = 3;
-    uint64 write_bytes           = 4;
-    uint64 cancelled_write_bytes = 5;
-}
-
 // Same, signed: a difference of two readings.
 message IoCounterDeltas {
     sint64 rchar                 = 1;
@@ -66,7 +57,8 @@ message IoCounterDeltas {
 // with the children's I/O after their last reading, which no reading can
 // tell apart. A negative remainder would mean the parent's delta was
 // smaller than what was subtracted (the sample is then clamped to 0);
-// it is not expected.
+// it is not expected. A child's last_seen is its io_before_tracking
+// (TrackedProcessV2) plus its samples.
 //
 // Limits (docs/metric-model.md, "Reaped children's I/O"):
 //   * only children that were sampled are subtracted; the I/O of a child

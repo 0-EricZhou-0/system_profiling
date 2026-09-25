@@ -183,7 +183,17 @@ DiskMetricsTrace BuildDiskTrace(
     AddScopeRegistry(trace);
     for (const auto& d : devices) trace.add_tracked_devices(d);
     for (const auto& p : processes) {
-        FillTrackedProcess(trace.add_tracked_processes(), p);
+        auto* tp = trace.add_tracked_processes();
+        FillTrackedProcess(tp, p);
+        if (p.io_before_tracking) {
+            const auto& h = *p.io_before_tracking;
+            auto* io = tp->mutable_io_before_tracking();
+            io->set_rchar(h.rchar);
+            io->set_wchar(h.wchar);
+            io->set_read_bytes(h.read_bytes);
+            io->set_write_bytes(h.write_bytes);
+            io->set_cancelled_write_bytes(h.cancelled_write_bytes);
+        }
     }
     for (const auto& t : drained.deviceTicks)  AppendDeviceSample(trace, t);
     for (const auto& t : drained.processTicks) AppendProcessSample(trace, t);

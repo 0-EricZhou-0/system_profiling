@@ -363,7 +363,7 @@ public:
 | `Get*Profiler()` | Access individual sub-profilers — needed to grab `EventTracker` references for region annotation. |
 | `Configure()` | Loads `MetricCatalog` (from `metric_catalog_path` in the config, or a default path next to the binary) and then calls `Configure()` on every sub-profiler whose `enabled = true`. With System or Disk enabled, also runs the [startup situation report](#startup-situation-report). |
 | `Start()` / `Stop()` | Lifecycle fan-out. Both write `session_metadata.pb` (atomically — `.tmp` + `rename(2)`); the manifest carries the inlined `MetricCatalog` so visualizers don't need a separate catalog file. `Start()` returns `ProbeStartFailed` if a System/Disk probe did not start (e.g. its output file cannot be opened; under SIDECAR the sidecar reports it) or `SidecarExited` / `SidecarBadHandshake` if the sidecar did not answer; every other probe is running, so call `Stop()` as usual. Python's `start()` raises `RuntimeError`. |
-| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage); its CPU before that is recorded once as its head, `cpu_before_tracking_ns`. Its descendants are tracked if `process_discovery.enabled`. When it exits it is removed automatically ([exit detection](#process-table-and-exit-detection)). Thread-safe. |
+| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage); its CPU and I/O before that are recorded once as its heads, `cpu_before_tracking_ns` and `io_before_tracking`. Its descendants are tracked if `process_discovery.enabled`. When it exits it is removed automatically ([exit detection](#process-table-and-exit-detection)). Thread-safe. |
 | `AddTrackedProcess(pid, alias, trackDescendants)` | Same, overriding `process_discovery.enabled` for this root — see [Descendant tracking](#descendant-tracking). |
 | `RemoveTrackedProcess(pid)` | Stop tracking a PID. The PID appears one more time in the next flush of each affected probe with `TrackedProcessV2.removed=true` (visualizer renders a removal marker), then is dropped. Descendants already discovered under it stay tracked until they exit. Thread-safe. |
 
@@ -901,6 +901,7 @@ carries one `TrackedProcessV2` per tracked process
 | `end_time_ns` | with `removed = true` after an exit: the first instant the probe saw it gone, on the trace clock. The exit happened **within one sampling tick** before it. 0 while alive and for a removal by request |
 | `removed` | this is the entry's last flush |
 | `cpu_before_tracking_ns` | System trace, every process: its CPU before its first sample (the head); see [Head and tail CPU](#head-and-tail-cpu) |
+| `io_before_tracking` | Disk trace, every process: its five `/proc/<pid>/io` counters at its first reading (the I/O head); unset if never read; see [I/O head](#io-head) |
 
 The trace clock is the samples' `timestamp_ns` clock (`steady_clock` =
 `CLOCK_MONOTONIC`, system-wide, so identical under SIDECAR). Field 22
@@ -1167,8 +1168,9 @@ and discovered processes alike:
 So per-PID I/O is **the process's own I/O, excluding tracked children it
 reaped**, and differs from the raw `/proc/<pid>/io` delta exactly by the
 adjustment records. A child's I/O before its first reading is in its
-`last_seen` but in none of its samples (there is no I/O counterpart of
-the CPU head): `last_seen − Σ its samples` is that amount.
+`last_seen` and in its **I/O head**, `TrackedProcessV2.io_before_tracking`
+(below), so `last_seen = io_before_tracking + Σ its samples` with nothing
+to reconstruct.
 
 Cost: nothing while no tracked process has exited. The probe already
 reads each process's `/proc/<pid>/io` and learns of exits from its
@@ -1177,6 +1179,19 @@ each watched child, from its exit until its reap (one tick for a parent
 blocked in `wait()`), and one list of watched children to check per
 tick. It shares nothing with the system probe's CPU-tail bookkeeping:
 each probe runs its own.
+
+### I/O head
+
+`TrackedProcessV2.io_before_tracking` (disk trace) is the I/O
+counterpart of `cpu_before_tracking_ns`: all five `/proc/<pid>/io`
+counters of a tracked process at its **first reading**, the disk tick
+after it was registered — the I/O it did before tracking began (for a
+root started long before the trace, its whole I/O up to attach).
+Recorded once, the same way for roots and discovered processes, never
+folded into a sample; the samples count from that reading, so a
+process's counters at any later reading are `io_before_tracking + Σ
+samples` up to there. Unset for a process never read (gone before its
+first reading, or its `/proc/<pid>/io` unreadable).
 
 ### Subreaper helper: `adopt_orphans()`
 
@@ -1369,12 +1384,14 @@ message TrackedProcessV2 { uint32 pid; string alias; bool removed;
                            uint32 parent_pid;   // parent when registered (roots too)
                            bool discovered;     // kind: true = found by descendant tracking
                            uint64 cpu_before_tracking_ns;  // system trace: CPU before the first sample
+                           IoCounters io_before_tracking;  // disk trace: /proc/<pid>/io at the first reading
                            string label;        // root alias (discovered: alias = label/comm)
                            string comm;         // current comm, re-read every 100 ms
                            uint64 start_time_ns;   // kernel start time, trace clock, 10 ms res.
                            uint64 end_time_ns;     // exit seen (<= 1 tick late); 0 = alive/removed
                            repeated CommChange comm_history; }  // <= 16, oldest first
 message CommChange       { uint64 timestamp_ns; string comm; }
+message IoCounters       { uint64 rchar, wchar, read_bytes, write_bytes, cancelled_write_bytes; }
 message DiscoveryStats   { uint64 scan_interval_ns, scans, scan_p50_ns, scan_p99_ns,
                                   scan_max_ns, discovered, exited, rejected; }
 message GPUDeviceInfo    { uint32 device_index; string device_name; string chip_name;

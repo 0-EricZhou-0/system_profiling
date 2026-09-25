@@ -106,6 +106,25 @@ message TrackedProcessV2 {
     // ones: within 100 ms of the rename). At most 16: the first and the
     // 15 most recent.
     repeated CommChange comm_history = 11;
+    // Disk trace, every tracked process (the I/O head; the analogue of
+    // cpu_before_tracking_ns): its /proc/<pid>/io counters at its first
+    // reading, the tick after registration — the I/O it did before its
+    // first sample (for a root started long before the trace, its whole
+    // I/O up to attach). Recorded once, never folded into a sample; the
+    // samples count from that reading, so a process's counters at any
+    // later reading equal io_before_tracking + its samples up to there
+    // (for an IoReapAdjustment child: last_seen). Unset if the process
+    // was never read (exited before its first reading, or unreadable).
+    IoCounters io_before_tracking = 12;
+}
+
+// The five /proc/<pid>/io counters, in bytes.
+message IoCounters {
+    uint64 rchar                 = 1;
+    uint64 wchar                 = 2;
+    uint64 read_bytes            = 3;
+    uint64 write_bytes           = 4;
+    uint64 cancelled_write_bytes = 5;
 }
 
 message CommChange {

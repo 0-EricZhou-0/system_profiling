@@ -186,6 +186,13 @@ void ProcessTrackingProbe::SetCpuBeforeTracking(uint32_t pid, uint64_t ns) {
     }
 }
 
+void ProcessTrackingProbe::SetIoBeforeTracking(uint32_t pid, const IoCounters& io) {
+    std::unique_lock<std::shared_mutex> lk(mutex_);
+    for (auto& e : processes_) {
+        if (e.pid == pid && e.end_time_ns == 0) { e.io_before_tracking = io; return; }
+    }
+}
+
 void ProcessTrackingProbe::SetInitialProcesses(std::vector<ProcessEntry> entries) {
     std::vector<std::pair<ProcessEntry, int>> made;
     made.reserve(entries.size());
