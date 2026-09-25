@@ -1,0 +1,60 @@
+# Panel layout for examples/vllm_serving_profiling.py (see
+# docs/examples/vllm_serving.md). Format: proto/panels.proto :: PanelLayout;
+# the default layout is configs/visualizer_panels.pbtxt.
+#
+# Differences from the default: the per-process CPU and memory panels are
+# auto-scaled (the default caps them at every CPU / all memory of the
+# host, which flattens a handful of processes on a large node), and the
+# panels that say little about a serving process tree (system memory,
+# PCIe, NVLink, disk queue depth) are left out.
+
+# ---- GPU (only with --gpu: device-wide PM sampling in the launcher)
+panels {
+    title: "SM Utilization (%), whole device"
+    series_glob: "sm__cycles_active.*.pct_of_peak_*"
+    peak_constant: 100.0
+}
+panels {
+    title: "DRAM Bandwidth (% of peak), whole device"
+    series_glob: "dram__*_throughput.*"
+    peak_constant: 100.0
+}
+
+# ---- CPU and memory
+panels {
+    title: "CPU Utilization (%), whole host"
+    series_glob: "cpu__cycles_*"
+    peak_constant: 100.0
+}
+panels {
+    title: "Per-process CPU (% of one core)"
+    series_glob: "proc__cycles_*"
+    # 0 = no reference line and no cap: the axis fits the data. (With no
+    # peak at all, the metric's catalog peak, every CPU of the host, applies.)
+    peak_constant: 0
+}
+panels {
+    title: "Per-process Resident Memory"
+    series_glob: "proc__rss_bytes"
+    unit_override: UNIT_BYTES
+    peak_constant: 0          # fit the data, as above
+}
+
+# ---- Disk
+panels {
+    title: "Disk Bandwidth, per device"
+    series_glob: "disk__*_bytes.*"
+    unit_override: UNIT_BYTES_PER_SEC
+}
+panels {
+    title: "Per-process I/O, syscall layer (rchar solid / wchar dashed)"
+    series_glob: "proc__io_?char.*"
+    unit_override: UNIT_BYTES_PER_SEC
+    aggregation: PANEL_AGGREGATION_INTEGRATE
+}
+panels {
+    title: "Per-process I/O, storage layer (read_bytes solid / write_bytes dashed / cancelled dotted)"
+    series_glob: "proc__io_*_bytes.*"
+    unit_override: UNIT_BYTES_PER_SEC
+    aggregation: PANEL_AGGREGATION_INTEGRATE
+}
