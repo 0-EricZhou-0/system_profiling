@@ -74,7 +74,7 @@ def sample_times(frames, pid):
 
 
 def suite_config(tmp_path, mode, discovery=None, processes=(), disk=False,
-                 hz=100, flush_ms=200):
+                 hz=100, flush_ms=200, disk_hz=20):
     procs = [{"pid": p, "alias": a} for p, a in processes]
     cfg = {
         "output_dir": str(tmp_path),
@@ -93,7 +93,7 @@ def suite_config(tmp_path, mode, discovery=None, processes=(), disk=False,
     if disk:
         cfg["disk"] = {
             "enabled": True,
-            "sampling_frequency_hz": 20,
+            "sampling_frequency_hz": disk_hz,
             "flush_interval_ms": flush_ms,
             "output_file": "disk_metrics.pb",
             "processes": procs,

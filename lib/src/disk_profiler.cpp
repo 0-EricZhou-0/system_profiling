@@ -44,9 +44,15 @@ public:
     bool configured = false;
     bool running = false;
 
-    // Previous snapshots
-    std::unordered_map<std::string, internal::DiskStatSnapshot> prevDisk;
-    std::unordered_map<uint32_t, internal::PIDIOSnapshot> prevPIDIO;
+    // Previous snapshots, each with the steady-clock instant it was read:
+    // rates divide by the actual time since then, not the nominal sample
+    // period (the loop always runs somewhat longer than 1/hz).
+    template <typename Snapshot> struct Baseline {
+        Snapshot s;
+        uint64_t tickTsNs = 0;
+    };
+    std::unordered_map<std::string, Baseline<internal::DiskStatSnapshot>> prevDisk;
+    std::unordered_map<uint32_t, Baseline<internal::PIDIOSnapshot>> prevPIDIO;
     std::unordered_set<uint32_t> warnedPIDs; // PIDs we've already warned about EACCES
 
     // Per-flush write accounting
@@ -108,7 +114,9 @@ void DiskProfiler::Start() {
     // on the first iteration each PID appears in SnapshotProcesses() —
     // that way mid-run AddTrackedProcess() works.
     auto initDisk = internal::ReadDiskStats(m_impl->config.devices);
-    for (auto& ds : initDisk) m_impl->prevDisk[ds.device] = ds;
+    const uint64_t initTsNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    for (auto& ds : initDisk) m_impl->prevDisk[ds.device] = {ds, initTsNs};
 
     m_impl->stopSample = false;
     m_impl->sampleThread = std::thread([this]() {
@@ -120,17 +128,17 @@ void DiskProfiler::Start() {
 
             auto now = std::chrono::steady_clock::now().time_since_epoch();
             uint64_t tsNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
-            double dtSec = 1.0 / impl.config.samplingFrequencyHz;
 
             // Per-device stats
             auto curDisk = internal::ReadDiskStats(impl.config.devices);
             for (auto& ds : curDisk) {
                 auto it = impl.prevDisk.find(ds.device);
                 if (it == impl.prevDisk.end()) {
-                    impl.prevDisk[ds.device] = ds;
+                    impl.prevDisk[ds.device] = {ds, tsNs};
                     continue;
                 }
-                auto& prev = it->second;
+                auto& prev = it->second.s;
+                const double dtSec = (double)(tsNs - it->second.tickTsNs) / 1e9;
 
                 auto inflight = internal::ReadDiskInflight(ds.device);
 
@@ -141,7 +149,7 @@ void DiskProfiler::Start() {
                 t.write_bytes_per_sec = (double)(ds.sectorsWritten - prev.sectorsWritten) * 512.0 / dtSec;
                 t.read_inflight       = inflight.readInflight;
                 t.write_inflight      = inflight.writeInflight;
-                prev = ds;
+                it->second = {ds, tsNs};
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.deviceTicks.push_back(std::move(t));
@@ -174,17 +182,19 @@ void DiskProfiler::Start() {
                 auto it = impl.prevPIDIO.find(pid);
                 if (it == impl.prevPIDIO.end()) {
                     // Mid-run add — seed baseline, skip this tick.
-                    impl.prevPIDIO[pid] = curIO;
+                    impl.prevPIDIO[pid] = {curIO, tsNs};
                     continue;
                 }
-                auto& prev = it->second;
+                auto& prev = it->second.s;
+                // An unreadable tick keeps the baseline, so this spans it.
+                const double dtSec = (double)(tsNs - it->second.tickTsNs) / 1e9;
 
                 internal::DiskProcessTick t;
                 t.timestamp_ns        = tsNs;
                 t.pid                 = pid;
                 t.rchar_bytes_per_sec = (double)(curIO.readBytes - prev.readBytes) / dtSec;
                 t.wchar_bytes_per_sec = (double)(curIO.writeBytes - prev.writeBytes) / dtSec;
-                prev = curIO;
+                it->second = {curIO, tsNs};
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.processTicks.push_back(std::move(t));
