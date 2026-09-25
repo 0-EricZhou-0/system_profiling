@@ -83,7 +83,7 @@ PYBIND11_MODULE(_native, m) {
         "Configuration for SystemProfiler — CPU + memory.")
         .def(py::init<>())
         .def_readwrite("sampling_frequency_hz", &SystemProfilerConfig::samplingFrequencyHz,
-            "Tick rate in Hz (default 100).")
+            "Tick rate in Hz (default 50).")
         .def_readwrite("processes",             &SystemProfilerConfig::Processes,
             "Processes to track per-process (list of TrackedProcess). "
             "Empty = system-wide only. PID 0 inside any entry is resolved "
@@ -97,7 +97,7 @@ PYBIND11_MODULE(_native, m) {
         "Configuration for DiskProfiler — per-device + per-process I/O.")
         .def(py::init<>())
         .def_readwrite("sampling_frequency_hz", &DiskProfilerConfig::samplingFrequencyHz,
-            "Tick rate in Hz (default 10).")
+            "Tick rate in Hz (default 50).")
         .def_readwrite("devices",               &DiskProfilerConfig::devices,
             "Block device names to track (e.g. ['nvme0n1', 'md0']).")
         .def_readwrite("processes",             &DiskProfilerConfig::Processes,

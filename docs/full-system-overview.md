@@ -140,7 +140,7 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | Field                  | Type       | Default | Description                                      |
 | ---------------------- | ---------- | ------- | ------------------------------------------------ |
 | `enabled`              | bool       | false   | Enable CPU + memory profiling                    |
-| `sampling_interval_ms` | uint64     | 100     | Sampling period in milliseconds                  |
+| `sampling_frequency_hz`| uint64     | 50      | Sampling rate in Hz (0 = 50)                     |
 | `pids`                 | uint32[]   | (empty) | PIDs for per-process tracking. 0 = self          |
 | `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval                          |
 | `output_file`          | string     | (empty) | Output `.pb` path                                |
@@ -150,7 +150,7 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | Field                  | Type       | Default | Description                                      |
 | ---------------------- | ---------- | ------- | ------------------------------------------------ |
 | `enabled`              | bool       | false   | Enable disk I/O profiling                        |
-| `sampling_interval_ms` | uint64     | 100     | Sampling period in milliseconds                  |
+| `sampling_frequency_hz`| uint64     | 50      | Sampling rate in Hz (0 = 50)                     |
 | `devices`              | string[]   | (empty) | Block device names (e.g. `"nvme0n1"`, `"sda"`)  |
 | `pids`                 | uint32[]   | (empty) | PIDs for per-process I/O. 0 = self               |
 | `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval                          |

@@ -44,7 +44,7 @@ message GPUProfilerConfig {
 
 message SystemProfilerConfig {
     bool enabled = 1;
-    uint64 sampling_frequency_hz = 2;
+    uint64 sampling_frequency_hz = 2;   // 0 = 50 Hz
     // Processes to track per-process. Empty = system-wide only.
     // PIDs can also be added/removed mid-run via
     // ProfilerSuite::AddTrackedProcess/RemoveTrackedProcess.
@@ -57,7 +57,7 @@ message SystemProfilerConfig {
 
 message DiskProfilerConfig {
     bool enabled = 1;
-    uint64 sampling_frequency_hz = 2;
+    uint64 sampling_frequency_hz = 2;   // 0 = 50 Hz
     repeated string devices = 3;
     // See SystemProfilerConfig.processes for mid-run add/remove behavior.
     repeated TrackedProcessV2 processes = 4;

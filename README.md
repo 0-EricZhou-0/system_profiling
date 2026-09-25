@@ -224,9 +224,9 @@ SIDECAR = 2   # SYSTEM_PROBE_MODE_SIDECAR
 suite = cp.ProfilerSuite()
 cp.configure_suite(suite, {
     "output_dir": "server_run/",
-    "system": {"enabled": True, "sampling_frequency_hz": 100, "mode": SIDECAR,
+    "system": {"enabled": True, "sampling_frequency_hz": 50, "mode": SIDECAR,
                "output_file": "system_metrics.pb"},
-    "disk":   {"enabled": True, "sampling_frequency_hz": 100, "mode": SIDECAR,
+    "disk":   {"enabled": True, "sampling_frequency_hz": 50, "mode": SIDECAR,
                "output_file": "disk_metrics.pb"},
     "process_discovery": {"enabled": False, "scan_interval_ms": 100},
 })

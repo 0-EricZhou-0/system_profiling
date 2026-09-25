@@ -13,11 +13,11 @@ with three profilers collecting in parallel:
 - **GPU** — CUPTI PM sampling at the rate set in the config (default 10 kHz).
   SM cycles, warp occupancy, DRAM throughput, PCIe read/write, NVLink rx/tx.
 - **System** — `/proc`-based CPU + memory sampling (system-wide and per-PID)
-  at a separate rate (default 100 Hz).
+  at a separate rate (default 50 Hz).
 - **Disk** — `/proc/diskstats` + `/sys/block/*/inflight` + `/proc/[PID]/io` for
   per-device throughput and per-PID IO — all five `/proc/[PID]/io` byte
   counters, see [metric-model.md](../metric-model.md#per-pid-io-counters-who-records-what)
-  (default 100 Hz).
+  (default 50 Hz).
 
 Each profiler runs two threads (sample + flush) and writes its own length-delimited
 `.pb` file. Timestamps are anchored to `steady_clock` with a sync anchor so GPU,

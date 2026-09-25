@@ -250,8 +250,8 @@ def main():
     ap.add_argument("--output-dir", default="vllm_serving_profile",
                     help="trace directory (default: %(default)s)")
     ap.add_argument("--png", default=None, help="figure path (default: <output-dir>/vllm_serving.png)")
-    ap.add_argument("--system-hz", type=int, default=100)
-    ap.add_argument("--disk-hz", type=int, default=100)
+    ap.add_argument("--system-hz", type=int, default=50)
+    ap.add_argument("--disk-hz", type=int, default=50)
     ap.add_argument("--flush-ms", type=int, default=1000)
     ap.add_argument("--scan-interval-ms", type=int, default=100,
                     help="descendant discovery scan interval (default: %(default)s)")

@@ -229,7 +229,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     if (proto.has_system() && proto.system().enabled()) {
         m_impl->sysEnabled = true;
         const auto& s = proto.system();
-        m_impl->sysConfig.samplingFrequencyHz = s.sampling_frequency_hz() > 0 ? s.sampling_frequency_hz() : 100;
+        m_impl->sysConfig.samplingFrequencyHz = s.sampling_frequency_hz() > 0 ? s.sampling_frequency_hz() : 50;
         m_impl->sysConfig.flushIntervalMs = s.flush_interval_ms() > 0 ? s.flush_interval_ms() : 5000;
         m_impl->sysConfig.outputFile = s.output_file();
         m_impl->sysConfig.mode =
@@ -249,7 +249,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     if (proto.has_disk() && proto.disk().enabled()) {
         m_impl->diskEnabled = true;
         const auto& d = proto.disk();
-        m_impl->diskConfig.samplingFrequencyHz = d.sampling_frequency_hz() > 0 ? d.sampling_frequency_hz() : 10;
+        m_impl->diskConfig.samplingFrequencyHz = d.sampling_frequency_hz() > 0 ? d.sampling_frequency_hz() : 50;
         m_impl->diskConfig.flushIntervalMs = d.flush_interval_ms() > 0 ? d.flush_interval_ms() : 5000;
         m_impl->diskConfig.outputFile = d.output_file();
         m_impl->diskConfig.mode =

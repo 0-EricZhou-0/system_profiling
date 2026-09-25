@@ -485,7 +485,7 @@ A profiler config with an empty `Processes` vector falls back to **system-wide s
 
 ```cpp title:"<cupti_profiler/system_profiler.h>"
 struct SystemProfilerConfig {
-    uint64_t samplingFrequencyHz = 100;          // 100 Hz default
+    uint64_t samplingFrequencyHz = 50;           // 50 Hz default
     std::vector<TrackedProcess> Processes;       // empty = system-wide only
     uint64_t flushIntervalMs = 5000;
     std::string outputFile;                      // e.g. "system_metrics.pb"
@@ -507,7 +507,7 @@ public:
 
 | Field | Description |
 | ----- | ----------- |
-| `samplingFrequencyHz` | How often `/proc/stat` and friends are polled. 100 Hz is a good default for second-scale workloads; 1000 Hz captures sub-second spikes. |
+| `samplingFrequencyHz` | How often `/proc/stat` and friends are polled. Default 50 Hz (a proto value of 0 means the same); see [Sampling frequency guidance](#sampling-frequency-guidance) for what each rate costs. |
 | `Processes` | Initial PIDs (with optional aliases) to sample per-process. `Add/RemoveTrackedProcess` may grow or shrink this set mid-run. See `TrackedProcess`. |
 | `flushIntervalMs` | How often the in-memory sample buffer is serialized to `outputFile`. |
 | `outputFile` | Path to the system trace `.pb`. Resolved against `output_dir` when driven by `ProfilerSuite`. |
@@ -518,7 +518,7 @@ public:
 
 ```cpp title:"<cupti_profiler/disk_profiler.h>"
 struct DiskProfilerConfig {
-    uint64_t samplingFrequencyHz = 10;           // 10 Hz default
+    uint64_t samplingFrequencyHz = 50;           // 50 Hz default
     std::vector<std::string> devices;            // e.g. {"nvme0n1", "md0"}
     std::vector<TrackedProcess> Processes;       // empty = device-only
     uint64_t flushIntervalMs = 5000;
@@ -540,7 +540,7 @@ public:
 
 | Field | Description |
 | ----- | ----------- |
-| `samplingFrequencyHz` | Polling rate for `/proc/diskstats` and `/sys/block/<dev>/inflight`. Disk counters update relatively slowly — 10 Hz is usually sufficient. |
+| `samplingFrequencyHz` | Polling rate for `/proc/diskstats`, `/sys/block/<dev>/inflight` and every tracked PID's `/proc/<pid>/io`. Default 50 Hz (a proto value of 0 means the same). |
 | `devices` | Block devices to sample. Names match `/sys/block/<name>/`. Use `lsblk` or `cat /proc/diskstats` to enumerate. |
 | `Processes` | PIDs to sample for `/proc/<pid>/io` (all five byte counters). Empty = device-only sampling. |
 | `flushIntervalMs` / `outputFile` | Same semantics as `SystemProfilerConfig`. |
@@ -678,14 +678,14 @@ gpu {
 
 system {
     enabled: true
-    sampling_frequency_hz: 100
+    sampling_frequency_hz: 50
     processes { pid: 0 alias: "self" }       # 0 → resolved at LoadConfig time
     output_file: "system_metrics.pb"
 }
 
 disk {
     enabled: true
-    sampling_frequency_hz: 100
+    sampling_frequency_hz: 50
     devices: "nvme0n1"
     processes { pid: 0 alias: "self" }
     output_file: "disk_metrics.pb"
@@ -770,13 +770,14 @@ python tools/visualize_single.py -i my_trace.pb -o my_trace.png
 
 ## Configuration reference: sidecar mode, descendant tracking, process table
 
-Every knob these features added, where it lives, and its default. The
-longer-standing fields (sampling rates, flush intervals, output files,
-devices, GPU metrics) are described with their config structs under
-[Public API reference](#public-api-reference).
+Every knob these features added, where it lives, and its default, plus
+the System and Disk sampling rates. The other longer-standing fields
+(flush intervals, output files, devices, GPU metrics) are described with
+their config structs under [Public API reference](#public-api-reference).
 
 | Knob | Where | Default | What it does |
 |---|---|---|---|
+| `system.sampling_frequency_hz`, `disk.sampling_frequency_hz` | `.pbtxt` / proto `SystemProfilerConfig.sampling_frequency_hz` (2), `DiskProfilerConfig.sampling_frequency_hz` (2); C++ `SystemProfilerConfig::samplingFrequencyHz`, `DiskProfilerConfig::samplingFrequencyHz` | **50 Hz** both (unset or 0 = 50; until 2026-09-25: System 100, Disk 10) | Ticks per second of the System probe (`/proc/stat`, `/proc/meminfo`, every tracked PID) and of the Disk probe (`/proc/diskstats`, every tracked PID's `/proc/<pid>/io`). What each rate costs: [Sampling frequency guidance](#sampling-frequency-guidance) |
 | `system.mode`, `disk.mode` | `.pbtxt` / proto `SystemProfilerConfig.mode` (6), `DiskProfilerConfig.mode` (7); C++ `SystemProfilerConfig::mode`, `DiskProfilerConfig::mode` | `SYSTEM_PROBE_MODE_LEGACY` (unset = LEGACY) | `SYSTEM_PROBE_MODE_SIDECAR` runs that probe's sampler and flush threads in the `cupti-profiler-sidecar` process instead of this one, so their CPU is not charged to the workload. One sidecar serves both probes. See [Sidecar mode](#sidecar-mode) |
 | `sidecar_cpus` | `.pbtxt` / proto `ProfilerSuiteConfig.sidecar_cpus` (9, repeated) | empty = no pinning | CPUs the sidecar and all its threads are pinned to. A CPU outside this process's allowed set fails `Configure()` with `SidecarAffinityFailed`. Ignored, with a note, when no probe is in SIDECAR mode |
 | `CUPTI_PROFILER_SIDECAR` | environment variable, read at `Configure()` | unset | Path of the sidecar binary to run instead of the built-in one. Used only if it is an executable regular file; otherwise the built-in path is used silently |

@@ -41,7 +41,7 @@ gpu {
 
 system {
     enabled: true
-    sampling_frequency_hz: 100      # 100 Hz
+    sampling_frequency_hz: 50       # 50 Hz (the default; 0 or unset = 50)
     # Processes to track per-process. Each entry is { pid, alias } —
     # alias is optional (omit it for plain "PID xxx" labels in the
     # visualizer; otherwise the legend shows "<alias> (PID xxx)").
@@ -58,7 +58,7 @@ system {
 
 disk {
     enabled: true
-    sampling_frequency_hz: 100      # 100 Hz
+    sampling_frequency_hz: 50       # 50 Hz (the default; 0 or unset = 50)
     devices: "md0"
     devices: "nvme7n1"
     processes { pid: 0  alias: "self" }   # see `system` block above

@@ -47,7 +47,7 @@ Every machine- or user-specific value is an argument:
 | `--vllm` | `vllm` (on `PATH`) | the `vllm` executable |
 | `--host`, `--port` | `127.0.0.1`, `8000` | where the server listens |
 | `--output-dir` | `vllm_serving_profile` | trace directory; the figure is `<dir>/vllm_serving.png` unless `--png` |
-| `--system-hz`, `--disk-hz` | 100, 100 | sampling rates |
+| `--system-hz`, `--disk-hz` | 50, 50 | sampling rates (the library's defaults) |
 | `--scan-interval-ms` | 100 | descendant tracking scan interval |
 | `--flush-ms` | 1000 | probe flush interval |
 | `--disk-device` | every whole block device in `/sys/block` | devices for the per-device panel (repeatable) |
