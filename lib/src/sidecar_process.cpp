@@ -102,12 +102,21 @@ ProfilerError SidecarProcess::Spawn() {
     int down[2];  // parent → child
     int up[2];    // child → parent
     int note[2];  // child → parent, adopted-orphan exit notices
-    if (::pipe(down) != 0 || ::pipe(up) != 0) {
-        std::cerr << "[ProfilerSuite] pipe() failed: " << ::strerror(errno) << "\n";
+    // All O_CLOEXEC: a program this process later execs (the workload
+    // it launches, say) must not inherit its ends. An inherited write
+    // end of `down` would hold the sidecar's control pipe open past
+    // this process's exit, so the sidecar would never see EOF. The
+    // sidecar's own copies are dup2'ed onto fixed fds in the child
+    // below, which clears the flag on them.
+    if (::pipe2(down, O_CLOEXEC) != 0) {
+        std::cerr << "[ProfilerSuite] pipe2() failed: " << ::strerror(errno) << "\n";
         return ProfilerError::SidecarSpawnFailed;
     }
-    // O_CLOEXEC so that no other child this process forks inherits the
-    // write end and holds the pipe open past the sidecar's exit.
+    if (::pipe2(up, O_CLOEXEC) != 0) {
+        std::cerr << "[ProfilerSuite] pipe2() failed: " << ::strerror(errno) << "\n";
+        ::close(down[0]); ::close(down[1]);
+        return ProfilerError::SidecarSpawnFailed;
+    }
     if (::pipe2(note, O_CLOEXEC) != 0) {
         std::cerr << "[ProfilerSuite] pipe2() failed: " << ::strerror(errno) << "\n";
         ::close(down[0]); ::close(down[1]);
