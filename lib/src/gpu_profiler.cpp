@@ -228,7 +228,11 @@ void GpuProfiler::Configure(const ProfilerConfig& config) {
 
         cudaDeviceProp prop;
         RUNTIME_API_CALL(cudaGetDeviceProperties(&prop, idx));
-        d.peakDramBwGbps        = (double)prop.memoryClockRate * 1e3
+        // cudaDeviceProp::memoryClockRate was removed in CUDA 13; the
+        // device attribute (kHz) exists in every supported release.
+        int memClockKHz = 0;
+        RUNTIME_API_CALL(cudaDeviceGetAttribute(&memClockKHz, cudaDevAttrMemoryClockRate, idx));
+        d.peakDramBwGbps        = (double)memClockKHz * 1e3
                                   * (prop.memoryBusWidth / 8) * 2 / 1e9;
         d.peakDramBwBytesPerSec = d.peakDramBwGbps * 1e9;
         // Per-SM warp occupancy ceiling — used by the "Active Warps /
