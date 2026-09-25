@@ -148,6 +148,9 @@ Sampling interval vs. overhead tradeoff:
       1,000 ns   1 MHz        High — likely buffer overflow
 ```
 
+> [!WARNING]
+> PM Sampling silences Activity-API kernel tracing (`CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL`) on H100 / CUPTI 12.8: the two cannot run in the same pass. See [CUPTI hardware findings](cupti-hardware-findings.md#1-pm-sampling-and-activity-api-kernel-tracing-cannot-run-concurrently).
+
 ### PC Sampling (moderate–high overhead)
 
 PC (Program Counter) sampling periodically samples the instruction pointer of running warps. Overhead scales with sampling frequency and GPU architecture.
@@ -184,6 +187,9 @@ Effective slowdown for full metric collection:
 
 > [!CAUTION]
 > Linaro Forge documentation warns that full metric collection "may have a significant impact on the target program, potentially resulting in orders of magnitude slowdown." Never enable this in production.
+
+> [!NOTE]
+> On Turing and newer the legacy Event/Metric API is gated off before its overhead is even the question — see [CUPTI hardware findings](cupti-hardware-findings.md#3-the-legacy-eventmetric-api-is-gated-off-on-turing-and-newer).
 
 ### Range Profiling API
 

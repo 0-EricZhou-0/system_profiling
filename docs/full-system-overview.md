@@ -275,3 +275,4 @@ sysProfiler.Stop();
 - [[full-system-internals|Detailed internals documentation]]
 - [[system-guide|GPU profiler system guide]]
 - [[cupti-overhead-analysis|CUPTI overhead analysis]]
+- [[cupti-hardware-findings|CUPTI hardware findings]]

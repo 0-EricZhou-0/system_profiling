@@ -273,6 +273,9 @@ Detailed usage in [`docs/tools/README.md`](docs/tools/README.md).
 - [`docs/cupti-overhead-analysis.md`](docs/cupti-overhead-analysis.md) —
   overhead characteristics of CUPTI subsystems and why this project
   uses PM Sampling.
+- [`docs/cupti-hardware-findings.md`](docs/cupti-hardware-findings.md) —
+  CUPTI/hardware behaviours found on H100 with CUDA 12.8 (PM Sampling vs.
+  Activity-API tracing, forced flushes, the legacy metric API's gate).
 - [`docs/integration.md`](docs/integration.md) — how a sibling
   project should depend on this one (submodule + `pip install -e .` is
   the recommended path).

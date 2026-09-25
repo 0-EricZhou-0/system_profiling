@@ -260,6 +260,7 @@ nvidia-profiling/
     ├── full-system-overview.md          High-level overview + visuals
     ├── full-system-internals.md         Deep dive into per-component internals
     ├── cupti-overhead-analysis.md       PM Sampling overhead measurements
+    ├── cupti-hardware-findings.md       CUPTI/hardware behaviours (H100, CUDA 12.8)
     ├── integration.md                   Downstream integration recipes
     └── examples/                        Per-example walkthroughs
 ```
