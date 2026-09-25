@@ -125,4 +125,14 @@ message ProfilerSuiteConfig {
 
     // Descendant tracking for the System + Disk probes. Unset = off.
     ProcessDiscoveryConfig process_discovery = 8;
+
+    // CPUs the sidecar process (and every thread it runs) is pinned to,
+    // e.g. a core the workload does not use, so SIDECAR mode means less
+    // interference and not only cleaner accounting. Empty (default) = no
+    // pinning: the sidecar inherits this process's affinity. Applied by
+    // the sidecar before it starts any thread; a set it cannot use (a CPU
+    // outside this job's cpuset, say) fails Configure() with
+    // SidecarAffinityFailed. Ignored, with a note, when no probe runs in
+    // SIDECAR mode — the host's own affinity is never changed.
+    repeated uint32 sidecar_cpus = 9;
 }

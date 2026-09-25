@@ -48,6 +48,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <poll.h>
+#include <sched.h>
 #include <signal.h>
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
@@ -262,6 +263,27 @@ int main(int argc, char** argv) {
               << "system=" << (cfg.has_system() && cfg.system().enabled())
               << " disk="   << (cfg.has_disk()   && cfg.disk().enabled())
               << "\n";
+    // Optional pinning, before any thread exists so every probe thread
+    // inherits it.
+    if (cfg.sidecar_cpus_size() > 0) {
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        bool inRange = true;
+        std::string list;
+        for (uint32_t cpu : cfg.sidecar_cpus()) {
+            if (cpu >= CPU_SETSIZE) { inRange = false; break; }
+            CPU_SET(cpu, &set);
+            list += (list.empty() ? "" : ",") + std::to_string(cpu);
+        }
+        if (!inRange || ::sched_setaffinity(0, sizeof(set), &set) != 0) {
+            std::cerr << "[sidecar] sidecar_cpus {" << list << "}: "
+                      << (inRange ? std::strerror(errno) : "CPU number out of range")
+                      << " — reporting SidecarAffinityFailed, exit\n";
+            SendStatus(ProfilerError::SidecarAffinityFailed);
+            return 1;
+        }
+        std::cerr << "[sidecar] pinned to CPU(s) " << list << "\n";
+    }
     if (!HasCapNetAdmin()) {
         std::cerr << "[sidecar] note: CAP_NET_ADMIN not held. Fine for the "
                      "current /proc backend + same-UID observation; the "

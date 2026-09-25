@@ -43,6 +43,7 @@ enum class ProfilerError {
     SidecarMissingCaps   = 202,  // sidecar started but lacks CAP_NET_ADMIN
     SidecarBadHandshake  = 203,  // sidecar returned an unexpected message
     SidecarExited        = 204,  // sidecar died before completing handshake
+    SidecarAffinityFailed = 205, // sidecar_cpus could not be applied
 };
 
 /// Stable human-readable identifier for a ProfilerError. Never

@@ -286,3 +286,37 @@ def test_start_failure_raises(tmp_path, mode):
         suite.start()
     suite.stop()   # still fine after a failed start
     assert sidecar_pids() == [], "the failed sidecar must have been reaped"
+
+
+def test_sidecar_cpus_pins_every_thread(tmp_path):
+    allowed = sorted(os.sched_getaffinity(0))
+    cpu = allowed[-1]
+    cfg = suite_config(tmp_path, "sidecar", processes=[(0, "self")], disk=True,
+                       discovery={"enabled": True, "scan_interval_ms": 50})
+    cfg["sidecar_cpus"] = [cpu]
+    suite = cp.ProfilerSuite()
+    cp.configure_suite(suite, cfg)
+    suite.start()
+    try:
+        time.sleep(0.3)
+        [sc] = sidecar_pids()
+        tids = [int(t) for t in os.listdir(f"/proc/{sc}/task")]
+        masks = {t: os.sched_getaffinity(t) for t in tids}
+    finally:
+        suite.stop()
+    # main + system sample/flush + disk sample/flush + discovery
+    assert len(tids) >= 6, tids
+    assert all(m == {cpu} for m in masks.values()), masks
+    assert sorted(os.sched_getaffinity(0)) == allowed, "the host's affinity must not change"
+
+
+def test_sidecar_cpus_unusable_fails_configure(tmp_path):
+    allowed = os.sched_getaffinity(0)
+    outside = [c for c in range(os.cpu_count()) if c not in allowed]
+    for cpus in ([outside[0]] if outside else []) + [4096]:
+        cfg = suite_config(tmp_path, "sidecar")
+        cfg["sidecar_cpus"] = [cpus] if isinstance(cpus, int) else cpus
+        suite = cp.ProfilerSuite()
+        with pytest.raises(RuntimeError, match="SidecarAffinityFailed"):
+            cp.configure_suite(suite, cfg)
+        assert sidecar_pids() == [], "the refused sidecar must have been reaped"

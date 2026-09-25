@@ -63,6 +63,10 @@ public:
 
     uint64_t startWallClockEpochNs = 0;
 
+    // ProfilerSuiteConfig.sidecar_cpus is non-empty (applied by the
+    // sidecar itself; remembered here only to warn when unused).
+    bool sidecarCpusSet = false;
+
     // Descendant tracking (ProfilerSuiteConfig.process_discovery). The
     // in-process instance serves LEGACY probes; under SIDECAR the
     // sidecar runs its own from the serialized config.
@@ -271,6 +275,8 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     // location next to the binary.
     m_impl->metricCatalogPath = proto.metric_catalog_path();
 
+    m_impl->sidecarCpusSet = proto.sidecar_cpus_size() > 0;
+
     // Descendant tracking — one setting for both system and disk.
     {
         const auto& pd = proto.process_discovery();
@@ -352,6 +358,10 @@ ProfilerError ProfilerSuite::Configure() {
         // No clock handshake: the sidecar stamps samples with
         // CLOCK_MONOTONIC (steady_clock), which is system-wide, and its
         // traces carry their own anchors, like the in-process probes'.
+    }
+    if (!wantSidecar && m_impl->sidecarCpusSet) {
+        std::cerr << "[ProfilerSuite] note: sidecar_cpus ignored — no probe runs in "
+                     "SIDECAR mode, and this process's own affinity is left alone\n";
     }
     // Legacy mode configures in-process. Sidecar mode: the sidecar
     // has already been sent the config over the pipe and will build

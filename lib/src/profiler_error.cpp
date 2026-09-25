@@ -12,6 +12,7 @@ const char* ToString(ProfilerError err) {
         case ProfilerError::SidecarMissingCaps:   return "SidecarMissingCaps";
         case ProfilerError::SidecarBadHandshake:  return "SidecarBadHandshake";
         case ProfilerError::SidecarExited:        return "SidecarExited";
+        case ProfilerError::SidecarAffinityFailed: return "SidecarAffinityFailed";
     }
     return "UnknownProfilerError";
 }
