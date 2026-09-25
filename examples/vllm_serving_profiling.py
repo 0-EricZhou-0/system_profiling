@@ -261,7 +261,7 @@ def main():
     ap.add_argument("--gpu", action="store_true",
                     help="also run GPU PM sampling in this launcher (device-wide counters)")
     ap.add_argument("--gpu-device", type=int, default=0)
-    ap.add_argument("--gpu-hz", type=int, default=1000)
+    ap.add_argument("--gpu-hz", type=int, default=500)
     ap.add_argument("--load-seconds", type=float, default=90.0,
                     help="duration of the request load, split into %d batches (default: %%(default)s)"
                          % len(BATCH_CONCURRENCY))

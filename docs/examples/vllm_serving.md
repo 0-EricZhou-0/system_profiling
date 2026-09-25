@@ -51,7 +51,7 @@ Every machine- or user-specific value is an argument:
 | `--scan-interval-ms` | 100 | descendant tracking scan interval |
 | `--flush-ms` | 1000 | probe flush interval |
 | `--disk-device` | every whole block device in `/sys/block` | devices for the per-device panel (repeatable) |
-| `--gpu`, `--gpu-device`, `--gpu-hz` | off, 0, 1000 | GPU PM sampling from the launcher |
+| `--gpu`, `--gpu-device`, `--gpu-hz` | off, 0, 500 | GPU PM sampling from the launcher |
 | `--load-seconds` | 90 | duration of the request load |
 | `--ready-timeout` | 900 | seconds to wait for `/v1/models` |
 | after `--` | — | passed to `vllm serve` unchanged, e.g. `-- --max-model-len 4096` |
