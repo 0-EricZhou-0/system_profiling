@@ -349,18 +349,9 @@ ProfilerError ProfilerSuite::Configure() {
             m_impl->sidecar.reset();
             return e;
         }
-        // Steady_clock reference now, so sidecar samples share the
-        // workload's t=0. wall_clock is deferred to Start().
-        uint64_t steady_ref =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-        if (auto e = m_impl->sidecar->SendSyncAnchor(steady_ref, /*wall=*/0);
-            e != ProfilerError::Ok)
-        {
-            std::cerr << "[ProfilerSuite] sidecar SendSyncAnchor: " << ToString(e) << "\n";
-            m_impl->sidecar.reset();
-            return e;
-        }
+        // No clock handshake: the sidecar stamps samples with
+        // CLOCK_MONOTONIC (steady_clock), which is system-wide, and its
+        // traces carry their own anchors, like the in-process probes'.
     }
     // Legacy mode configures in-process. Sidecar mode: the sidecar
     // has already been sent the config over the pipe and will build

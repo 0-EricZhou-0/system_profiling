@@ -241,3 +241,34 @@ def test_configure_from_short_thread(tmp_path):
         suite.stop()
     ts = host_samples(tmp_path, me)
     assert ts and ts[-1] >= t_stop - 50_000_000, "sampling ended before stop()"
+
+
+def test_sidecar_timestamps_share_host_clock(tmp_path):
+    # No clock handshake exists: the sidecar's samples must already be on
+    # this process's steady clock (CLOCK_MONOTONIC). Marker: at T, touch a
+    # fresh 64 MiB buffer; the first sidecar sample showing this process's
+    # RSS up by 32 MiB must land after T and within the fill time plus
+    # two system ticks.
+    import metric_catalog_pb2
+    me = os.getpid()
+    tick = 10_000_000
+    marks = []
+    with running_suite(tmp_path, "sidecar", processes=[(0, "self")]):
+        time.sleep(0.5)
+        for _ in range(3):
+            t0 = time.monotonic_ns()
+            buf = b"\x01" * (64 << 20)
+            marks.append((t0, time.monotonic_ns()))
+            time.sleep(0.3)
+            del buf
+            time.sleep(0.3)
+    frames = system_frames(tmp_path)
+    fqns = {s.scope: list(s.fqns) for f in frames for s in f.scope_metric_names}
+    col = fqns[metric_catalog_pb2.SCOPE_PROCESS].index("proc__rss_bytes")
+    rss = sorted((s.timestamp_ns, s.values[col]) for f in frames for s in f.process_samples
+                 if s.pid == me)
+    for t0, t1 in marks:
+        base = max(v for ts, v in rss if t0 - 200_000_000 <= ts < t0)
+        edge = next(ts for ts, v in rss if ts >= t0 - 100_000_000 and v > base + (32 << 20))
+        assert t0 <= edge <= t1 + 2 * tick, \
+            f"RSS marker seen at {(edge - t0) / 1e6:+.1f} ms (fill took {(t1 - t0) / 1e6:.1f} ms)"

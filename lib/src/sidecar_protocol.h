@@ -31,7 +31,11 @@ inline constexpr int kSidecarNoticeFd = 5;
 enum MsgType : uint32_t {
     // Parent → sidecar
     MSG_CONFIG      = 0x01,   // serialized SystemProfilerConfig proto blob
-    MSG_SYNC_ANCHOR = 0x02,   // 2× uint64: steady_clock_ref_ns, wall_clock_epoch_ns
+    // 0x02 was MSG_SYNC_ANCHOR (steady/wall clock reference). Retired:
+    // the sidecar's sample timestamps are CLOCK_MONOTONIC, the same
+    // system-wide clock the host's probes use, and each trace carries
+    // its own anchors (measured: a marker lines up within one system
+    // tick under SIDECAR exactly as under LEGACY). Do not reuse 0x02.
     MSG_START       = 0x03,   // no payload — begin sampling
     MSG_STOP        = 0x04,   // no payload — signal sample loop to exit
     MSG_ADD_PID     = 0x05,   // uint32 pid, uint32 alias_len, alias bytes,
@@ -49,11 +53,6 @@ enum MsgType : uint32_t {
 struct MsgHeader {
     uint32_t type;
     uint32_t length;   // bytes of payload following this header
-};
-
-struct SyncAnchorPayload {
-    uint64_t steady_clock_ref_ns;
-    uint64_t wall_clock_epoch_ns;
 };
 
 // Optional trailing byte of MSG_ADD_PID: the per-root override of

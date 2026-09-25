@@ -13,8 +13,6 @@
 //                  flush) when it exits, whichever thread spawned it.
 //   SendConfig() — serialize the system+disk config subset and post
 //                  MSG_CONFIG; wait for MSG_STATUS reply.
-//   SendSyncAnchor()  — post the workload's steady_clock/wall_clock
-//                       reference so sidecar timestamps line up.
 //   SendStart() / SendStop() — trivial control messages, no payload.
 //   ~SidecarProcess()  — close pipes, waitpid.
 //
@@ -56,15 +54,11 @@ public:
     ///   2. Build-time CUPTI_PROFILER_SIDECAR_PATH baked in via CMake.
     ///   3. Falls through to SidecarNotFound if neither resolves to an
     ///      executable regular file.
-    /// Sends nothing yet — call SendConfig() / SendSyncAnchor() next.
+    /// Sends nothing yet — call SendConfig() next.
     ProfilerError Spawn();
 
     /// Post serialized-proto config bytes and block for status reply.
     ProfilerError SendConfig(const std::string& serialized_config);
-
-    /// Post steady_clock + wall_clock references and block for status.
-    ProfilerError SendSyncAnchor(uint64_t steady_clock_ref_ns,
-                                 uint64_t wall_clock_epoch_ns);
 
     /// Tell the sidecar to build its probes and start sampling.
     /// Blocks for the sidecar's ack.

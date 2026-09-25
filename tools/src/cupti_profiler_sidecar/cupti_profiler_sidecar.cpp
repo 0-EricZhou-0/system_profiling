@@ -11,15 +11,14 @@
 // Protocol (see lib/src/sidecar_protocol.h):
 //   1. Parent sends MSG_CONFIG (serialized ProfilerSuiteConfig).
 //      Sidecar parses, replies Ok / SidecarBadHandshake.
-//   2. Parent sends MSG_SYNC_ANCHOR (steady_clock + wall_clock).
-//      Sidecar stashes; replies Ok. Currently unused — later commits
-//      wire it into sample timestamps.
-//   3. Parent sends MSG_START. Sidecar configures + starts probes,
-//      replies Ok. Sample loops now run.
-//   4. Parent may send MSG_ADD_PID / MSG_REMOVE_PID at any time.
+//   2. Parent sends MSG_START. Sidecar configures + starts probes,
+//      replies Ok. Sample loops now run. Timestamps are steady_clock
+//      (CLOCK_MONOTONIC, system-wide), so they line up with the host's
+//      traces without a clock handshake.
+//   3. Parent may send MSG_ADD_PID / MSG_REMOVE_PID at any time.
 //      MSG_ADD_PID may carry a trailing AddPidDescend byte: the per-root
 //      override of descendant tracking.
-//   5. Parent sends MSG_STOP. Sidecar stops probes (flushes final
+//   4. Parent sends MSG_STOP. Sidecar stops probes (flushes final
 //      trace), replies Ok, exits.
 //
 // It also stops gracefully — probes stopped, final trace flushed, exit
@@ -271,22 +270,7 @@ int main(int argc, char** argv) {
     }
     SendStatus(ProfilerError::Ok);
 
-    // 2. MSG_SYNC_ANCHOR — stashed but not yet consumed. Future commits
-    //    thread it into ProfilerSuite::Start's WallClockEpochNs so
-    //    sidecar samples align 1:1 with the workload's traces.
-    handshake(hdr, payload);
-    if (hdr.type != MSG_SYNC_ANCHOR ||
-        payload.size() != sizeof(SyncAnchorPayload))
-    {
-        SendStatus(ProfilerError::SidecarBadHandshake);
-        return 1;
-    }
-    SyncAnchorPayload sa{};
-    std::memcpy(&sa, payload.data(), sizeof(sa));
-    std::cerr << "[sidecar] MSG_SYNC_ANCHOR steady=" << sa.steady_clock_ref_ns << "\n";
-    SendStatus(ProfilerError::Ok);
-
-    // 3. MSG_START — build local SystemProfiler + DiskProfiler from
+    // 2. MSG_START — build local SystemProfiler + DiskProfiler from
     //    the parsed config, drive them from this process's threads.
     handshake(hdr, payload);
     if (hdr.type != MSG_START) {
@@ -384,7 +368,7 @@ int main(int argc, char** argv) {
 
     SendStatus(ProfilerError::Ok);
 
-    // 4. Message loop until MSG_STOP, the host's exit, EOF, or a signal.
+    // 3. Message loop until MSG_STOP, the host's exit, EOF, or a signal.
     bool ackStop = false;
     while (true) {
         Wake w = NextMsg(ctl, hdr, payload);

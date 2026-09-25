@@ -292,19 +292,6 @@ ProfilerError SidecarProcess::SendConfig(const std::string& serialized_config) {
     return ReadStatus();
 }
 
-ProfilerError SidecarProcess::SendSyncAnchor(uint64_t steady_clock_ref_ns,
-                                             uint64_t wall_clock_epoch_ns)
-{
-    std::lock_guard<std::mutex> lk(send_mutex_);
-    SyncAnchorPayload sa{ steady_clock_ref_ns, wall_clock_epoch_ns };
-    if (auto e = WriteMsg(MSG_SYNC_ANCHOR, &sa, sizeof(sa));
-        e != ProfilerError::Ok)
-    {
-        return e;
-    }
-    return ReadStatus();
-}
-
 ProfilerError SidecarProcess::SendStart() {
     std::lock_guard<std::mutex> lk(send_mutex_);
     if (auto e = WriteMsg(MSG_START, nullptr, 0); e != ProfilerError::Ok) return e;
