@@ -276,7 +276,9 @@ each under the name of the counter it carries:
 | `cancelled_write_bytes` | `proc__io_cancelled_write_bytes.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
 
 Each rate is the counter's delta over the actual interval since the PID's
-previous sample.
+previous sample, **minus the I/O of tracked children the process reaped in
+that interval** (see the last bullet below): per-PID I/O is the process's
+own I/O.
 
 > [!IMPORTANT]
 > **Changed on `feature/sidecar-mode` (2026-09-25).** Until then the
@@ -335,19 +337,28 @@ Consequences:
   (measured 2026-09-25: its EngineCore's `rchar` grew by 1.629 GiB during
   the load of a 1.627 GiB checkpoint, with `read_bytes` 0 from a warm
   cache), so there the load shows in the syscall layer only.
-- **A parent's counters include the children it has reaped.** When a
-  process reaps a child (`wait`), the kernel adds the child's lifetime
-  I/O to the parent's `/proc/<pid>/io` (all five counters; verified on
-  kernel 5.15: a parent's `rchar` grew by exactly the 64.3 MiB its child
-  had read, at the reap). So the per-PID rate of a parent shows a spike
-  when a child exits and is reaped, equal to everything that child did,
-  and when both are traced (descendant tracking) that I/O appears twice:
-  once under the child while it ran, once under the parent at the reap.
-  Summing the per-PID I/O of a traced tree over-counts by the I/O of
-  every traced child reaped by a traced parent. Untraced short-lived
-  children's I/O appears only this way, under their parent.
-  (Per-PID CPU has no such effect: it is the process's own CPU clock,
-  which excludes children; see [head and tail CPU](system-guide.md#head-and-tail-cpu).)
+- **The kernel folds a reaped child's I/O into its parent; the trace
+  takes it back out for tracked children.** When a process reaps a child
+  (`wait`), the kernel adds the child's lifetime I/O to the parent's own
+  `/proc/<pid>/io` (all five counters; verified on kernel 5.15: a
+  parent's `rchar` grew by exactly the 64.3 MiB its child had read, at
+  the reap). Unlike CPU's `cutime`/`cstime`, there is no separate
+  "children" counter. So when both are tracked, the child's I/O would
+  appear twice: under the child while it ran, and again as one jump in
+  the parent at the reap. The disk probe therefore subtracts each
+  reaped **tracked** child's counters at its last reading from the
+  parent's delta, and records it (`IoReapAdjustment`, see
+  [reaped children's I/O](system-guide.md#reaped-childrens-io)).
+  **Per-PID I/O means the process's own I/O, excluding tracked children
+  it reaped.** It differs from the raw `/proc/<pid>/io` delta exactly by
+  the adjustment records, from which the raw value can be rebuilt. The
+  I/O of a child that was never sampled (discovery off, or too
+  short-lived to be found) is **not** subtracted: it was never counted
+  separately, and appears once, under the parent that reaped it.
+  (Changed on `feature/sidecar-mode`, 2026-09-25; traces written before
+  it show the jump. Per-PID CPU never had this effect: it is the
+  process's own CPU clock, which excludes children; see
+  [head and tail CPU](system-guide.md#head-and-tail-cpu).)
 - `wchar` includes pipe and socket traffic (e.g. a server's responses,
   or a process's stdout), so it is not a file-write rate.
 - Per-device `disk__*_bytes` counts what the block device did, for every

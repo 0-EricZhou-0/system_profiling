@@ -16,6 +16,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 class DiskMetricsTrace;
@@ -48,9 +49,25 @@ struct DiskProcessTick {
     double   cancelled_write_bytes_per_sec       = 0.0;
 };
 
+// The five /proc/<pid>/io counters of one reading, in bytes.
+struct IoCounterValues {
+    uint64_t rchar = 0, wchar = 0, readBytes = 0, writeBytes = 0, cancelledWriteBytes = 0;
+};
+
+// Reaped tracked children's I/O subtracted from their tracked parent's
+// sample (IoReapAdjustment in disk_metrics.proto).
+struct IoReapRecord {
+    uint64_t timestamp_ns = 0;   // the parent's sample
+    uint32_t parent_pid   = 0;
+    std::vector<std::pair<uint32_t, IoCounterValues>> children;   // pid, last reading
+    // Raw parent delta minus the subtracted, per counter.
+    int64_t  remainder[5] = {0, 0, 0, 0, 0};
+};
+
 struct DiskSampleBatch {
     std::vector<DiskDeviceTick>  deviceTicks;
     std::vector<DiskProcessTick> processTicks;
+    std::vector<IoReapRecord>    ioReaps;
 };
 
 // Accessors for the descriptor arrays owned by disk_flush_thread.cpp.

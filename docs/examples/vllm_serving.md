@@ -182,15 +182,19 @@ one CPU thread in the launcher.
   because the file is already in the page cache. **A loader that `mmap`s
   from a warm cache would be invisible to every per-process counter**; see
   [per-PID I/O counters](../metric-model.md#per-pid-io-counters-who-records-what).
-- **The API server's `rchar` jumps at shutdown by EngineCore's whole
-  `rchar`.** When a process reaps a child, the kernel adds the child's
-  lifetime I/O to the parent's `/proc/<pid>/io`. So at shutdown, when the
-  API server reaps EngineCore, EngineCore's ~2.4 GiB appears again under
-  the API server, as one huge sample (it is what stretches the syscall-layer
-  rate axis); the same happens, smaller, when EngineCore reaps its compile
-  workers during startup. Summing the per-process I/O of a traced tree
-  therefore counts every reaped traced child twice. Per-process CPU has no
-  such effect (it is the process's own CPU clock).
+- **Reaped children's I/O is not counted twice.** When a process reaps a
+  child, the kernel adds the child's lifetime I/O to the parent's
+  `/proc/<pid>/io`: at shutdown, when the API server reaps EngineCore,
+  EngineCore's ~2.4 GiB of `rchar` lands in the API server's counters
+  (and, smaller, when EngineCore reaps its compile workers during
+  startup). Since both are traced, the profiler subtracts each reaped
+  traced child's last reading from its parent and records an
+  `IoReapAdjustment`, so per-process I/O is each process's own and sums
+  over the tree correctly; see
+  [reaped children's I/O](../system-guide.md#reaped-childrens-io).
+  **The figure above predates this** (it was recorded before the change):
+  it still shows the API server's one-sample jump at shutdown, which
+  stretches the syscall-layer rate axis.
 - `wchar` includes socket and pipe traffic (the server's responses, its
   log on stdout), so it is not a file-write rate.
 
@@ -198,7 +202,8 @@ one CPU thread in the launcher.
 
 - A process that lives shorter than one scan interval (100 ms) can be
   missed; its CPU still shows up in its parent's exit tail if the parent is
-  tracked and reaps it, and its I/O in the parent's counters (above).
+  tracked and reaps it, and its I/O in the parent's (never subtracted,
+  since it was never counted separately).
 - Per-sample CPU of another process is quantized to scheduler ticks
   (4 ms at `CONFIG_HZ=250`): single samples of a busy process jitter
   around their true value; sums over time are exact.

@@ -77,7 +77,7 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "io_rchar",
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
-        .description = "Per-PID syscall-layer read rate: /proc/<pid>/io rchar delta over the actual interval. Bytes returned by read()-family calls (read, pread, readv, sendfile, ...) on ANY fd — files, pipes, sockets, ttys — whether they came from the page cache or from storage. Never counts mmap: pages touched through a mapping are invisible here.",
+        .description = "Per-PID syscall-layer read rate: /proc/<pid>/io rchar delta over the actual interval. Bytes returned by read()-family calls (read, pread, readv, sendfile, ...) on ANY fd — files, pipes, sockets, ttys — whether they came from the page cache or from storage. Never counts mmap: pages touched through a mapping are invisible here. Own I/O only: when this process reaps a tracked child, the kernel adds the child's lifetime I/O to its counters, and the child's counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those.",
         .read        = [](const DiskProcessTick& t){ return t.rchar_bytes_per_sec; },
     },
     MetricDescriptor<DiskProcessTick>{
@@ -86,7 +86,7 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "io_wchar",
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
-        .description = "Per-PID syscall-layer write rate: /proc/<pid>/io wchar delta over the actual interval. Bytes accepted by write()-family calls on ANY fd (files, pipes, sockets, ttys), counted at the call, not when (or whether) they reach storage. Never counts stores through an mmap.",
+        .description = "Per-PID syscall-layer write rate: /proc/<pid>/io wchar delta over the actual interval. Bytes accepted by write()-family calls on ANY fd (files, pipes, sockets, ttys), counted at the call, not when (or whether) they reach storage. Never counts stores through an mmap. Own I/O only: when this process reaps a tracked child, the kernel adds the child's lifetime I/O to its counters, and the child's counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those.",
         .read        = [](const DiskProcessTick& t){ return t.wchar_bytes_per_sec; },
     },
     MetricDescriptor<DiskProcessTick>{
@@ -95,7 +95,7 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "io_read_bytes",
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
-        .description = "Per-PID storage-layer read rate: /proc/<pid>/io read_bytes delta over the actual interval. Bytes this process caused to be fetched from storage — read() misses AND page faults on mmap'd files that miss the page cache. Page-cache hits count 0, so a warm read or a warm mmap shows nothing.",
+        .description = "Per-PID storage-layer read rate: /proc/<pid>/io read_bytes delta over the actual interval. Bytes this process caused to be fetched from storage — read() misses AND page faults on mmap'd files that miss the page cache. Page-cache hits count 0, so a warm read or a warm mmap shows nothing. Own I/O only: when this process reaps a tracked child, the kernel adds the child's lifetime I/O to its counters, and the child's counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those.",
         .read        = [](const DiskProcessTick& t){ return t.read_bytes_per_sec; },
     },
     MetricDescriptor<DiskProcessTick>{
@@ -104,7 +104,7 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "io_write_bytes",
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
-        .description = "Per-PID storage-layer write rate: /proc/<pid>/io write_bytes delta over the actual interval. Bytes of file pages this process DIRTIED in the page cache, counted when dirtied, not at writeback (which may happen much later, or never — see io_cancelled_write_bytes). Writes to pipes and sockets count 0.",
+        .description = "Per-PID storage-layer write rate: /proc/<pid>/io write_bytes delta over the actual interval. Bytes of file pages this process DIRTIED in the page cache, counted when dirtied, not at writeback (which may happen much later, or never — see io_cancelled_write_bytes). Writes to pipes and sockets count 0. Own I/O only: when this process reaps a tracked child, the kernel adds the child's lifetime I/O to its counters, and the child's counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those.",
         .read        = [](const DiskProcessTick& t){ return t.write_bytes_per_sec; },
     },
     MetricDescriptor<DiskProcessTick>{
@@ -113,7 +113,7 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "io_cancelled_write_bytes",
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::BytesPerSec,  .scope = Scope::Process,
-        .description = "Per-PID rate of dirtied-then-discarded bytes: /proc/<pid>/io cancelled_write_bytes delta over the actual interval. Pages counted in io_write_bytes that were thrown away before writeback (file truncated or deleted while dirty). Bytes that actually reached storage ~= io_write_bytes - io_cancelled_write_bytes.",
+        .description = "Per-PID rate of dirtied-then-discarded bytes: /proc/<pid>/io cancelled_write_bytes delta over the actual interval. Pages counted in io_write_bytes that were thrown away before writeback (file truncated or deleted while dirty). Bytes that actually reached storage ~= io_write_bytes - io_cancelled_write_bytes. Own I/O only: when this process reaps a tracked child, the kernel adds the child's lifetime I/O to its counters, and the child's counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those.",
         .read        = [](const DiskProcessTick& t){ return t.cancelled_write_bytes_per_sec; },
     },
 };
@@ -187,6 +187,27 @@ DiskMetricsTrace BuildDiskTrace(
     }
     for (const auto& t : drained.deviceTicks)  AppendDeviceSample(trace, t);
     for (const auto& t : drained.processTicks) AppendProcessSample(trace, t);
+    for (const auto& r : drained.ioReaps) {
+        auto* a = trace.add_io_reap_adjustments();
+        a->set_timestamp_ns(r.timestamp_ns);
+        a->set_parent_pid(r.parent_pid);
+        for (const auto& [pid, v] : r.children) {
+            auto* c = a->add_children();
+            c->set_pid(pid);
+            auto* l = c->mutable_last_seen();
+            l->set_rchar(v.rchar);
+            l->set_wchar(v.wchar);
+            l->set_read_bytes(v.readBytes);
+            l->set_write_bytes(v.writeBytes);
+            l->set_cancelled_write_bytes(v.cancelledWriteBytes);
+        }
+        auto* m = a->mutable_remainder();
+        m->set_rchar(r.remainder[0]);
+        m->set_wchar(r.remainder[1]);
+        m->set_read_bytes(r.remainder[2]);
+        m->set_write_bytes(r.remainder[3]);
+        m->set_cancelled_write_bytes(r.remainder[4]);
+    }
     return trace;
 }
 
@@ -232,10 +253,12 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
             std::lock_guard<std::mutex> lock(batchMutex);
             drained.deviceTicks.swap(batch.deviceTicks);
             drained.processTicks.swap(batch.processTicks);
+            drained.ioReaps.swap(batch.ioReaps);
         }
 
         auto processSnapshot = probe.SnapshotProcesses();
-        if (drained.deviceTicks.empty() && drained.processTicks.empty()) continue;
+        if (drained.deviceTicks.empty() && drained.processTicks.empty() &&
+            drained.ioReaps.empty()) continue;
 
         DiskMetricsTrace trace = BuildDiskTrace(
             hostname, samplingFrequencyHz, hostCpuCount,

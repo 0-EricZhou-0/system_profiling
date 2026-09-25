@@ -946,6 +946,7 @@ that could bite, and what guards it:
 | Discovery: a PID in a `children` file exits and is reused before `pidfd_open` | the parent check (the new owner's parent must be tracked), done after `pidfd_open` and checked against it; the probes duplicate that very pidfd |
 | **Gap A: a tracked process exits and its number is reused before it is next checked** | **closed** (user decision, 2026-09-25), by the two rows above: a probe never samples an entry once its pidfd reports it gone, and a reading is kept only if the pidfd reports the process alive after it. This used to allow up to one scan interval of a new process's samples under a discovered process's entry, when only discovery watched for exits. Tested by forcing a reuse inside a PID namespace (`test_pid_reuse.py`) and, for a death between a read and the check, with a test-only hook (`test_read_then_verify.py`, `testing::KillAfterNextRead`). |
 | CPU tail bookkeeping (`CpuTail`, discovered processes) | still keyed by number, and outside gap A: it tells that an exited child has been reaped by its `/proc/<pid>` entry disappearing, and looks up a reparented child's new parent by number. A number reused within one sampling tick of that reap could make that child's tail missing or attributed to the wrong parent; it needs the PID space (`pid_max` 4,194,304 on the compute nodes, allocated sequentially) to wrap within ~10 ms. Documented, not guarded |
+| Reaped-children I/O watch (`IoReapAdjustment`, disk probe) | keyed by number too, but a watched zombie's start time is recorded and a different one later counts as reaped. Left open: a reap **and** reuse between the probe learning of the exit and its first look (microseconds), which would delay that child's subtraction until the new process with its number is reaped or its parent stops being tracked. Documented, not guarded |
 
 **Cost.** Per probe and sample tick: one `poll()` over all pidfds. Every
 100 ms: one `/proc/<pid>/comm` read per tracked process. One pidfd per
@@ -1121,6 +1122,61 @@ Cost: nothing with discovery off; otherwise one `/proc/<pid>/stat` read
 per sample tick for each tracked process that has discovered children,
 plus one per exited child until it is reaped.
 
+### Reaped children's I/O
+
+When a process reaps a child, the kernel adds the child's lifetime I/O
+to the parent's **own** `/proc/<pid>/io` counters (there is no separate
+children's counter, as `cutime`/`cstime` are for CPU). With both
+tracked, the child's I/O would be counted twice: in its samples, and as
+one jump in the parent's at the reap (in the vLLM example, EngineCore's
+2.4 GiB of `rchar` reappeared under the API server at shutdown as a
+~250 GB/s sample). The disk probe removes the second count, for roots
+and discovered processes alike:
+
+- A tracked process that exits (or leaves the tracked set) after at
+  least one reading is **watched** until it is reaped, with its counters
+  at its last reading (`last_seen`) and its parent: its `ppid` while it
+  is a zombie (so a reparented zombie follows its new parent), else the
+  parent it was registered with.
+- At the parent sample whose reading first includes the reap, the
+  children's `last_seen` are subtracted from the parent's delta, and one
+  `IoReapAdjustment` (in `DiskMetricsTrace.io_reap_adjustments`) records
+  the parent, each child with its `last_seen`, and the `remainder`: the
+  parent's raw delta minus what was subtracted. The remainder is what
+  the parent's sample carries; it mixes the parent's own I/O in that
+  interval with the children's I/O after their last reading, which no
+  reading can tell apart. **Raw delta = Σ `last_seen` + remainder**, so
+  the raw `/proc/<pid>/io` series can be rebuilt from the trace.
+- Which reading includes the reap is decided the way the CPU tail is,
+  by looking before and after the reads: watched children are checked
+  (`/proc/<pid>/stat` present, same start time) before the tick's
+  readings and again after them. Reaped before: the parent's reading
+  certainly includes it. Reaped only by the check after (the reap landed
+  during the readings, e.g. a parent blocked in `wait()`): unknown, so
+  the parent's reading of that tick is **not used** — it keeps its
+  baseline, and its next sample spans both intervals and certainly
+  includes the reap. That parent has one sample fewer.
+- A child is not subtracted if it was never read (its I/O was never
+  counted separately, so folding into its parent is right), or if its
+  parent is not tracked or stops being tracked first (then no parent
+  sample can include the reap: e.g. a parent that reaps a child and
+  exits within one sampling interval; if the grandparent is tracked, that
+  child's I/O then lands in the grandparent's remainder).
+
+So per-PID I/O is **the process's own I/O, excluding tracked children it
+reaped**, and differs from the raw `/proc/<pid>/io` delta exactly by the
+adjustment records. A child's I/O before its first reading is in its
+`last_seen` but in none of its samples (there is no I/O counterpart of
+the CPU head): `last_seen − Σ its samples` is that amount.
+
+Cost: nothing while no tracked process has exited. The probe already
+reads each process's `/proc/<pid>/io` and learns of exits from its
+pidfds; the watch adds two `/proc/<pid>/stat` reads per sample tick for
+each watched child, from its exit until its reap (one tick for a parent
+blocked in `wait()`), and one list of watched children to check per
+tick. It shares nothing with the system probe's CPU-tail bookkeeping:
+each probe runs its own.
+
 ### Subreaper helper: `adopt_orphans()`
 
 When an intermediate process exits, its children are re-parented to the
@@ -1291,7 +1347,12 @@ message DiskMetricsTrace {
     repeated ProcessSample process_samples       = 6;
     repeated FlushStats    flush_stats           = 7;
     DiscoveryStats   discovery_stats             = 8;
+    // Reaped tracked children's I/O subtracted from their tracked parent.
+    repeated IoReapAdjustment io_reap_adjustments = 9;
 }
+message IoReapAdjustment { uint64 timestamp_ns; uint32 parent_pid;   // the parent's sample
+                           repeated Child children;                  // { pid, IoCounters last_seen }
+                           IoCounterDeltas remainder; }              // raw delta − Σ last_seen
 ```
 
 ### Shared sample shape
@@ -1541,7 +1602,7 @@ Per-device samples (one row per tracked device per sample tick):
 | `read_queue_depth` | `/sys/block/<dev>/inflight` | requests | Currently in-flight read requests |
 | `write_queue_depth` | `/sys/block/<dev>/inflight` | requests | Currently in-flight write requests |
 
-Per-process samples (one column per `/proc/<pid>/io` counter; rates over the actual Δt since the PID's previous sample):
+Per-process samples (one column per `/proc/<pid>/io` counter; rates over the actual Δt since the PID's previous sample, minus the I/O of tracked children the process reaped in that interval — see [reaped children's I/O](#reaped-childrens-io)):
 
 | FQN | Source | Units | Sees |
 | ----- | ------ | ----- | ----- |

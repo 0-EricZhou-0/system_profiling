@@ -13,6 +13,9 @@ import "metric_sample.proto";
 //                   values[] holds the rates of rchar, wchar,
 //                   read_bytes, write_bytes and cancelled_write_bytes
 //                   (docs/metric-model.md, "Per-PID I/O counters").
+//                   A process's samples carry its OWN I/O: the I/O of
+//                   tracked children it reaped is subtracted (see
+//                   IoReapAdjustment).
 message DiskMetricsTrace {
     TraceHeader header                           = 1;
     repeated ScopeMetricNames scope_metric_names = 2;
@@ -23,4 +26,67 @@ message DiskMetricsTrace {
     repeated FlushStats    flush_stats           = 7;
     // Present while descendant tracking runs; see DiscoveryStats.
     DiscoveryStats   discovery_stats             = 8;
+    // One per parent sample from which reaped tracked children's I/O
+    // was subtracted (see IoReapAdjustment).
+    repeated IoReapAdjustment io_reap_adjustments = 9;
+}
+
+// The five /proc/<pid>/io counters, in bytes.
+message IoCounters {
+    uint64 rchar                 = 1;
+    uint64 wchar                 = 2;
+    uint64 read_bytes            = 3;
+    uint64 write_bytes           = 4;
+    uint64 cancelled_write_bytes = 5;
+}
+
+// Same, signed: a difference of two readings.
+message IoCounterDeltas {
+    sint64 rchar                 = 1;
+    sint64 wchar                 = 2;
+    sint64 read_bytes            = 3;
+    sint64 write_bytes           = 4;
+    sint64 cancelled_write_bytes = 5;
+}
+
+// When a process reaps a child, the kernel adds the child's lifetime I/O
+// to the parent's own /proc/<pid>/io counters (there is no separate
+// "children" counter, unlike cutime/cstime for CPU). If both are
+// tracked, the child's I/O would be counted twice: in its own samples,
+// and again as a jump in the parent's at the reap. So at the parent
+// sample that first includes the reap, each reaped child's counters as
+// of its last reading are subtracted from the parent's delta, and one
+// IoReapAdjustment records it.
+//
+// The raw /proc value stays reconstructable: the parent's raw delta over
+// that sample's interval is
+//     children[*].last_seen (summed)  +  remainder
+// and `remainder` is exactly what the parent's sample carries (its rates
+// times the interval). It mixes the parent's own I/O in that interval
+// with the children's I/O after their last reading, which no reading can
+// tell apart. A negative remainder would mean the parent's delta was
+// smaller than what was subtracted (the sample is then clamped to 0);
+// it is not expected.
+//
+// Limits (docs/metric-model.md, "Reaped children's I/O"):
+//   * only children that were sampled are subtracted; the I/O of a child
+//     the probe never read (untracked, or gone before its first reading)
+//     stays in the parent, where it is counted once;
+//   * the parent is the one the child had as a zombie (its ppid), or, if
+//     it was reaped before the probe could look, the one it was
+//     registered with; a parent that is not tracked gets no adjustment;
+//   * a child whose reap no accepted parent reading includes (the parent
+//     reaps it and exits within one sampling interval) is not subtracted
+//     there; if the grandparent is tracked, that child's I/O is then in
+//     the parent's last_seen-to-exit growth, i.e. the grandparent's
+//     remainder.
+message IoReapAdjustment {
+    uint64 timestamp_ns            = 1;  // the parent sample it applies to
+    uint32 parent_pid              = 2;
+    message Child {
+        uint32     pid             = 1;
+        IoCounters last_seen       = 2;  // subtracted from the parent
+    }
+    repeated Child  children       = 3;
+    IoCounterDeltas remainder      = 4;
 }
