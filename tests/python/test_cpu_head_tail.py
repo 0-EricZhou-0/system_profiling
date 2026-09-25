@@ -209,3 +209,19 @@ def test_cpu_tail_excludes_reaped_grandchildren(tmp_path, mode):
               f"{head + samples + tail:.3f} s vs truth {truth:.3f} s")
         assert abs(head + samples + tail - truth) <= 0.04 + 0.02 * truth
 
+
+@pytest.mark.parametrize("mode", MODES)
+def test_cpu_tail_emitted_once(tmp_path, mode):
+    # Sampling at 100 Hz, scanning every 1 s: after the spinner is reaped,
+    # up to a second of sample ticks pass before discovery marks it removed.
+    # Its tail is still emitted exactly once.
+    with tree(ROOT) as t:
+        with running_suite(tmp_path, mode, hz=100, processes=[(t.pid, "root")],
+                           discovery={"enabled": True, "scan_interval_ms": 1000}):
+            time.sleep(0.1)
+            truths = spin(t, 1, 1.5)
+            time.sleep(1.5)
+    frames = system_frames(tmp_path)
+    [pid] = truths
+    tails = [c for f in frames for c in f.cpu_tails if pid in c.pids]
+    assert len(tails) == 1, f"{len(tails)} CpuTail messages for {pid}: {tails}"

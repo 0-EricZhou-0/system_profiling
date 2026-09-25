@@ -88,6 +88,10 @@ public:
     std::unordered_map<uint32_t, uint32_t>       discoveredParent;
     std::unordered_map<uint32_t, ExitedChild>    awaitingTail;
     std::unordered_map<uint32_t, ParentBaseline> childrenCpu;
+    //   tailSettled: discovered PIDs whose tail was emitted or given up
+    //     on. Such a PID stays in the snapshot until discovery's removal
+    //     is flushed; it must not be noted as exiting (and tailed) again.
+    std::unordered_set<uint32_t>                 tailSettled;
 
     void NoteExited(uint32_t pid);
     void AttributeTails(uint64_t tsNs,
@@ -121,6 +125,9 @@ void SystemProfiler::Impl::NoteExited(uint32_t pid) {
 // already covered is their tail.
 void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
                                           const std::unordered_set<uint32_t>& trackedPids) {
+    for (auto it = tailSettled.begin(); it != tailSettled.end(); ) {
+        it = trackedPids.count(*it) ? std::next(it) : tailSettled.erase(it);
+    }
     if (discoveredParent.empty() && awaitingTail.empty()) {
         childrenCpu.clear();
         return;
@@ -136,7 +143,11 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
         parents.insert(pid);
     }
     for (auto it = awaitingTail.begin(); it != awaitingTail.end(); ) {
-        if (!trackedPids.count(it->second.parent)) { it = awaitingTail.erase(it); continue; }
+        if (!trackedPids.count(it->second.parent)) {
+            tailSettled.insert(it->first);
+            it = awaitingTail.erase(it);
+            continue;
+        }
         kids[it->second.parent].push_back(it->first);
         parents.insert(it->second.parent);
         parents.insert(it->first);
@@ -171,7 +182,7 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
                 (before->cutime == st->cutime && before->cstime == st->cstime)) break;
         }
         if (!st) {                       // parent gone: nobody left to measure
-            for (uint32_t c : waiting) awaitingTail.erase(c);
+            for (uint32_t c : waiting) { awaitingTail.erase(c); tailSettled.insert(c); }
             childrenCpu.erase(parent);
             continue;
         }
@@ -194,7 +205,7 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
         }
         // Reaped without a baseline (found and reaped within one tick of
         // its parent's first reading): no tail can be measured.
-        for (uint32_t c : reaped) awaitingTail.erase(c);
+        for (uint32_t c : reaped) { awaitingTail.erase(c); tailSettled.insert(c); }
         childrenCpu[parent] = {cur, st->startTime};
     }
 }
@@ -305,7 +316,7 @@ void SystemProfiler::Start() {
                 uint32_t pid = entry.pid;
                 snapshotPids.insert(pid);
                 if (entry.discovered && !entry.pending_removal &&
-                    !impl.awaitingTail.count(pid)) {
+                    !impl.awaitingTail.count(pid) && !impl.tailSettled.count(pid)) {
                     impl.discoveredParent[pid] = entry.parent_pid;
                 }
                 if (entry.pending_removal) { impl.NoteExited(pid); continue; }
