@@ -125,7 +125,7 @@ inline constexpr std::array kProcessMetrics = {
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::PctOfCore,  .scope = Scope::Process,
         .peak        = PeakExpr{"ncpus_x_100"},
-        .description = "Per-PID on-CPU time as % of one core, aggregated across every thread of the process. Sum of /proc/<pid>/task/*/schedstat sum_exec_runtime deltas (ns) over actual wall-clock between ticks — nanosecond-precise, no CLK_TCK quantization. >100% means multi-core use; the panel peak_expr caps the axis at ncpus × 100.",
+        .description = "Per-PID on-CPU time as % of one core, for the whole process. Delta of the process CPU clock (clock_getcpuclockid: sum_exec_runtime of every thread, including threads that exited between ticks) in ns over actual wall-clock between ticks. No CLK_TCK quantization; a thread that runs without being descheduled has its time folded in at each scheduler tick (CONFIG_HZ, 4 ms at 250 Hz), so one sample can be off by up to a tick per running thread, while the sum over samples stays exact. >100% means multi-core use; the panel peak_expr caps the axis at ncpus × 100.",
         .read        = [](const ProcessTick& t){ return t.cpu_pct; },
     },
     MetricDescriptor<ProcessTick>{

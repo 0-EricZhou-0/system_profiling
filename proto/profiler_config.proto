@@ -11,7 +11,7 @@ import "metric_sample.proto";
 // toward the workload's per-PID CPU accounting — a small but non-zero
 // distortion for benchmarks that care about "what the workload alone
 // would use." SIDECAR mode moves those threads to a distinct PID so
-// they don't appear in the workload's schedstat aggregation, at the
+// they don't appear in the workload's per-PID CPU accounting, at the
 // cost of an extra process on the host and (with the taskstats
 // backend) a CAP_NET_ADMIN requirement on the sidecar binary.
 //

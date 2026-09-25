@@ -236,17 +236,22 @@ Today's `CPUProcessSample` and `MemoryProcessSample`:
 > Per-PID `cpu_pct` is "% of one CPU" — modelling it as a Counter with
 > `.sum.per_second` semantics (not pre-normalized) is more faithful: a
 > 4-thread saturating process reports `400`, exactly what `.sum` across
-> four cores would yield. The value is summed across every thread of
-> the process by walking `/proc/<pid>/task/*/schedstat` and totalling
-> field 1 (`sum_exec_runtime` in ns) — the TGID-level
-> `/proc/<pid>/schedstat` reports only the leader's `task_struct` and
-> would silently under-report multi-threaded work. Nanosecond precision
-> rather than the 10 ms `CLK_TCK` quantization that `utime/stime` would
-> impose. The denominator is the actual wall-clock elapsed between
+> four cores would yield. The value is read from the process CPU clock
+> (`clock_getcpuclockid` + `clock_gettime`): the kernel's
+> `sum_exec_runtime` for the whole thread group, including threads
+> that have already exited — unlike the TGID-level
+> `/proc/<pid>/schedstat`, which reports only the leader's
+> `task_struct`, or a walk of `/proc/<pid>/task/*/schedstat`, which
+> loses every thread that exits between ticks. It avoids the 10 ms
+> `CLK_TCK` quantization that `utime/stime` would impose; the remaining
+> granularity is the scheduler tick (a running thread's time is folded
+> in at each `CONFIG_HZ` tick or context switch), which can shift up to
+> one tick per running thread between adjacent samples but never loses
+> time. The denominator is the actual wall-clock elapsed between
 > ticks, not the nominal sample period, so reported % stays accurate
 > even when sample loop jitter stretches a tick. The trade-off is that
 > we no longer split per-PID time into user / kernel / iowait —
-> schedstat reports total on-CPU time only.
+> the CPU clock reports total on-CPU time only.
 
 ### 2.4 — Mapping `DiskMetricsTrace`
 

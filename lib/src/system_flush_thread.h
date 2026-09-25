@@ -56,9 +56,11 @@ struct SystemTick {
 struct ProcessTick {
     uint64_t timestamp_ns   = 0;
     uint32_t pid            = 0;
-    // Total on-CPU time as % of one core. From /proc/<pid>/schedstat
-    // sum_exec_runtime delta — nanosecond-precise (no CLK_TCK
-    // quantization). >100% for multi-threaded tasks.
+    // Total on-CPU time as % of one core. From the process CPU clock
+    // (sum_exec_runtime of the whole thread group, exited threads
+    // included). No CLK_TCK quantization, but a running thread's time
+    // is folded in at scheduler ticks, so one sample can be off by up
+    // to one tick per running thread. >100% for multi-threaded tasks.
     double cpu_pct          = 0.0;
     // Memory (bytes)
     uint64_t rss_bytes      = 0;

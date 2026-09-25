@@ -53,13 +53,11 @@ public:
     // Per-tracked-PID baseline carried between sample ticks. tickTsNs
     // pins the actual wall-clock instant of the previous read (so the
     // %-of-core denominator uses real elapsed time, not a nominal
-    // sample period). threadCpuNs holds per-TID sum_exec_runtime so
-    // we can attribute on-CPU time across the whole thread group
-    // (process CPU%, not just main-thread CPU%) and stay robust to
-    // threads spawning or exiting between ticks.
+    // sample period). cpuNs is the process CPU clock at that read —
+    // on-CPU time of the whole thread group, exited threads included.
     struct ProcessBaseline {
         uint64_t tickTsNs = 0;
-        internal::PIDThreadCpuMap threadCpuNs;
+        uint64_t cpuNs = 0;
     };
     std::unordered_map<uint32_t, ProcessBaseline> prevPID;
 
@@ -175,34 +173,29 @@ void SystemProfiler::Start() {
                 snapshotPids.insert(pid);
                 if (entry.pending_removal) continue;
 
-                auto curThreads = internal::ReadPIDSchedStatPerThread(pid);
-                auto it         = impl.prevPID.find(pid);
+                // A PID that has exited (or cannot be read) is skipped
+                // for this tick; its baseline is kept, so no negative
+                // or garbage delta can be emitted.
+                auto curCpuNs = internal::ReadPIDCpuTimeNs(pid);
+                if (!curCpuNs) continue;
+                auto it = impl.prevPID.find(pid);
                 if (it == impl.prevPID.end()) {
                     // Mid-run add — seed the baseline; skip this tick.
                     // First emitted sample is one tick later, so the
                     // delta isn't garbage.
                     auto& seed = impl.prevPID[pid];
-                    seed.tickTsNs     = tsNs;
-                    seed.threadCpuNs  = std::move(curThreads);
+                    seed.tickTsNs = tsNs;
+                    seed.cpuNs    = *curCpuNs;
                     continue;
                 }
                 auto& prev  = it->second;
                 auto statm  = internal::ReadPIDStatm(pid);
 
-                // Aggregate on-CPU delta across the whole thread group.
-                // For every TID visible this tick: delta = cur - prev,
-                // treating an absent prev as 0 so newly spawned
-                // threads get attributed to this window. Threads that
-                // exited between ticks simply drop out of the sum;
-                // their final partial slice (from prev tick to exit)
-                // is discarded — a tolerable approximation that keeps
-                // the per-PID baseline bounded.
-                uint64_t deltaCpuNs = 0;
-                for (const auto& kv : curThreads) {
-                    auto pit = prev.threadCpuNs.find(kv.first);
-                    uint64_t prevNs = (pit != prev.threadCpuNs.end()) ? pit->second : 0;
-                    if (kv.second > prevNs) deltaCpuNs += (kv.second - prevNs);
-                }
+                // On-CPU delta of the whole thread group. The process
+                // CPU clock is monotonic for the life of the process,
+                // and threads that exited since the previous tick have
+                // already been folded into it.
+                uint64_t deltaCpuNs = (*curCpuNs > prev.cpuNs) ? (*curCpuNs - prev.cpuNs) : 0;
 
                 // Denominator: actual wall-clock elapsed between this
                 // tick and the previous one, not the nominal sample
@@ -220,8 +213,8 @@ void SystemProfiler::Start() {
                 t.vms_bytes    = statm.VMSPages    * pageSize;
                 t.shared_bytes = statm.sharedPages * pageSize;
 
-                prev.tickTsNs    = tsNs;
-                prev.threadCpuNs = std::move(curThreads);
+                prev.tickTsNs = tsNs;
+                prev.cpuNs    = *curCpuNs;
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.processTicks.push_back(std::move(t));

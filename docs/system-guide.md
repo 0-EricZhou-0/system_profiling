@@ -1033,7 +1033,7 @@ Per-process samples (one row per tracked PID per sample tick):
 
 | Field | Source | Units | Notes |
 | ----- | ------ | ----- | ----- |
-| `cpu_pct` | `/proc/<pid>/task/*/schedstat` field 1 (`sum_exec_runtime`, ns), summed across threads | % of one CPU | Total on-CPU time across the whole thread group, divided by actual wall-clock elapsed between ticks. No user/kernel/iowait split. Nanosecond precision — no 10 ms `CLK_TCK` quantization. |
+| `cpu_pct` | Process CPU clock (`clock_getcpuclockid` + `clock_gettime`, ns) | % of one CPU | Total on-CPU time across the whole thread group, including threads that exited between ticks, divided by actual wall-clock elapsed between ticks. No user/kernel/iowait split. No 10 ms `CLK_TCK` quantization, but a thread running without being descheduled is credited at each scheduler tick (`CONFIG_HZ`, 4 ms at 250 Hz), so a single sample can be off by up to one tick per running thread; the sum over samples is exact. |
 | `rss_bytes` | `/proc/<pid>/status` VmRSS | bytes | Resident set size (physical pages) |
 | `vms_bytes` | `/proc/<pid>/status` VmSize | bytes | Virtual memory size |
 | `shared_bytes` | `/proc/<pid>/status` RssShmem | bytes | Resident shared memory |

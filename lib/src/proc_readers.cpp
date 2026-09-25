@@ -1,8 +1,6 @@
 #include "proc_readers.h"
 
-#include <cctype>
-#include <cstring>
-#include <dirent.h>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 #include <unistd.h>
@@ -26,35 +24,17 @@ CPUStatSnapshot ReadCPUStat() {
     return s;
 }
 
-PIDThreadCpuMap ReadPIDSchedStatPerThread(uint32_t pid) {
-    PIDThreadCpuMap m;
-    std::string taskDir = "/proc/" + std::to_string(pid) + "/task";
-    DIR* d = opendir(taskDir.c_str());
-    if (!d) return m;
-
-    // Each /proc/<pid>/task/<tid>/schedstat format
-    // (Documentation/scheduler/sched-stats.rst):
-    //   <sum_exec_runtime> <run_delay> <pcount>
-    // We only consume field 1 — the nanoseconds this thread has spent
-    // on a CPU. The two trailing fields (runqueue wait, schedule
-    // count) are gated by the kernel.sched_schedstats sysctl and not
-    // used by this profiler.
-    while (struct dirent* e = readdir(d)) {
-        const char* n = e->d_name;
-        if (!std::isdigit(static_cast<unsigned char>(n[0]))) continue;
-        uint32_t tid = static_cast<uint32_t>(std::strtoul(n, nullptr, 10));
-        if (tid == 0) continue;
-
-        std::string path = taskDir + "/" + n + "/schedstat";
-        std::ifstream f(path);
-        if (!f) continue;     // thread exited mid-walk
-        uint64_t ns = 0;
-        f >> ns;
-        if (!f) continue;
-        m.emplace(tid, ns);
-    }
-    closedir(d);
-    return m;
+std::optional<uint64_t> ReadPIDCpuTimeNs(uint32_t pid) {
+    // A process CPU clock covers the whole thread group, including
+    // threads that have already exited. Per-thread
+    // /proc/<pid>/task/*/schedstat would miss those, and
+    // /proc/<pid>/schedstat reports only the group leader.
+    clockid_t clk;
+    if (clock_getcpuclockid(static_cast<pid_t>(pid), &clk) != 0) return std::nullopt;
+    struct timespec ts;
+    if (clock_gettime(clk, &ts) != 0) return std::nullopt;
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull
+         + static_cast<uint64_t>(ts.tv_nsec);
 }
 
 MemInfoSnapshot ReadMemInfo() {
