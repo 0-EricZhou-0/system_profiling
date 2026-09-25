@@ -316,6 +316,11 @@ void GpuProfiler::Start() {
     m_impl->wallClockEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
+    // Start PM sampling on every device before any decode thread runs.
+    for (auto& d : m_impl->devices) {
+        CUPTI_API_CALL(d->target.Start());
+    }
+
     // Launch one decode thread per device.
     for (auto& d : m_impl->devices) {
         d->stopDecode   = false;
@@ -364,10 +369,6 @@ void GpuProfiler::Start() {
                                            std::ref(m_impl->flushStatsMutex));
     }
 
-    // Start PM sampling on every device.
-    for (auto& d : m_impl->devices) {
-        CUPTI_API_CALL(d->target.Start());
-    }
     m_impl->running = true;
 
     std::cout << "\n=== PM sampling started at "
