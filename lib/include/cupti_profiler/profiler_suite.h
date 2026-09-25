@@ -50,6 +50,13 @@ public:
 
     /// Configure all enabled profilers.
     ///
+    /// Also runs the startup situation report (which tracking
+    /// guarantees hold here: /proc children support, pidfd, Yama,
+    /// observer capabilities, secure-exec, the observer binary's
+    /// filesystem, subreaper state, taskstats, and per listed root:
+    /// same uid, spawned vs attached, io readable). It is logged once
+    /// to stderr and written to session_metadata.pb.
+    ///
     /// Under SystemProbeMode::Sidecar, this is where the sidecar
     /// process is spawned and the initial handshake (config +
     /// sync anchor) runs — capability failures surface here as

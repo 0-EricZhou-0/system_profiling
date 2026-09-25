@@ -7,19 +7,24 @@
 #include "session_metadata.pb.h"
 #include "session_metadata_writer.h"
 #include "sidecar_process.h"
+#include "situation_report.h"
 
 #include <google/protobuf/text_format.h>
 #include <google/protobuf/io/zero_copy_stream_impl.h>
 
 #include <sys/stat.h>
+#include <algorithm>
 #include <chrono>
+#include <climits>
 #include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <unistd.h>
+#include <vector>
 
 namespace cupti_profiler {
 
@@ -64,6 +69,12 @@ public:
     internal::DiscoverySettings discoverySettings;
     std::unique_ptr<internal::ProcessDiscovery> discovery;
 
+    // Startup situation report: environment lines from Configure(),
+    // plus one line per root added (config-listed or mid-run).
+    std::mutex situationMutex;
+    std::vector<internal::SituationLine> situation;
+    std::vector<internal::SituationLine> rootSituation;
+
     bool loaded = false;
 
     bool SysLegacy()  const { return sysEnabled  && sysConfig.mode  == SystemProbeMode::Legacy; }
@@ -71,6 +82,7 @@ public:
 
     void AddTrackedProcess(uint32_t pid, const std::string& alias,
                            std::optional<bool> trackDescendants);
+    void RecordRootSituation(uint32_t pid, std::optional<bool> trackDescendants);
 
     // Walk a parsed ProfilerSuiteConfig and populate this Impl. Shared
     // between the .pbtxt path (LoadConfig) and the serialized-bytes path
@@ -381,7 +393,48 @@ ProfilerError ProfilerSuite::Configure() {
                 m_impl->discovery->AddRoot(p.pid, p.alias, std::nullopt, PD::kDiskSink);
     }
 
+    // Startup situation report: logged once, written to the manifest.
+    if (m_impl->sysEnabled || m_impl->diskEnabled) {
+        internal::SituationInputs in;
+        in.sidecar = static_cast<bool>(m_impl->sidecar);
+        if (m_impl->sidecar) {
+            in.sidecarPid = m_impl->sidecar->child_pid();
+            char buf[PATH_MAX] = {0};
+            ssize_t n = ::readlink(("/proc/" + std::to_string(in.sidecarPid) + "/exe").c_str(),
+                                   buf, sizeof(buf) - 1);
+            in.observerBinary = n > 0 ? std::string(buf, static_cast<size_t>(n)) : "unknown";
+        } else {
+            char buf[PATH_MAX] = {0};
+            ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+            in.observerBinary = n > 0 ? std::string(buf, static_cast<size_t>(n)) : "unknown";
+        }
+        in.discovery = m_impl->discoverySettings;
+        auto lines = internal::ProbeSituation(in);
+        internal::LogSituation("situation report:", lines);
+        {
+            std::lock_guard<std::mutex> lk(m_impl->situationMutex);
+            m_impl->situation = std::move(lines);
+        }
+        std::vector<uint32_t> roots;
+        for (const auto& p : m_impl->sysConfig.Processes)  roots.push_back(p.pid);
+        for (const auto& p : m_impl->diskConfig.Processes) roots.push_back(p.pid);
+        std::sort(roots.begin(), roots.end());
+        roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+        for (uint32_t pid : roots) m_impl->RecordRootSituation(pid, std::nullopt);
+    }
     return ProfilerError::Ok;
+}
+
+void ProfilerSuite::Impl::RecordRootSituation(uint32_t pid,
+                                              std::optional<bool> trackDescendants) {
+    auto line = internal::ProbeRoot(pid, trackDescendants.value_or(discoverySettings.enabled),
+                                    discoverySettings.intervalMs);
+    internal::LogSituation("situation report:", {line});
+    std::lock_guard<std::mutex> lk(situationMutex);
+    for (auto& l : rootSituation) {
+        if (l.check == line.check) { l = std::move(line); return; }
+    }
+    rootSituation.push_back(std::move(line));
 }
 
 void ProfilerSuite::Impl::WriteSessionManifest() {
@@ -422,6 +475,22 @@ void ProfilerSuite::Impl::WriteSessionManifest() {
     // one file (session_metadata.pb) to bootstrap.
     if (catalog) {
         *meta.mutable_catalog() = catalog->Proto();
+    }
+
+    // Situation report. The subreaper line is re-probed: adopt_orphans()
+    // may have been called after Configure().
+    {
+        std::lock_guard<std::mutex> lk(situationMutex);
+        auto add = [&](const internal::SituationLine& l) {
+            auto* c = meta.add_situation();
+            c->set_check(l.check);
+            c->set_observed(l.observed);
+            c->set_consequence(l.consequence);
+            c->set_degraded(l.degraded);
+        };
+        const auto subreaper = internal::ProbeSubreaper();
+        for (const auto& l : situation) add(l.check == subreaper.check ? subreaper : l);
+        for (const auto& l : rootSituation) add(l);
     }
 
     internal::WriteSessionMetadata(sessionMetadataPath, meta);
@@ -533,6 +602,7 @@ void ProfilerSuite::Impl::AddTrackedProcess(uint32_t pid, const std::string& ali
                       << "): " << ToString(e) << "\n";
         }
     }
+    if (sysEnabled || diskEnabled) RecordRootSituation(pid, trackDescendants);
 }
 
 void ProfilerSuite::RemoveTrackedProcess(uint32_t pid) {
