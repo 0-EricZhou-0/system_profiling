@@ -19,6 +19,7 @@
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/tracked_process.h>
 #include <cupti_profiler/child_subreaper.h>
+#include <cupti_profiler/testing.h>
 
 #include <cuda_runtime.h>
 
@@ -330,6 +331,12 @@ PYBIND11_MODULE(_native, m) {
         },
         "prctl(PR_SET_CHILD_SUBREAPER, 1) on this process and let descendant "
         "tracking reap the orphans it saw adopted. See cupti_profiler.adopt_orphans().");
+    // Test-only (see <cupti_profiler/testing.h>); not a supported API.
+    m.def("_testing_arm_flush_gate", &testing::ArmFlushGate);
+    m.def("_testing_wait_flush_held",
+          [](double timeout_s) { return testing::WaitFlushHeld(static_cast<unsigned>(timeout_s * 1000)); },
+          py::arg("timeout_s"), py::call_guard<py::gil_scoped_release>());
+    m.def("_testing_release_flush_gate", &testing::ReleaseFlushGate);
     m.def("child_subreaper_enabled", &ChildSubreaperEnabled,
         "True once enable_child_subreaper() has succeeded in this process.");
 

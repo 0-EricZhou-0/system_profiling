@@ -1,4 +1,5 @@
 #include "disk_flush_thread.h"
+#include "testing_hooks.h"
 #include "discovery_stats_proto.h"
 
 #include "disk_metrics.pb.h"
@@ -231,6 +232,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
             bytes = WriteDelimitedDiskTraceSized(trace, outFile);
             outFile.flush();
         }
+        internal::PassFlushGate();   // test-only; see <cupti_profiler/testing.h>
         probe.CommitPendingRemovals(processSnapshot);
 
         uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(

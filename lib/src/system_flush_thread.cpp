@@ -1,5 +1,6 @@
 #include "system_flush_thread.h"
 #include "discovery_stats_proto.h"
+#include "testing_hooks.h"
 
 #include "system_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -308,6 +309,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
         }
         // Now that the removed=true markers have been written, drop
         // those entries so subsequent flushes don't keep emitting them.
+        internal::PassFlushGate();   // test-only; see <cupti_profiler/testing.h>
         probe.CommitPendingRemovals(processSnapshot);
 
         uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
