@@ -16,7 +16,11 @@
 
 #pragma once
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <unistd.h>
 
 #ifndef EXIT_WAIVED
 #define EXIT_WAIVED 2
@@ -30,6 +34,26 @@
 
 #define CUDA_MAX_DEVICES    256     // consider theoretical max devices as 256
 
+// Fatal errors. Every macro below prints ONE line to stderr and exits:
+//
+//   [cupti-profiler] FATAL: <call> failed: <error string> (<code>) at <file>:<line>, pid <pid> — exiting
+//
+// Exiting is intended (a profiler that cannot talk to the driver or
+// CUPTI has nothing to measure). The line is written with a single
+// fprintf so it stays whole when it lands in the middle of a host
+// application's log (e.g. vLLM's), and the prefix makes it findable.
+[[noreturn]] inline void CuptiProfilerFatal(const char* call, const char* what,
+                                            long long code, const char* file, int line)
+{
+    const char* base = std::strrchr(file, '/');
+    std::fprintf(stderr,
+                 "[cupti-profiler] FATAL: %s failed: %s (%lld) at %s:%d, pid %d — exiting\n",
+                 call, what ? what : "unknown error", code, base ? base + 1 : file, line,
+                 static_cast<int>(::getpid()));
+    std::fflush(stderr);
+    std::exit(EXIT_FAILURE);
+}
+
 #ifndef DRIVER_API_CALL
 #define DRIVER_API_CALL(apiFunctionCall)                                            \
 do                                                                                  \
@@ -37,14 +61,10 @@ do                                                                              
     CUresult _status = apiFunctionCall;                                             \
     if (_status != CUDA_SUCCESS)                                                    \
     {                                                                               \
-        const char *pErrorString;                                                   \
+        const char *pErrorString = nullptr;                                         \
         cuGetErrorString(_status, &pErrorString);                                   \
-                                                                                    \
-        std::cerr << "\n\nError: " << __FILE__ << ":" << __LINE__ << ": Function "  \
-        << #apiFunctionCall << " failed with error(" << _status << "): "            \
-        << pErrorString << ".\n\n";                                                 \
-                                                                                    \
-        exit(EXIT_FAILURE);                                                         \
+        CuptiProfilerFatal(#apiFunctionCall, pErrorString, (long long)_status,      \
+                           __FILE__, __LINE__);                                     \
     }                                                                               \
 } while (0)
 #endif
@@ -56,11 +76,8 @@ do                                                                              
     cudaError_t _status = apiFunctionCall;                                          \
     if (_status != cudaSuccess)                                                     \
     {                                                                               \
-        std::cerr << "\n\nError: " << __FILE__ << ":" << __LINE__ << ": Function "  \
-        << #apiFunctionCall << " failed with error(" << _status << "): "            \
-        << cudaGetErrorString(_status) << ".\n\n";                                  \
-                                                                                    \
-        exit(EXIT_FAILURE);                                                         \
+        CuptiProfilerFatal(#apiFunctionCall, cudaGetErrorString(_status),           \
+                           (long long)_status, __FILE__, __LINE__);                 \
     }                                                                               \
 } while (0)
 #endif
@@ -72,14 +89,10 @@ do                                                                              
     CUptiResult _status = apiFunctionCall;                                          \
     if (_status != CUPTI_SUCCESS)                                                   \
     {                                                                               \
-        const char *pErrorString;                                                   \
+        const char *pErrorString = nullptr;                                         \
         cuptiGetResultString(_status, &pErrorString);                               \
-                                                                                    \
-        std::cerr << "\n\nError: " << __FILE__ << ":" << __LINE__ << ": Function "  \
-        << #apiFunctionCall << " failed with error(" << _status << "): "            \
-        << pErrorString << ".\n\n";                                                 \
-                                                                                    \
-        exit(EXIT_FAILURE);                                                         \
+        CuptiProfilerFatal(#apiFunctionCall, pErrorString, (long long)_status,      \
+                           __FILE__, __LINE__);                                     \
     }                                                                               \
 } while (0)
 #endif
@@ -88,20 +101,8 @@ do                                                                              
 #define CUPTI_API_CALL_VERBOSE(apiFunctionCall)                                     \
 do                                                                                  \
 {                                                                                   \
-    std::cout << "Calling CUPTI API: " << #apiFunctionCall << "\n";                 \
-                                                                                    \
-    CUptiResult _status = apiFunctionCall;                                          \
-    if (_status != CUPTI_SUCCESS)                                                   \
-    {                                                                               \
-        const char *pErrorString;                                                   \
-        cuptiGetResultString(_status, &pErrorString);                               \
-                                                                                    \
-        std::cerr << "\n\nError: " << __FILE__ << ":" << __LINE__ << ": Function "  \
-        << #apiFunctionCall << " failed with error(" << _status << "): "            \
-        << pErrorString << ".\n\n";                                                 \
-                                                                                    \
-        exit(EXIT_FAILURE);                                                         \
-    }                                                                               \
+    std::cout << "[cupti-profiler] calling CUPTI API: " << #apiFunctionCall << "\n";\
+    CUPTI_API_CALL(apiFunctionCall);                                                \
 } while (0)
 #endif
 
@@ -112,10 +113,8 @@ do                                                                              
     CUptiUtilResult _status = apiFunctionCall;                                      \
     if (_status != CUPTI_UTIL_SUCCESS)                                              \
     {                                                                               \
-        std::cerr << "\n\nError: " << __FILE__ << ":" << __LINE__ << ": Function "  \
-        << #apiFunctionCall << " failed with error: " << _status << "\n\n";         \
-                                                                                    \
-        exit(EXIT_FAILURE);                                                         \
+        CuptiProfilerFatal(#apiFunctionCall, "CUptiUtilResult error",               \
+                           (long long)_status, __FILE__, __LINE__);                 \
     }                                                                               \
 } while (0)
 #endif
@@ -127,10 +126,8 @@ do                                                                              
     NVPA_Status _status = apiFunctionCall;                                          \
     if (_status != NVPA_STATUS_SUCCESS)                                             \
     {                                                                               \
-        std::cerr << "\n\nError: " << __FILE__ << ":" << __LINE__ << ": Function "  \
-        << #apiFunctionCall << " failed with error: " << _status << "\n\n";         \
-                                                                                    \
-        exit(EXIT_FAILURE);                                                         \
+        CuptiProfilerFatal(#apiFunctionCall, "NVPA_Status error",                   \
+                           (long long)_status, __FILE__, __LINE__);                 \
     }                                                                               \
 } while (0)
 #endif
@@ -141,10 +138,8 @@ do                                                                              
 {                                                                                   \
     if (variable == NULL)                                                           \
     {                                                                               \
-        std::cerr << "\n\nError: " << __FILE__ << ":" << __LINE__ <<                \
-        " Memory allocation failed.\n\n";                                           \
-                                                                                    \
-        exit(EXIT_FAILURE);                                                         \
+        CuptiProfilerFatal("allocation of " #variable, "returned NULL", 0,          \
+                           __FILE__, __LINE__);                                     \
     }                                                                               \
 } while (0)
 #endif
