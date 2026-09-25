@@ -202,6 +202,7 @@ void AddTrackedProcesses(
         tp->set_removed(p.pending_removal);
         tp->set_parent_pid(p.parent_pid);
         tp->set_discovered(p.discovered);
+        tp->set_cpu_before_discovery_ns(p.cpu_before_discovery_ns);
     }
 }
 
@@ -236,6 +237,13 @@ SystemMetricsTrace BuildSystemTrace(
     AddTrackedProcesses(trace, processes);
     for (const auto& t : drained.systemTicks)  AppendSystemSample(trace, t);
     for (const auto& t : drained.processTicks) AppendProcessSample(trace, t);
+    for (const auto& r : drained.cpuTails) {
+        auto* c = trace.add_cpu_tails();
+        c->set_timestamp_ns(r.timestamp_ns);
+        c->set_parent_pid(r.parent_pid);
+        for (uint32_t pid : r.pids) c->add_pids(pid);
+        c->set_cpu_after_last_sample_ns(r.cpu_ns);
+    }
     return trace;
 }
 
@@ -280,10 +288,12 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
             std::lock_guard<std::mutex> lock(batchMutex);
             drained.systemTicks.swap(batch.systemTicks);
             drained.processTicks.swap(batch.processTicks);
+            drained.cpuTails.swap(batch.cpuTails);
         }
 
         auto processSnapshot = probe.SnapshotProcesses();
-        if (drained.systemTicks.empty() && drained.processTicks.empty()) continue;
+        if (drained.systemTicks.empty() && drained.processTicks.empty() &&
+            drained.cpuTails.empty()) continue;
 
         SystemMetricsTrace trace = BuildSystemTrace(
             hostname, samplingFrequencyHz, hostCpuCount,

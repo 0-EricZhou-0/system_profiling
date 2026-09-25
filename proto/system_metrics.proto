@@ -24,4 +24,32 @@ message SystemMetricsTrace {
     repeated FlushStats    flush_stats           = 6;
     // Present while descendant tracking runs; see DiscoveryStats.
     DiscoveryStats   discovery_stats             = 7;
+    // Exit tails of discovered processes (see CpuTail), each emitted once.
+    repeated CpuTail cpu_tails                   = 8;
+}
+
+// CPU a discovered process used after its last sample: between the
+// sample and its exit, which no sample can see. Measured on its tracked
+// parent: when the parent reaps it, the parent's cutime + cstime grow by
+// the child's whole CPU (plus what the child had itself reaped); the
+// tail is that growth minus the child's CPU at its last sample and minus
+// its own children's CPU as last read.
+//
+// Limits:
+//   * cutime/cstime are in USER_HZ ticks (10 ms) and truncated per
+//     field, so a tail is accurate to about +/-20 ms and is clamped at 0;
+//   * the growth appears only when the parent reaps the child: a parent
+//     that never waits, or that exits first, yields no tail;
+//   * a child reparented to a process that is not tracked yields none;
+//   * the growth also includes any short-lived child the parent reaped
+//     in the same interval that discovery never saw;
+//   * when several tracked children of one parent are reaped within one
+//     sample interval, their shares cannot be told apart: ONE CpuTail
+//     lists all of them in `pids` with their combined tail, rather than
+//     a guessed split.
+message CpuTail {
+    uint64          timestamp_ns             = 1;  // sample tick that saw the growth
+    uint32          parent_pid               = 2;  // the tracked parent that reaped
+    repeated uint32 pids                     = 3;  // one = that child's own tail
+    uint64          cpu_after_last_sample_ns = 4;
 }

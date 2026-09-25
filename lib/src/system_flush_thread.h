@@ -68,9 +68,20 @@ struct ProcessTick {
     uint64_t shared_bytes   = 0;
 };
 
+// A discovered process's CPU after its last sample, measured on the
+// parent that reaped it (CpuTail in system_metrics.proto). Several pids
+// = reaped in one interval, not apportionable.
+struct CpuTailRecord {
+    uint64_t              timestamp_ns = 0;
+    uint32_t              parent_pid   = 0;
+    std::vector<uint32_t> pids;
+    uint64_t              cpu_ns       = 0;
+};
+
 struct SystemSampleBatch {
-    std::vector<SystemTick>  systemTicks;
-    std::vector<ProcessTick> processTicks;
+    std::vector<SystemTick>    systemTicks;
+    std::vector<ProcessTick>   processTicks;
+    std::vector<CpuTailRecord> cpuTails;
 };
 
 // Accessors for the descriptor arrays owned by system_flush_thread.cpp.

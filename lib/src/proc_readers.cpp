@@ -114,10 +114,12 @@ std::optional<ProcStat> ReadProcStat(const std::string& procRoot, uint32_t pid) 
     std::istringstream rest(text->substr(close + 1));
     std::string field;
     // Fields after comm: index 0 = state (field 3), 1 = ppid (4), ...,
-    // 19 = starttime (22).
+    // 13 = cutime (16), 14 = cstime (17), 19 = starttime (22).
     for (int i = 0; i <= 19 && (rest >> field); ++i) {
         if (i == 0) st.state = field.empty() ? '?' : field[0];
         else if (i == 1) st.ppid = static_cast<uint32_t>(std::strtoul(field.c_str(), nullptr, 10));
+        else if (i == 13) st.cutime = std::strtoull(field.c_str(), nullptr, 10);
+        else if (i == 14) st.cstime = std::strtoull(field.c_str(), nullptr, 10);
         else if (i == 19) st.startTime = std::strtoull(field.c_str(), nullptr, 10);
     }
     if (st.state == '?') return std::nullopt;   // truncated or malformed

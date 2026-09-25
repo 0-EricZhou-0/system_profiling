@@ -59,6 +59,8 @@ struct ProcStat {
     std::string comm;          // field 2, without the parentheses
     char        state = '?';   // field 3 ('Z' = zombie)
     uint32_t    ppid  = 0;     // field 4
+    uint64_t    cutime = 0;    // field 16, clock ticks: reaped children's user time
+    uint64_t    cstime = 0;    // field 17, clock ticks: reaped children's system time
     uint64_t    startTime = 0; // field 22, clock ticks since boot
 };
 

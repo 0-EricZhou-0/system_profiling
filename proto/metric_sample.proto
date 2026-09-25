@@ -59,6 +59,15 @@ message TrackedProcessV2 {
     bool   removed    = 3;
     uint32 parent_pid = 4;   // discovered only: parent PID when found
     bool   discovered = 5;   // true = found by descendant tracking
+    // System trace, discovered processes only: CPU time (ns, process CPU
+    // clock) the process had used before its first sample — from its
+    // fork until descendant tracking found it. Recorded once, here, and
+    // never folded into a sample, so it cannot show up as a spike in the
+    // first interval. Listed roots get 0 (their earlier CPU predates
+    // tracking). A process tracked from its first sample to its exit
+    // accounts for cpu_before_discovery_ns + the samples + its
+    // CpuTail (system_metrics.proto).
+    uint64 cpu_before_discovery_ns = 6;
 }
 
 // Descendant tracking's own cost, attached to every system/disk flush

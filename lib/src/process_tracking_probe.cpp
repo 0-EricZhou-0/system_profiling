@@ -46,6 +46,13 @@ void ProcessTrackingProbe::RemoveTrackedProcess(uint32_t pid) {
     // PID wasn't tracked — silently no-op (matches Add idempotency).
 }
 
+void ProcessTrackingProbe::SetCpuBeforeDiscovery(uint32_t pid, uint64_t ns) {
+    std::unique_lock<std::shared_mutex> lk(mutex_);
+    for (auto& e : processes_) {
+        if (e.pid == pid) { e.cpu_before_discovery_ns = ns; return; }
+    }
+}
+
 void ProcessTrackingProbe::SetInitialProcesses(std::vector<ProcessEntry> entries) {
     std::unique_lock<std::shared_mutex> lk(mutex_);
     processes_ = std::move(entries);
