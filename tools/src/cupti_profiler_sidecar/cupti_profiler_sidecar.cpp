@@ -22,6 +22,20 @@
 //   5. Parent sends MSG_STOP. Sidecar stops probes (flushes final
 //      trace), replies Ok, exits.
 //
+// It also stops gracefully — probes stopped, final trace flushed, exit
+// 0 — without MSG_STOP when:
+//   * the host exits: argv[1] is --host-pid=<pid>, and the sidecar holds
+//     a pidfd on it. By PROCESS, not thread: PR_SET_PDEATHSIG, used
+//     before, fired when the host's forking thread exited. The pidfd
+//     also works when a process the host forked still holds the control
+//     pipe open, so EOF never comes;
+//   * the control pipe reaches EOF;
+//   * it receives SIGTERM or SIGINT. They are blocked in every thread
+//     and read from a signalfd in the control loop, so the handling runs
+//     on the main thread, outside signal context.
+// SIGPIPE is ignored: a status write to a host that is gone fails with
+// EPIPE instead of killing the sidecar before it has flushed.
+//
 // A CAP_NET_ADMIN self-check runs during MSG_CONFIG for future
 // taskstats-backend readiness; the current /proc backend needs no
 // caps for same-UID observation, so a missing cap is currently
@@ -34,11 +48,19 @@
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
+#include <poll.h>
+#include <signal.h>
+#include <sys/signalfd.h>
+#include <sys/syscall.h>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
 #include <unistd.h>
+
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434   // same number on every architecture
+#endif
 
 #include <cupti_profiler/profiler_error.h>
 #include <cupti_profiler/system_profiler.h>
@@ -95,6 +117,63 @@ bool ReadMsg(MsgHeader& hdr, std::string& payload) {
     return true;
 }
 
+// What woke the control loop.
+enum class Wake { Message, Eof, HostExited, Signal };
+
+const char* WakeName(Wake w, int signo) {
+    switch (w) {
+        case Wake::Message:    return "message";
+        case Wake::Eof:        return "control pipe closed by the host";
+        case Wake::HostExited: return "host process exited";
+        case Wake::Signal:     return signo == SIGINT ? "SIGINT" : "SIGTERM";
+    }
+    return "?";
+}
+
+struct Control {
+    int hostFd = -1;   // pidfd on the host; -1 = EOF is the only exit signal
+    int sigFd  = -1;   // signalfd for SIGTERM + SIGINT
+    int signo  = 0;    // the signal that ended the loop
+};
+
+// Block until the next control message, the host's exit, or a stop
+// signal. A signal wins over a pending message, and the host's exit
+// over a message it may have left in the pipe.
+Wake NextMsg(Control& c, MsgHeader& hdr, std::string& payload) {
+    struct pollfd fds[3] = {
+        {kSidecarInFd, POLLIN, 0},
+        {c.hostFd,     POLLIN, 0},   // ignored by poll() when -1
+        {c.sigFd,      POLLIN, 0},
+    };
+    for (;;) {
+        int r = ::poll(fds, 3, -1);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return Wake::Eof;
+        }
+        if (fds[2].revents) {
+            struct signalfd_siginfo si{};
+            if (::read(c.sigFd, &si, sizeof(si)) == static_cast<ssize_t>(sizeof(si)))
+                c.signo = static_cast<int>(si.ssi_signo);
+            return Wake::Signal;
+        }
+        if (fds[1].revents) return Wake::HostExited;
+        if (fds[0].revents) return ReadMsg(hdr, payload) ? Wake::Message : Wake::Eof;
+    }
+}
+
+// --host-pid=<pid> from argv; getppid() for an older host that does not
+// pass it.
+pid_t HostPid(int argc, char** argv) {
+    const std::string flag = "--host-pid=";
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a.compare(0, flag.size(), flag) == 0)
+            return static_cast<pid_t>(std::strtol(a.c_str() + flag.size(), nullptr, 10));
+    }
+    return ::getppid();
+}
+
 // Advisory only under the /proc backend. Kept as diagnostic so a
 // deployer flipping the (future) taskstats backend on can tell up
 // front whether the sidecar has the cap it will need.
@@ -115,14 +194,60 @@ bool HasCapNetAdmin() {
 
 } // namespace
 
-int main(int /*argc*/, char** /*argv*/) {
+int main(int argc, char** argv) {
     std::cerr << "[sidecar] up, pid=" << ::getpid()
               << " parent=" << ::getppid() << "\n";
+
+    ::signal(SIGPIPE, SIG_IGN);
+
+    // SIGTERM/SIGINT -> graceful stop. Blocked before any thread exists,
+    // so every probe thread inherits the mask and the signal is only
+    // ever consumed here, through the signalfd.
+    Control ctl;
+    {
+        sigset_t stopSignals;
+        sigemptyset(&stopSignals);
+        sigaddset(&stopSignals, SIGTERM);
+        sigaddset(&stopSignals, SIGINT);
+        ::pthread_sigmask(SIG_BLOCK, &stopSignals, nullptr);
+        ctl.sigFd = ::signalfd(-1, &stopSignals, SFD_CLOEXEC);
+        if (ctl.sigFd < 0) {
+            std::cerr << "[sidecar] signalfd: " << std::strerror(errno)
+                      << " — SIGTERM/SIGINT will not flush\n";
+            ::pthread_sigmask(SIG_UNBLOCK, &stopSignals, nullptr);
+        }
+    }
+
+    // Watch the host by process. Opened before checking getppid(), so a
+    // host that already died is caught either way.
+    const pid_t hostPid = HostPid(argc, argv);
+    ctl.hostFd = static_cast<int>(::syscall(SYS_pidfd_open, hostPid, 0));
+    if (ctl.hostFd < 0) {
+        std::cerr << "[sidecar] pidfd_open(host " << hostPid << "): " << std::strerror(errno)
+                  << " — host exit is detected only through control-pipe EOF\n";
+    } else {
+        ::fcntl(ctl.hostFd, F_SETFD, FD_CLOEXEC);
+    }
+    if (::getppid() != hostPid) {
+        std::cerr << "[sidecar] host " << hostPid << " exited before the handshake — exit\n";
+        return 0;
+    }
+
+    // Before MSG_START nothing runs, so any other wake-up just exits.
+    auto handshake = [&](MsgHeader& hdr, std::string& payload) {
+        Wake w = NextMsg(ctl, hdr, payload);
+        if (w != Wake::Message) {
+            std::cerr << "[sidecar] " << WakeName(w, ctl.signo)
+                      << " during the handshake — exit\n";
+            std::exit(0);
+        }
+    };
 
     // 1. MSG_CONFIG — parse the workload's ProfilerSuiteConfig proto.
     MsgHeader hdr{};
     std::string payload;
-    if (!ReadMsg(hdr, payload) || hdr.type != MSG_CONFIG) {
+    handshake(hdr, payload);
+    if (hdr.type != MSG_CONFIG) {
         SendStatus(ProfilerError::SidecarBadHandshake);
         return 1;
     }
@@ -149,7 +274,8 @@ int main(int /*argc*/, char** /*argv*/) {
     // 2. MSG_SYNC_ANCHOR — stashed but not yet consumed. Future commits
     //    thread it into ProfilerSuite::Start's WallClockEpochNs so
     //    sidecar samples align 1:1 with the workload's traces.
-    if (!ReadMsg(hdr, payload) || hdr.type != MSG_SYNC_ANCHOR ||
+    handshake(hdr, payload);
+    if (hdr.type != MSG_SYNC_ANCHOR ||
         payload.size() != sizeof(SyncAnchorPayload))
     {
         SendStatus(ProfilerError::SidecarBadHandshake);
@@ -162,7 +288,8 @@ int main(int /*argc*/, char** /*argv*/) {
 
     // 3. MSG_START — build local SystemProfiler + DiskProfiler from
     //    the parsed config, drive them from this process's threads.
-    if (!ReadMsg(hdr, payload) || hdr.type != MSG_START) {
+    handshake(hdr, payload);
+    if (hdr.type != MSG_START) {
         SendStatus(ProfilerError::SidecarBadHandshake);
         return 1;
     }
@@ -257,14 +384,18 @@ int main(int /*argc*/, char** /*argv*/) {
 
     SendStatus(ProfilerError::Ok);
 
-    // 4. Message loop until MSG_STOP.
+    // 4. Message loop until MSG_STOP, the host's exit, EOF, or a signal.
+    bool ackStop = false;
     while (true) {
-        if (!ReadMsg(hdr, payload)) {
-            std::cerr << "[sidecar] pipe closed by parent — shutting down\n";
+        Wake w = NextMsg(ctl, hdr, payload);
+        if (w != Wake::Message) {
+            std::cerr << "[sidecar] " << WakeName(w, ctl.signo)
+                      << " — stopping, final flush\n";
             break;
         }
         if (hdr.type == MSG_STOP) {
             std::cerr << "[sidecar] MSG_STOP received\n";
+            ackStop = true;
             break;
         }
         if (hdr.type == MSG_ADD_PID) {
@@ -329,7 +460,8 @@ int main(int /*argc*/, char** /*argv*/) {
     if (dsk) dsk->SignalStop();
     if (sys) sys->Stop();
     if (dsk) dsk->Stop();
-    SendStatus(ProfilerError::Ok);
+    // Only MSG_STOP has a host waiting for the reply.
+    if (ackStop) SendStatus(ProfilerError::Ok);
     std::cerr << "[sidecar] clean shutdown, exit 0\n";
     return 0;
 }

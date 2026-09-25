@@ -549,10 +549,15 @@ void ProfilerSuite::Stop() {
     if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
         m_impl->diskProfiler.SignalStop();
     if (m_impl->eventEnabled) m_impl->eventProfiler.SignalStop();
+    bool sidecarStopSent = false;
     if (m_impl->sidecar) {
         if (auto e = m_impl->sidecar->SignalStop(); e != ProfilerError::Ok) {
-            std::cerr << "[ProfilerSuite] sidecar SignalStop: "
-                      << ToString(e) << "\n";
+            // It stopped on its own: SIGTERM/SIGINT (a terminal Ctrl-C
+            // reaches it too) or an error. Say how, once.
+            std::cerr << "[ProfilerSuite] sidecar had already stopped: "
+                      << m_impl->sidecar->DescribeExit() << "\n";
+        } else {
+            sidecarStopSent = true;
         }
     }
 
@@ -563,9 +568,11 @@ void ProfilerSuite::Stop() {
     if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Stop();
     if (m_impl->eventEnabled) m_impl->eventProfiler.Stop();
     if (m_impl->sidecar) {
-        if (auto e = m_impl->sidecar->JoinStopAck(); e != ProfilerError::Ok) {
-            std::cerr << "[ProfilerSuite] sidecar JoinStopAck: "
-                      << ToString(e) << "\n";
+        if (sidecarStopSent) {
+            if (auto e = m_impl->sidecar->JoinStopAck(); e != ProfilerError::Ok) {
+                std::cerr << "[ProfilerSuite] sidecar did not acknowledge MSG_STOP ("
+                          << ToString(e) << "): " << m_impl->sidecar->DescribeExit() << "\n";
+            }
         }
         m_impl->sidecar.reset();
     }

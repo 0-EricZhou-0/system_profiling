@@ -11,6 +11,8 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <pthread.h>
+#include <string>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -72,14 +74,42 @@ bool WriteAll(int fd, const void* buf, size_t n) {
     return true;
 }
 
+// WriteAll without SIGPIPE. The sidecar exits on its own when it gets
+// SIGTERM/SIGINT (a terminal Ctrl-C reaches it too), so a later write
+// from this process can hit a pipe with no reader; the default SIGPIPE
+// action would kill a host that has not ignored it (C++ programs; Python
+// ignores it). SIGPIPE for a pipe write goes to the writing thread, so
+// blocking it on this thread and discarding the one this write raised
+// leaves the rest of the process's signal handling untouched.
+bool WriteAllNoSigpipe(int fd, const void* buf, size_t n) {
+    sigset_t pipeSet, old;
+    sigemptyset(&pipeSet);
+    sigaddset(&pipeSet, SIGPIPE);
+    sigset_t pending;
+    sigemptyset(&pending);
+    ::pthread_sigmask(SIG_BLOCK, &pipeSet, &old);
+    sigpending(&pending);
+    const bool alreadyPending = sigismember(&pending, SIGPIPE);
+    const bool ok = WriteAll(fd, buf, n);
+    const int err = errno;
+    if (!ok && err == EPIPE && !alreadyPending) {
+        struct timespec zero{0, 0};
+        while (::sigtimedwait(&pipeSet, nullptr, &zero) < 0 && errno == EINTR) {}
+    }
+    ::pthread_sigmask(SIG_SETMASK, &old, nullptr);
+    errno = err;
+    return ok;
+}
+
 } // namespace
 
 SidecarProcess::~SidecarProcess() {
     if (pipe_to_child_   >= 0) ::close(pipe_to_child_);
     if (pipe_from_child_ >= 0) ::close(pipe_from_child_);
     if (child_pid_ > 0) {
-        // Best-effort: give the child SIGTERM if it's still alive
-        // (later commits add MSG_STOP), then reap.
+        // Normally the sidecar has exited after MSG_STOP. If Stop() was
+        // never reached, closing the control pipe (EOF) and SIGTERM both
+        // make it stop gracefully — final flush included — then reap.
         ::kill(child_pid_, SIGTERM);
         int status = 0;
         ::waitpid(child_pid_, &status, 0);
@@ -124,9 +154,11 @@ ProfilerError SidecarProcess::Spawn() {
         return ProfilerError::SidecarSpawnFailed;
     }
 
-    // Capture parent PID *before* fork so the child can detect the
-    // rare parent-died-between-fork-and-prctl race.
-    const pid_t parent_pid = ::getpid();
+    // The sidecar watches THIS process (a pidfd on it) and shuts down
+    // gracefully when it exits. Passed explicitly rather than read with
+    // getppid(), which after an early death of this process would name
+    // whoever adopted the sidecar.
+    const std::string host_arg = "--host-pid=" + std::to_string(::getpid());
 
     pid_t child = ::fork();
     if (child < 0) {
@@ -139,13 +171,10 @@ ProfilerError SidecarProcess::Spawn() {
 
     if (child == 0) {
         // Child ---------------------------------------------------------
-        // Get SIGTERM if parent dies. Handles crash/orphan cleanup so
-        // the sidecar doesn't outlive the workload as a zombie helper.
-        ::prctl(PR_SET_PDEATHSIG, SIGTERM);
-        if (::getppid() != parent_pid) {
-            // Parent died between fork and prctl — bail before exec.
-            _exit(1);
-        }
+        // No PR_SET_PDEATHSIG: it fires when the forking THREAD exits,
+        // so a Configure() called from a short-lived thread would kill
+        // the sidecar mid-run. The sidecar watches this process with a
+        // pidfd instead (see cupti_profiler_sidecar.cpp).
 
         // Remap down[0] → kSidecarInFd, up[1] → kSidecarOutFd,
         // note[1] → kSidecarNoticeFd. Any pipe fd may already sit on
@@ -163,6 +192,7 @@ ProfilerError SidecarProcess::Spawn() {
 
         char* const argv[] = {
             const_cast<char*>(sidecar.c_str()),
+            const_cast<char*>(host_arg.c_str()),
             nullptr
         };
         ::execve(sidecar.c_str(), argv, environ);
@@ -211,11 +241,33 @@ ProfilerError SidecarProcess::WriteMsg(uint32_t type,
                                        uint32_t length)
 {
     MsgHeader hdr{ type, length };
-    if (!WriteAll(pipe_to_child_, &hdr, sizeof(hdr))) return ProfilerError::SidecarExited;
-    if (length > 0 && !WriteAll(pipe_to_child_, payload, length)) {
+    if (!WriteAllNoSigpipe(pipe_to_child_, &hdr, sizeof(hdr))) return ProfilerError::SidecarExited;
+    if (length > 0 && !WriteAllNoSigpipe(pipe_to_child_, payload, length)) {
         return ProfilerError::SidecarExited;
     }
     return ProfilerError::Ok;
+}
+
+std::string SidecarProcess::DescribeExit() {
+    if (child_pid_ <= 0) return "not running";
+    int status = 0;
+    pid_t r;
+    do { r = ::waitpid(child_pid_, &status, WNOHANG); } while (r < 0 && errno == EINTR);
+    if (r == 0) return "still running";
+    if (r < 0) return std::string("waitpid: ") + ::strerror(errno);
+    child_pid_ = -1;   // reaped here; the destructor must not wait again
+    if (WIFEXITED(status)) {
+        return "exited with status " + std::to_string(WEXITSTATUS(status)) +
+               (WEXITSTATUS(status) == 0
+                    ? " (it stops cleanly, final flush included, on SIGTERM/SIGINT "
+                      "or when its control pipe closes)"
+                    : "");
+    }
+    if (WIFSIGNALED(status)) {
+        return "killed by signal " + std::to_string(WTERMSIG(status)) +
+               " (its trace may lack the data since its last flush)";
+    }
+    return "status " + std::to_string(status);
 }
 
 ProfilerError SidecarProcess::ReadStatus() {

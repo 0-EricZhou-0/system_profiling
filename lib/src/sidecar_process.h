@@ -4,11 +4,13 @@
 // sidecar_protocol.h.
 //
 // Lifecycle:
-//   Spawn()      — locates sidecar binary, fork/execve, installs
-//                  PR_SET_PDEATHSIG, sets up the two pipes on the
+//   Spawn()      — locates sidecar binary, fork/execve with
+//                  --host-pid=<this process>, sets up the pipes on the
 //                  well-known fds; returns Ok or one of the
 //                  SidecarNotFound / SidecarSpawnFailed / SidecarExited
-//                  errors from ProfilerError.
+//                  errors from ProfilerError. The sidecar watches this
+//                  process through a pidfd and stops gracefully (final
+//                  flush) when it exits, whichever thread spawned it.
 //   SendConfig() — serialize the system+disk config subset and post
 //                  MSG_CONFIG; wait for MSG_STATUS reply.
 //   SendSyncAnchor()  — post the workload's steady_clock/wall_clock
@@ -93,6 +95,11 @@ public:
     /// Remove a PID from the sidecar's tracked set. Same thread-
     /// safety guarantee as SendAddPid.
     ProfilerError SendRemovePid(uint32_t pid);
+
+    /// Reap the sidecar if it has already exited and say how it
+    /// ended ("exited with status 0 ...", "killed by signal 9 ...",
+    /// or "still running"). For logging a failed exchange.
+    std::string DescribeExit();
 
     bool is_running() const { return child_pid_ > 0; }
     pid_t child_pid() const { return child_pid_; }
