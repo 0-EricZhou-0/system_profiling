@@ -367,10 +367,11 @@ void SystemProfiler::Start() {
                     seed.tickTsNs = tsNs;
                     seed.cpuNs    = r.cpuNs;
                     seed.serial   = entry.serial;
-                    // A discovered process's CPU so far — from its fork
-                    // until now — is recorded once as its head, never
-                    // as a first-interval spike. Roots get none.
-                    if (entry.discovered) this->SetCpuBeforeDiscovery(pid, r.cpuNs);
+                    // The process's CPU so far — from its fork until
+                    // this first reading — is recorded once as its head
+                    // (cpu_before_tracking_ns), never as a first-interval
+                    // spike. Same for roots and discovered processes.
+                    this->SetCpuBeforeTracking(pid, r.cpuNs);
                     continue;
                 }
                 auto& prev = impl.prevPID[pid];

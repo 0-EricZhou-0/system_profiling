@@ -362,7 +362,7 @@ public:
 | `Get*Profiler()` | Access individual sub-profilers — needed to grab `EventTracker` references for region annotation. |
 | `Configure()` | Loads `MetricCatalog` (from `metric_catalog_path` in the config, or a default path next to the binary) and then calls `Configure()` on every sub-profiler whose `enabled = true`. With System or Disk enabled, also runs the [startup situation report](#startup-situation-report). |
 | `Start()` / `Stop()` | Lifecycle fan-out. Both write `session_metadata.pb` (atomically — `.tmp` + `rename(2)`); the manifest carries the inlined `MetricCatalog` so visualizers don't need a separate catalog file. `Start()` returns `ProbeStartFailed` if a System/Disk probe did not start (e.g. its output file cannot be opened; under SIDECAR the sidecar reports it) or `SidecarExited` / `SidecarBadHandshake` if the sidecar did not answer; every other probe is running, so call `Stop()` as usual. Python's `start()` raises `RuntimeError`. |
-| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage); its CPU counts from then on (no head, unlike a discovered process). Its descendants are tracked if `process_discovery.enabled`. When it exits it is removed automatically ([exit detection](#process-table-and-exit-detection)). Thread-safe. |
+| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage); its CPU before that is recorded once as its head, `cpu_before_tracking_ns`. Its descendants are tracked if `process_discovery.enabled`. When it exits it is removed automatically ([exit detection](#process-table-and-exit-detection)). Thread-safe. |
 | `AddTrackedProcess(pid, alias, trackDescendants)` | Same, overriding `process_discovery.enabled` for this root — see [Descendant tracking](#descendant-tracking). |
 | `RemoveTrackedProcess(pid)` | Stop tracking a PID. The PID appears one more time in the next flush of each affected probe with `TrackedProcessV2.removed=true` (visualizer renders a removal marker), then is dropped. Descendants already discovered under it stay tracked until they exit. Thread-safe. |
 
@@ -899,7 +899,7 @@ carries one `TrackedProcessV2` per tracked process
 | `start_time_ns` | when the process started: the kernel's `/proc/<pid>/stat` field 22 converted to the trace clock. **10 ms resolution** (`USER_HZ` ticks). 0 = unknown |
 | `end_time_ns` | with `removed = true` after an exit: the first instant the probe saw it gone, on the trace clock. The exit happened **within one sampling tick** before it. 0 while alive and for a removal by request |
 | `removed` | this is the entry's last flush |
-| `cpu_before_discovery_ns` | System trace, discovered processes only: see [Head and tail CPU](#head-and-tail-cpu) |
+| `cpu_before_tracking_ns` | System trace, every process: its CPU before its first sample (the head); see [Head and tail CPU](#head-and-tail-cpu) |
 
 The trace clock is the samples' `timestamp_ns` clock (`steady_clock` =
 `CLOCK_MONOTONIC`, system-wide, so identical under SIDECAR). Field 22
@@ -1070,31 +1070,28 @@ sidecar's; under LEGACY it is charged to the host process.
   host, but is never discovered).
 - With System and Disk in **different** modes (one LEGACY, one SIDECAR),
   each observer runs its own scan.
-- CPU before a discovered process's first sample and after its last one
-  is not in its samples; it is reported separately — see below.
+- CPU before a tracked process's first sample, and after a discovered
+  process's last one, is not in its samples; it is reported separately —
+  see below.
 
 ### Head and tail CPU
 
-A process's CPU clock counts from its fork, but a discovered process is
+A process's CPU clock counts from its fork, but a tracked process is
 sampled only from its first sample (a baseline) to its last. The two
 missing pieces are reported on the System trace, never folded into a
-sample:
+sample (the head for every tracked process, the tail for discovered
+ones):
 
-- **Head** — `TrackedProcessV2.cpu_before_discovery_ns`: its CPU clock at
-  its first sample, i.e. what it used from fork until discovery found it.
-  Recorded once.
-
-> [!NOTE]
-> **Roots and discovered processes are counted differently at the
-> start (user decision, 2026-09-25).** A listed root gets **no head**:
-> its CPU counts from when it was added (listed in the config: from
-> `Start()`; `AddTrackedProcess` mid-run: from that call), and what it
-> used before is not in the trace — `cpu_before_discovery_ns` is 0. A
-> discovered process gets its CPU from fork to discovery as its head.
-> So for a server attached some time after launch, the root's traced
-> CPU is "since attach", while each child's `head + samples + tail` is
-> its whole life. To get a root's whole life, add it right after
-> spawning it, before it has done any work.
+- **Head** — `TrackedProcessV2.cpu_before_tracking_ns`: its CPU clock at
+  its first reading, the sample tick after it was registered, i.e. what
+  it used from fork until tracking began. Recorded once, the same way for
+  **every** tracked process (user decision, 2026-09-25): for a discovered
+  process, its CPU from fork to discovery; for a listed root, its CPU up
+  to when it was added — **for a root started long before the trace, its
+  entire CPU up to attach**. The samples themselves count from
+  registration for both, so `head + Σ samples` is the whole life so far.
+  (Until 2026-09-25 the field was `cpu_before_discovery_ns` and roots got
+  0; renamed with no alias, since a root is not discovered.)
 - **Tail** — a `CpuTail` in `SystemMetricsTrace.cpu_tails`, emitted once:
   CPU used after its last sample, up to its exit. Measured on its tracked
   parent: when the parent reaps it, the parent's `cutime + cstime` grow
@@ -1309,7 +1306,7 @@ message GPUSample        { uint64 timestamp_ns; uint32 gpu_index;   repeated dou
 message TrackedProcessV2 { uint32 pid; string alias; bool removed;
                            uint32 parent_pid;   // parent when registered (roots too)
                            bool discovered;     // kind: true = found by descendant tracking
-                           uint64 cpu_before_discovery_ns;  // system trace, discovered only
+                           uint64 cpu_before_tracking_ns;  // system trace: CPU before the first sample
                            string label;        // root alias (discovered: alias = label/comm)
                            string comm;         // current comm, re-read every 100 ms
                            uint64 start_time_ns;   // kernel start time, trace clock, 10 ms res.

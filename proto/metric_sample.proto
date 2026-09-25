@@ -73,16 +73,19 @@ message TrackedProcessV2 {
     // exist). Not updated on reparenting.
     uint32 parent_pid = 4;
     bool   discovered = 5;   // kind: true = found by descendant tracking, false = listed root
-    // System trace, discovered processes only: CPU time (ns, process CPU
-    // clock) the process had used before its first sample — from its
-    // fork until descendant tracking found it. Recorded once, here, and
-    // never folded into a sample, so it cannot show up as a spike in the
-    // first interval. Listed roots get 0 — including a root added
-    // mid-run: its CPU counts from when it was added, and what it used
-    // before is not in the trace. A process tracked from its first
-    // sample to its exit accounts for cpu_before_discovery_ns + the
-    // samples + its CpuTail (system_metrics.proto).
-    uint64 cpu_before_discovery_ns = 6;
+    // System trace, every tracked process (the head): CPU time (ns,
+    // process CPU clock) the process had used before its first sample —
+    // from its fork until the first reading after it was registered.
+    // Recorded once, here, and never folded into a sample, so it cannot
+    // show up as a spike in the first interval; the samples count from
+    // registration. For a discovered process that is its CPU from fork
+    // to discovery; for a root started long before the trace, it is its
+    // entire CPU up to attach. A process tracked from its first sample
+    // to its exit accounts for cpu_before_tracking_ns + the samples +
+    // its CpuTail (system_metrics.proto; discovered processes only).
+    // (Named cpu_before_discovery_ns and set for discovered processes
+    // only until 2026-09-25.)
+    uint64 cpu_before_tracking_ns = 6;
     // Roots: the alias they were listed with. Discovered: the alias of
     // the root they descend from (alias = label + "/" + comm).
     string label      = 7;

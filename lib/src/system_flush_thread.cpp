@@ -199,7 +199,7 @@ void AddTrackedProcesses(
     for (const auto& p : processes) {
         auto* tp = trace.add_tracked_processes();
         FillTrackedProcess(tp, p);
-        tp->set_cpu_before_discovery_ns(p.cpu_before_discovery_ns);
+        tp->set_cpu_before_tracking_ns(p.cpu_before_tracking_ns);
     }
 }
 

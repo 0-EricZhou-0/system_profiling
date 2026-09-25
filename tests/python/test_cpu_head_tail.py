@@ -1,10 +1,11 @@
-"""Head and tail CPU of discovered processes.
+"""Head and tail CPU.
 
-A process found by descendant tracking mid-run has CPU from its fork to
-its first sample (the head, TrackedProcessV2.cpu_before_discovery_ns) and
-from its last sample to its exit (the tail, a CpuTail measured on the
-parent that reaped it). With both, a discovered process's whole CPU is
-accounted for:
+Every tracked process has CPU from its fork to its first sample (the
+head, TrackedProcessV2.cpu_before_tracking_ns) — for a root added
+mid-run, its CPU up to attach. A process found by descendant tracking
+also has CPU from its last sample to its exit (the tail, a CpuTail
+measured on the parent that reaped it). With both, a discovered
+process's whole CPU is accounted for:
 
     head + sum over samples + tail == the CPU it used (its own clock)
 
@@ -71,7 +72,7 @@ def cpu_accounting(frames, pid):
         per.append((pct, ts - prev))
         total += pct / 100.0 * (ts - prev) / 1e9
         prev = ts
-    head = tracked(frames)[pid].cpu_before_discovery_ns / 1e9
+    head = tracked(frames)[pid].cpu_before_tracking_ns / 1e9
     tails = [c for f in frames for c in f.cpu_tails if pid in c.pids]
     return head, total, tails, per
 
@@ -104,7 +105,9 @@ def test_cpu_head_recorded_once(tmp_path, mode):
     tail = sum(c.cpu_after_last_sample_ns for c in tails) / 1e9
     print(f"head {head:.3f} + samples {samples:.3f} + tail {tail:.3f} = "
           f"{head + samples + tail:.3f} s vs truth {truth:.3f} s")
-    assert tracked(frames)[t.pid].cpu_before_discovery_ns == 0, "a listed root has no head"
+    # A listed root has a head too: its CPU before Start() (interpreter
+    # startup here).
+    assert tracked(frames)[t.pid].cpu_before_tracking_ns > 0, "the root's head was not recorded"
     assert head >= 0.5, f"head {head:.3f} s: the CPU before discovery was not recorded"
     # Never a first-interval spike: one thread, one core, plus one late
     # scheduler tick (10 ms at CONFIG_HZ=100).
@@ -225,3 +228,30 @@ def test_cpu_tail_emitted_once(tmp_path, mode):
     [pid] = truths
     tails = [c for f in frames for c in f.cpu_tails if pid in c.pids]
     assert len(tails) == 1, f"{len(tails)} CpuTail messages for {pid}: {tails}"
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_root_head_is_cpu_up_to_attach(tmp_path, mode):
+    # A root that burned ~0.5 s of CPU and then went idle is added
+    # mid-run: its head is its whole CPU up to attach, and its samples,
+    # counting from attach, carry ~none of it.
+    body = """
+end = time.process_time() + 0.5
+while time.process_time() < end:
+    pass
+emit(cpu_ns=time.process_time_ns())
+sys.stdin.readline()
+"""
+    with tree(body) as t:
+        cpu_ns = t.read("cpu_ns")["cpu_ns"]
+        with running_suite(tmp_path, mode) as suite:
+            time.sleep(0.2)
+            suite.add_tracked_process(t.pid, "late-root")
+            time.sleep(0.5)
+    frames = system_frames(tmp_path)
+    tp = tracked(frames)[t.pid]
+    assert not tp.discovered
+    head, samples, _, _ = cpu_accounting(frames, t.pid)
+    print(f"{mode}: head {head:.3f} s vs CPU at attach {cpu_ns / 1e9:.3f} s; samples {samples:.3f} s")
+    assert abs(head - cpu_ns / 1e9) <= 0.02, (head, cpu_ns / 1e9)
+    assert samples <= 0.02, f"CPU from before attach leaked into the samples: {samples:.3f} s"

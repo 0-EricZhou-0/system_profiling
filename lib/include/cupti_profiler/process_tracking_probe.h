@@ -150,9 +150,10 @@ public:
         // processes: the tracked parent it was found under).
         uint32_t    parent_pid       = 0;
         bool        discovered       = false;
-        // System probe, discovered only: process CPU clock (ns) at its
-        // first sample — the CPU it used before it was found.
-        uint64_t    cpu_before_discovery_ns = 0;
+        // System probe: process CPU clock (ns) at its first reading, the
+        // tick after registration — the CPU it used before tracking began
+        // (for a root started long before, its whole CPU up to attach).
+        uint64_t    cpu_before_tracking_ns = 0;
         // Identity of this registration within the probe; never reused.
         // Per-PID baselines are keyed by it, so a new process that got
         // an old one's number never inherits its baseline.
@@ -172,10 +173,10 @@ public:
         std::vector<CommChange> comm_history;
     };
 
-    /// Record a discovered process's CPU before its first sample
-    /// (ProcessEntry::cpu_before_discovery_ns). No-op if it is no longer
+    /// Record a process's CPU before its first sample
+    /// (ProcessEntry::cpu_before_tracking_ns). No-op if it is no longer
     /// tracked. Thread-safe.
-    void SetCpuBeforeDiscovery(uint32_t pid, uint64_t ns);
+    void SetCpuBeforeTracking(uint32_t pid, uint64_t ns);
 
     /// Replace the tracked process set in one shot with these roots
     /// (pid and alias are used; each is registered as by
