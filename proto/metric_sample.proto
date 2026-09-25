@@ -44,30 +44,70 @@ message GPUSample {
     repeated double values    = 3;
 }
 
-// Tracked process with a removal marker. After RemoveTrackedProcess()
-// is called, the next flush emits the PID with removed=true once,
-// then the PID is dropped from subsequent flushes.
+// One row of the trace's process table: a tracked process, with a
+// removal marker. Replayed in every flush while the process is tracked,
+// so each flush is self-contained.
+//
+// Removal: after RemoveTrackedProcess(), or once the probe sees the
+// process exit (every tracked PID — listed or discovered, with
+// descendant tracking on or off — is watched through a pidfd), the next
+// flush emits the entry with removed=true once, then the PID is dropped
+// from subsequent flushes. An exited process is never sampled again
+// under that entry; a later process that gets the same PID number is a
+// different process and appears as a new entry after this one is gone.
 //
 // Processes found by descendant tracking (ProcessDiscoveryConfig) carry
-// discovered=true and the parent they had when found, so a reader can
-// draw the tree and tell listed roots from discovered processes. A
-// discovered process that exits is removed the same way (removed=true
-// once, then dropped). Listed roots keep parent_pid=0.
+// discovered=true; listed roots carry discovered=false. Together with
+// parent_pid this lets a reader rebuild the tree.
 message TrackedProcessV2 {
     uint32 pid        = 1;
+    // Display name. Roots: the alias they were listed with. Discovered:
+    // "<label>/<comm>", following comm (e.g. "vllm/python3.12" becomes
+    // "vllm/VLLM::EngineCor" when the process renames itself). A reader
+    // should take the alias of the latest flush, or use comm_history.
     string alias      = 2;
     bool   removed    = 3;
-    uint32 parent_pid = 4;   // discovered only: parent PID when found
-    bool   discovered = 5;   // true = found by descendant tracking
+    // The parent the process had when it was registered: for a
+    // discovered process, the tracked parent it was found under; for a
+    // listed root, its parent at the time it was listed (0 if it did not
+    // exist). Not updated on reparenting.
+    uint32 parent_pid = 4;
+    bool   discovered = 5;   // kind: true = found by descendant tracking, false = listed root
     // System trace, discovered processes only: CPU time (ns, process CPU
     // clock) the process had used before its first sample — from its
     // fork until descendant tracking found it. Recorded once, here, and
     // never folded into a sample, so it cannot show up as a spike in the
-    // first interval. Listed roots get 0 (their earlier CPU predates
-    // tracking). A process tracked from its first sample to its exit
-    // accounts for cpu_before_discovery_ns + the samples + its
-    // CpuTail (system_metrics.proto).
+    // first interval. Listed roots get 0 — including a root added
+    // mid-run: its CPU counts from when it was added, and what it used
+    // before is not in the trace. A process tracked from its first
+    // sample to its exit accounts for cpu_before_discovery_ns + the
+    // samples + its CpuTail (system_metrics.proto).
     uint64 cpu_before_discovery_ns = 6;
+    // Roots: the alias they were listed with. Discovered: the alias of
+    // the root they descend from (alias = label + "/" + comm).
+    string label      = 7;
+    // Current /proc/<pid>/comm (at most 15 characters), re-read every
+    // 100 ms, so renames (prctl(PR_SET_NAME), exec) are followed.
+    string comm       = 8;
+    // When the process started: /proc/<pid>/stat field 22 on the trace
+    // clock (the samples' timestamp_ns clock). Kernel-recorded, but in
+    // USER_HZ ticks: 10 ms resolution. 0 = unknown.
+    uint64 start_time_ns = 9;
+    // With removed=true after the process exited: the first instant the
+    // probe saw it gone (trace clock). The exit happened at most one
+    // sampling tick earlier, and no sample of it is later than this.
+    // 0 while alive, and for a process removed by request.
+    uint64 end_time_ns   = 10;
+    // Every comm the process has had, oldest first, each with the trace
+    // time it was first seen (the first entry: at registration; later
+    // ones: within 100 ms of the rename). At most 16: the first and the
+    // 15 most recent.
+    repeated CommChange comm_history = 11;
+}
+
+message CommChange {
+    uint64 timestamp_ns = 1;
+    string comm         = 2;
 }
 
 // Descendant tracking's own cost, attached to every system/disk flush

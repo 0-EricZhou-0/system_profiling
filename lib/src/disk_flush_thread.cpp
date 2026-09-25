@@ -1,6 +1,7 @@
 #include "disk_flush_thread.h"
 #include "testing_hooks.h"
 #include "discovery_stats_proto.h"
+#include "tracked_process_proto.h"
 
 #include "disk_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -182,12 +183,7 @@ DiskMetricsTrace BuildDiskTrace(
     AddScopeRegistry(trace);
     for (const auto& d : devices) trace.add_tracked_devices(d);
     for (const auto& p : processes) {
-        auto* tp = trace.add_tracked_processes();
-        tp->set_pid(p.pid);
-        tp->set_alias(p.alias);
-        tp->set_removed(p.pending_removal);
-        tp->set_parent_pid(p.parent_pid);
-        tp->set_discovered(p.discovered);
+        FillTrackedProcess(trace.add_tracked_processes(), p);
     }
     for (const auto& t : drained.deviceTicks)  AppendDeviceSample(trace, t);
     for (const auto& t : drained.processTicks) AppendProcessSample(trace, t);

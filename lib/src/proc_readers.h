@@ -81,6 +81,17 @@ int PidfdOpen(uint32_t pid);
 /// readable once the whole thread group is gone, reaped or not).
 bool PidfdExited(int pidfd);
 
+/// "/proc", or the test-only CUPTI_PROFILER_PROC_ROOT override (see
+/// process_discovery.h). Used for the process-table reads (children,
+/// stat, comm) of discovery and of the probes' tracked-process lists.
+std::string ProcRoot();
+
+/// A /proc/<pid>/stat start time (field 22: clock ticks since boot, on
+/// CLOCK_BOOTTIME) converted to the trace clock (steady_clock =
+/// CLOCK_MONOTONIC, ns). Resolution is one clock tick (10 ms at
+/// USER_HZ=100). 0 if ticks is 0.
+uint64_t BootTicksToSteadyNs(uint64_t ticks);
+
 /// Get the system page size in bytes (typically 4096).
 long GetPageSize();
 

@@ -15,11 +15,15 @@
 //      the followed set — the PID-reuse guard. The pidfd is checked
 //      still-alive AFTER the read, so the /proc data describes the
 //      process the pidfd pins. Accepted PIDs are registered on the
-//      probes as "<root alias>/<comm>" with parent_pid and
-//      discovered=true.
-//   3. Polls the held pidfds; a discovered process that exited gets
-//      RemoveTrackedProcess() on the probes, so it appears once more in
-//      the next flush with removed=true.
+//      probes (AddDiscoveredProcess, which duplicates the pidfd) with
+//      label = the root's alias, parent_pid and discovered=true; the
+//      probes name them "<label>/<comm>" and follow comm from then on.
+//      Each is logged: "[discovery] + <pid> <comm> (parent <ppid>
+//      <parent comm>)".
+//   3. Polls the held pidfds, to stop following exited processes and
+//      reap adopted ones. Removing an exited process from the trace is
+//      the probes' job: they hold their own pidfds (for roots too, with
+//      discovery on or off) and mark it removed at their next tick.
 //   4. Records the scan's own wall time (p50/p99/max) and publishes it
 //      to the probes as DiscoveryStats.
 //
@@ -31,11 +35,17 @@
 // The discovery thread only starts once some root actually tracks its
 // descendants, so with the feature off it costs nothing.
 //
+// PID reuse within one scan interval (a discovered process exits and its
+// number is reused before the next scan) cannot misattribute samples:
+// the probes watch every entry through their own pidfd and never sample
+// an exited one again. See docs/system-guide.md "PID reuse".
+//
 // Test-only: CUPTI_PROFILER_PROC_ROOT replaces "/proc" for the reads in
-// steps 1-2 (children, stat, comm), so the algorithm can be exercised on
-// a synthetic tree. pidfds and the probes' own reads still use the real
-// kernel, so the PIDs in a synthetic tree must be real, live processes.
-// Not a supported configuration knob.
+// steps 1-2 (children, stat, comm) and for the probes' process-table
+// reads (stat and comm at registration, comm refresh), so the algorithm
+// can be exercised on a synthetic tree. pidfds and the probes' samples
+// still use the real kernel, so the PIDs in a synthetic tree must be
+// real, live processes. Not a supported configuration knob.
 #pragma once
 
 #include <cupti_profiler/process_tracking_probe.h>   // CUPTI_PROFILER_API
@@ -150,7 +160,6 @@ private:
     void MaybeReapAdopted(uint32_t pid, const Entry& e);
     void Scan();
     bool TryRegister(uint32_t child, uint32_t listedUnder);
-    void RefreshComm(uint32_t pid, Entry& e);
     std::vector<uint32_t> ReadChildren(uint32_t pid) const;
     void PublishStats();
     template <class F> void ForEachSink(uint8_t mask, F&& f);

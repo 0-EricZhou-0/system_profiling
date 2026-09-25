@@ -60,7 +60,8 @@ def test_discovery_off(tmp_path, mode, enabled, override, expect_child):
         assert seen[child].discovered and seen[child].parent_pid == t.pid
     else:
         assert set(seen) == {t.pid}, f"only the listed PID may be traced: {sorted(seen)}"
-    assert not seen[t.pid].discovered and seen[t.pid].parent_pid == 0
+    # A listed root records the parent it had when listed (this test).
+    assert not seen[t.pid].discovered and seen[t.pid].parent_pid == os.getpid()
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -257,7 +258,10 @@ sys.stdin.readline()
     assert all(s is False for s in states[present[0]:removed_at[0]]), states
     assert all(s is None for s in states[removed_at[0] + 1:]), f"dropped after removal: {states}"
     assert removed_at[0] < len(frames) - 1, "no flush after the removal marker"
-    assert sample_times(frames, child), "child tracked but never sampled"
+    ts = sample_times(frames, child)
+    assert ts, "child tracked but never sampled"
+    marker = next(tp for tp in frames[removed_at[0]].tracked_processes if tp.pid == child)
+    assert marker.end_time_ns > 0 and max(ts) < marker.end_time_ns, marker
 
 
 @pytest.mark.parametrize("mode", MODES)

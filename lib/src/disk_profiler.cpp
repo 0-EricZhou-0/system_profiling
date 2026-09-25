@@ -47,9 +47,13 @@ public:
     // Previous snapshots, each with the steady-clock instant it was read:
     // rates divide by the actual time since then, not the nominal sample
     // period (the loop always runs somewhat longer than 1/hz).
+    // serial (per-PID baselines only) is the tracked entry's
+    // ProcessEntry::serial: a new process that got an old one's PID
+    // never inherits its baseline.
     template <typename Snapshot> struct Baseline {
         Snapshot s;
         uint64_t tickTsNs = 0;
+        uint64_t serial = 0;
     };
     std::unordered_map<std::string, Baseline<internal::DiskStatSnapshot>> prevDisk;
     std::unordered_map<uint32_t, Baseline<internal::PIDIOSnapshot>> prevPIDIO;
@@ -159,16 +163,28 @@ void DiskProfiler::Start() {
             // ProcessTrackingProbe holds right now. Entries with
             // pending_removal=true are skipped (they're awaiting the
             // next flush's removal marker).
+            //
+            // Read-then-verify, as in the system probe: the readings of
+            // processes whose pidfd says they exited are dropped, since
+            // the number may already name another process.
             auto snapshot = this->SnapshotProcesses();
             std::unordered_set<uint32_t> snapshotPids;
             snapshotPids.reserve(snapshot.size());
-
+            std::vector<std::pair<const ProcessTrackingProbe::ProcessEntry*,
+                                  internal::PIDIOSnapshot>> readings;
+            readings.reserve(snapshot.size());
             for (const auto& entry : snapshot) {
-                uint32_t pid = entry.pid;
-                snapshotPids.insert(pid);
+                snapshotPids.insert(entry.pid);
                 if (entry.pending_removal) continue;
+                readings.emplace_back(&entry, internal::ReadPIDIO(entry.pid));
+            }
+            const auto goneList = this->PollTracked();
+            const std::unordered_set<uint64_t> gone(goneList.begin(), goneList.end());
 
-                auto curIO = internal::ReadPIDIO(pid);
+            for (const auto& [ep, curIO] : readings) {
+                const auto& entry = *ep;
+                const uint32_t pid = entry.pid;
+                if (gone.count(entry.serial)) continue;   // exited during this tick
                 if (!curIO.accessible) {
                     if (impl.warnedPIDs.find(pid) == impl.warnedPIDs.end()) {
                         std::cerr << "[Disk] Warning: cannot read /proc/" << pid
@@ -180,9 +196,9 @@ void DiskProfiler::Start() {
                 }
 
                 auto it = impl.prevPIDIO.find(pid);
-                if (it == impl.prevPIDIO.end()) {
+                if (it == impl.prevPIDIO.end() || it->second.serial != entry.serial) {
                     // Mid-run add — seed baseline, skip this tick.
-                    impl.prevPIDIO[pid] = {curIO, tsNs};
+                    impl.prevPIDIO[pid] = {curIO, tsNs, entry.serial};
                     continue;
                 }
                 auto& prev = it->second.s;
@@ -202,7 +218,7 @@ void DiskProfiler::Start() {
                 t.read_bytes_per_sec            = rate(&internal::PIDIOSnapshot::readBytes);
                 t.write_bytes_per_sec           = rate(&internal::PIDIOSnapshot::writeBytes);
                 t.cancelled_write_bytes_per_sec = rate(&internal::PIDIOSnapshot::cancelledWriteBytes);
-                it->second = {curIO, tsNs};
+                it->second = {curIO, tsNs, entry.serial};
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.processTicks.push_back(std::move(t));

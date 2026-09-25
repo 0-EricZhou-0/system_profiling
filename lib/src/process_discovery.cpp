@@ -21,14 +21,6 @@ namespace internal {
 
 namespace {
 
-std::string ProcRootFromEnv() {
-    // Test-only override; see process_discovery.h.
-    const char* env = std::getenv("CUPTI_PROFILER_PROC_ROOT");
-    std::string root = (env && *env) ? env : "/proc";
-    while (root.size() > 1 && root.back() == '/') root.pop_back();
-    return root;
-}
-
 uint64_t NowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -96,7 +88,7 @@ ProcessDiscovery::ProcessDiscovery(DiscoverySettings settings,
       system_(system),
       disk_(disk),
       reaping_(reaping),
-      procRoot_(ProcRootFromEnv()),
+      procRoot_(ProcRoot()),
       selfPid_(static_cast<uint32_t>(::getpid())) {}
 
 ProcessDiscovery::~ProcessDiscovery() {
@@ -233,12 +225,12 @@ void ProcessDiscovery::HandleExits() {
 
 void ProcessDiscovery::HandleExit(uint32_t pid, Entry& e) {
     if (!e.isRoot) {
-        // Roots belong to the caller, who listed them; only processes
-        // discovery registered are removed by it.
+        // The probes see the exit through their own pidfds and remove
+        // the process themselves (process_tracking_probe.h); here it is
+        // only counted, logged and, if adopted, reaped.
         ++exited_;
         MaybeReapAdopted(pid, e);
-        ForEachSink(e.sinks, [&](ProcessTrackingProbe& p) { p.RemoveTrackedProcess(pid); });
-        std::cerr << "[discovery] - " << pid << " exited\n";
+        std::cerr << "[discovery] - " << pid << " " << e.comm << " exited\n";
     }
     if (e.pidfd >= 0) ::close(e.pidfd);
     e.pidfd = -1;
@@ -314,29 +306,18 @@ bool ProcessDiscovery::TryRegister(uint32_t child, uint32_t listedUnder) {
     e.firstParent = st->ppid;
     e.startTime   = st->startTime;
     e.comm        = st->comm;
-    const std::string alias = e.label + "/" + e.comm;
     const uint32_t ppid = st->ppid;
-    const uint8_t sinks = e.sinks;
+    // The probes duplicate this pidfd, so their entries pin the very
+    // process checked above.
+    ForEachSink(e.sinks, [&](ProcessTrackingProbe& p) {
+        p.AddDiscoveredProcess(child, e.label, e.comm, ppid, fd, e.startTime);
+    });
+    auto parentComm = ReadSmallFile(procRoot_ + "/" + std::to_string(ppid) + "/comm");
+    std::cerr << "[discovery] + " << child << " " << e.comm << " (parent " << ppid << " "
+              << (parentComm ? Trimmed(*parentComm) : std::string("?")) << ")\n";
     table_.emplace(child, std::move(e));
     ++discovered_;
-    ForEachSink(sinks, [&](ProcessTrackingProbe& p) { p.AddDiscoveredProcess(child, alias, ppid); });
-    std::cerr << "[discovery] + " << child << " " << alias << " (parent " << ppid << ")\n";
     return true;
-}
-
-void ProcessDiscovery::RefreshComm(uint32_t pid, Entry& e) {
-    // A forked child carries its parent's comm until it execs or
-    // renames itself (vLLM's EngineCore does, after fork), so the alias
-    // follows comm rather than freezing the name seen at discovery.
-    auto text = ReadSmallFile(procRoot_ + "/" + std::to_string(pid) + "/comm");
-    if (!text) return;
-    std::string comm = Trimmed(*text);
-    if (comm.empty() || comm == e.comm) return;
-    e.comm = comm;
-    const std::string alias = e.label + "/" + comm;
-    ForEachSink(e.sinks, [&](ProcessTrackingProbe& p) {
-        p.AddDiscoveredProcess(pid, alias, e.firstParent);
-    });
 }
 
 void ProcessDiscovery::Scan() {
@@ -347,7 +328,6 @@ void ProcessDiscovery::Scan() {
     std::vector<uint32_t> work;
     work.reserve(table_.size());
     for (auto& [pid, e] : table_) {
-        if (!e.isRoot) RefreshComm(pid, e);
         if (e.scan) work.push_back(pid);
     }
     for (size_t i = 0; i < work.size(); ++i) {

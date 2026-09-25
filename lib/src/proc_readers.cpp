@@ -142,6 +142,27 @@ long GetPageSize() {
     return ps;
 }
 
+std::string ProcRoot() {
+    const char* env = std::getenv("CUPTI_PROFILER_PROC_ROOT");   // test-only
+    std::string root = (env && *env) ? env : "/proc";
+    while (root.size() > 1 && root.back() == '/') root.pop_back();
+    return root;
+}
+
+uint64_t BootTicksToSteadyNs(uint64_t ticks) {
+    if (ticks == 0) return 0;
+    // Field 22 counts from boot on CLOCK_BOOTTIME, which runs on through
+    // suspend; CLOCK_MONOTONIC does not. Shift by their current offset.
+    struct timespec boot{}, mono{};
+    ::clock_gettime(CLOCK_BOOTTIME, &boot);
+    ::clock_gettime(CLOCK_MONOTONIC, &mono);
+    const int64_t offset =
+        (static_cast<int64_t>(boot.tv_sec) - mono.tv_sec) * 1000000000LL +
+        (static_cast<int64_t>(boot.tv_nsec) - mono.tv_nsec);
+    const int64_t ns = static_cast<int64_t>(ticks) * (1000000000LL / GetCLKTCK()) - offset;
+    return ns > 0 ? static_cast<uint64_t>(ns) : 0;
+}
+
 long GetCLKTCK() {
     static long clk = sysconf(_SC_CLK_TCK);
     return clk;

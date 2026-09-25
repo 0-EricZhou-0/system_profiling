@@ -1,5 +1,6 @@
 #include "system_flush_thread.h"
 #include "discovery_stats_proto.h"
+#include "tracked_process_proto.h"
 #include "testing_hooks.h"
 
 #include "system_metrics.pb.h"
@@ -197,11 +198,7 @@ void AddTrackedProcesses(
 {
     for (const auto& p : processes) {
         auto* tp = trace.add_tracked_processes();
-        tp->set_pid(p.pid);
-        tp->set_alias(p.alias);
-        tp->set_removed(p.pending_removal);
-        tp->set_parent_pid(p.parent_pid);
-        tp->set_discovered(p.discovered);
+        FillTrackedProcess(tp, p);
         tp->set_cpu_before_discovery_ns(p.cpu_before_discovery_ns);
     }
 }

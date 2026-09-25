@@ -58,9 +58,12 @@ public:
     // %-of-core denominator uses real elapsed time, not a nominal
     // sample period). cpuNs is the process CPU clock at that read —
     // on-CPU time of the whole thread group, exited threads included.
+    // serial is the tracked entry's (ProcessEntry::serial): a new
+    // process that got an old one's PID never inherits its baseline.
     struct ProcessBaseline {
         uint64_t tickTsNs = 0;
         uint64_t cpuNs = 0;
+        uint64_t serial = 0;
     };
     std::unordered_map<uint32_t, ProcessBaseline> prevPID;
 
@@ -308,9 +311,22 @@ void SystemProfiler::Start() {
             // right now (config + any mid-run Add/Remove). Entries with
             // pending_removal=true are skipped — they're awaiting the
             // next flush to be emitted as a removal marker.
+            //
+            // Read-then-verify: values are read by PID number, then the
+            // entries' pidfds are polled, and the readings of processes
+            // found to have exited are dropped (the number may already
+            // name another process). What is kept was read while the
+            // process each entry pins was still there.
             auto snapshot = this->SnapshotProcesses();
             std::unordered_set<uint32_t> snapshotPids;
             snapshotPids.reserve(snapshot.size());
+            struct Reading {
+                const ProcessTrackingProbe::ProcessEntry* entry;
+                uint64_t cpuNs;
+                std::optional<internal::PIDStatmSnapshot> statm;   // set if a baseline exists
+            };
+            std::vector<Reading> readings;
+            readings.reserve(snapshot.size());
 
             for (const auto& entry : snapshot) {
                 uint32_t pid = entry.pid;
@@ -327,27 +343,40 @@ void SystemProfiler::Start() {
                 auto curCpuNs = internal::ReadPIDCpuTimeNs(pid);
                 if (!curCpuNs) { impl.NoteExited(pid); continue; }
                 auto it = impl.prevPID.find(pid);
-                if (it == impl.prevPID.end()) {
+                const bool haveBase = it != impl.prevPID.end() && it->second.serial == entry.serial;
+                readings.push_back({&entry, *curCpuNs,
+                                    haveBase ? std::optional(internal::ReadPIDStatm(pid))
+                                             : std::nullopt});
+            }
+            const auto goneList = this->PollTracked();
+            const std::unordered_set<uint64_t> gone(goneList.begin(), goneList.end());
+
+            for (const auto& r : readings) {
+                const auto& entry = *r.entry;
+                const uint32_t pid = entry.pid;
+                if (gone.count(entry.serial)) continue;   // exited during this tick
+                if (!r.statm) {
                     // Mid-run add — seed the baseline; skip this tick.
                     // First emitted sample is one tick later, so the
                     // delta isn't garbage.
                     auto& seed = impl.prevPID[pid];
                     seed.tickTsNs = tsNs;
-                    seed.cpuNs    = *curCpuNs;
+                    seed.cpuNs    = r.cpuNs;
+                    seed.serial   = entry.serial;
                     // A discovered process's CPU so far — from its fork
                     // until now — is recorded once as its head, never
                     // as a first-interval spike. Roots get none.
-                    if (entry.discovered) this->SetCpuBeforeDiscovery(pid, *curCpuNs);
+                    if (entry.discovered) this->SetCpuBeforeDiscovery(pid, r.cpuNs);
                     continue;
                 }
-                auto& prev  = it->second;
-                auto statm  = internal::ReadPIDStatm(pid);
+                auto& prev = impl.prevPID[pid];
+                const auto& statm = *r.statm;
 
                 // On-CPU delta of the whole thread group. The process
                 // CPU clock is monotonic for the life of the process,
                 // and threads that exited since the previous tick have
                 // already been folded into it.
-                uint64_t deltaCpuNs = (*curCpuNs > prev.cpuNs) ? (*curCpuNs - prev.cpuNs) : 0;
+                uint64_t deltaCpuNs = (r.cpuNs > prev.cpuNs) ? (r.cpuNs - prev.cpuNs) : 0;
 
                 // Denominator: actual wall-clock elapsed between this
                 // tick and the previous one, not the nominal sample
@@ -366,7 +395,7 @@ void SystemProfiler::Start() {
                 t.shared_bytes = statm.sharedPages * pageSize;
 
                 prev.tickTsNs = tsNs;
-                prev.cpuNs    = *curCpuNs;
+                prev.cpuNs    = r.cpuNs;
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.processTicks.push_back(std::move(t));
