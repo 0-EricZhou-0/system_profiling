@@ -90,60 +90,59 @@ renames; its rename history is in the table below.
 ### The run in the figure
 
 `Qwen/Qwen3.5-0.8B` on one H100 NVL, vLLM 0.29 from PyPI, `--gpu`, the
-defaults otherwise (100 Hz, 100 ms scan), `-- --max-model-len 4096
---gpu-memory-utilization 0.80`, warm compile caches. The server was ready
-89 s after spawn and served 2844 requests in the 90 s of load, none failed.
-What the example printed at the end, the trace's process table (times from
-the start of the trace; CPU = head + samples + exit tail):
+defaults otherwise (System and Disk 50 Hz, GPU 500 Hz, 100 ms scan),
+`-- --max-model-len 4096 --gpu-memory-utilization 0.80`, warm compile caches.
+The server was ready 87 s after spawn and served 2412 requests in the 90 s of
+load, none failed. The node was not otherwise idle: other jobs kept the
+whole-host CPU panel at 5–20% busy (vLLM itself accounts for ~2 of the 128
+CPUs). What the example printed at the end, the trace's process table (times
+from the start of the trace; CPU = head + samples + exit tail):
 
 | pid | parent | kind | comm (history) | start s | end s | CPU s |
 |---|---|---|---|---|---|---|
-| 1539437 | 1539403 | root | `vllm` | 0.02 | 185.98 | 73.73 |
-| 1539699 | 1539437 | discovered | `python3.12` | 14.65 | 17.27 | 2.49 |
-| 1539701 | 1539437 | discovered | `python3.12` | 14.70 | 17.27 | 2.44 |
-| 1539703 | 1539437 | discovered | `vllm` | 14.92 | 14.93 | 0.00 |
-| 1539842 | 1539437 | discovered | `python3.12` | 25.61 | 185.34 | 0.05 |
-| 1539843 | 1539437 | discovered | `python3.12` → `VLLM::EngineCor` | 25.62 | 184.69 | 137.60 |
-| 1539944 | 1539843 | discovered | `python3.12` | 34.47 | 36.74 | 2.48 |
-| 1539946 | 1539843 | discovered | `python3.12` | 34.52 | 36.72 | 2.46 |
-| 1540246 | 1539843 | discovered | `VLLM::EngineCor` | 45.92 | 45.93 | 0.00 |
-| 1540454 | 1539843 | discovered | `VLLM::EngineCor` | 58.91 | 58.94 | 0.00 |
-| 1540507 | 1539843 | discovered | `ninja` | 65.41 | 65.53 | 0.03 |
+| 1882216 | 1882197 | root | `vllm` | 0.0 | 183.8 | 64.36 |
+| 1882384 | 1882216 | discovered | `python3.12` | 14.4 | 16.6 | 2.21 |
+| 1882386 | 1882216 | discovered | `python3.12` | 14.5 | 16.7 | 2.40 |
+| 1882478 | 1882216 | discovered | `python3.12` | 25.0 | 183.4 | 0.04 |
+| 1882479 | 1882216 | discovered | `python3.12` → `VLLM::EngineCor` | 25.0 | 183.0 | 137.84 |
+| 1882573 | 1882479 | discovered | `python3.12` | 33.9 | 36.6 | 2.66 |
+| 1882575 | 1882479 | discovered | `python3.12` | 33.9 | 36.5 | 2.73 |
 
-The **root** (1539437, `vllm`) is the API server; kind `root` because the
-launcher listed it. **EngineCore** (1539843) was found as `python3.12` 25.6 s
+The **root** (1882216, `vllm`) is the API server; kind `root` because the
+launcher listed it. **EngineCore** (1882479) was found as `python3.12` 25.0 s
 in, before it renamed itself, and its alias followed the rename. The
-**multiprocessing helper** (1539842) lives for the whole run at ~0 CPU. The
+**multiprocessing helper** (1882478) lives for the whole run at ~0 CPU. The
 rest are **startup transients**: two pairs of short-lived Python workers
-(~2.5 s of CPU each; one pair under the API server, one under EngineCore),
-EngineCore's brief forks (still carrying its comm), and a `ninja` build step.
+(~2.5 s of CPU each; one pair under the API server, one under EngineCore).
 Processes that lived less than one scan interval can be missing: in this run
-the oracle below saw 3 such (`file` and two forks), each alive for a single
-10 ms poll.
+the oracle below saw 5 such (`file`, `ninja`, `tileiras` and two of
+EngineCore's brief forks), each alive at most 80 ms.
 
 The panels line up with vLLM's own log (times from the start of the trace):
-EngineCore starts at 25.6 s and loads the weights at ~38 s (the 1.6 GiB step
-in its cumulative `rchar`); its profiling warmup run (~47–54 s) and CUDA
-graph capture (~54–62 s) are the GPU activity during startup and its bursts
-of several cores; its init finishes at ~67 s, and the API server, busy at
-~100% of a core through most of startup, spends ~20 s more on multi-modal
-warmup before it answers `/v1/models` at 89 s. Under load both run near one
-core each; resident memory grows to ~3 GiB in each. (`torch.compile` was a
-cache hit here, 0.4 s; with cold caches startup takes minutes and spawns
-many more short-lived compiler processes, each traced if it lives ≥ 100 ms.)
+EngineCore starts at 25.0 s and loads the weights at ~38 s (the step in its
+cumulative `rchar`; vLLM: "Loading weights took 0.52 seconds"); its profiling
+warmup and two CUDA graph captures (finished at 56 s and 61 s) are the GPU
+activity during startup and its bursts of several cores; its init finishes at
+65 s, and the API server, busy at ~100% of a core through most of startup,
+spends ~20 s more before it answers `/v1/models` at 87 s. Under load both run
+near one core each; resident memory reaches ~3.1 GiB (EngineCore) and
+~2.3 GiB (API server). (`torch.compile` was a cache hit here, 0.3 s; with cold
+caches startup takes minutes and spawns many more short-lived compiler
+processes, each traced if it lives ≥ 100 ms.)
 
-### Checked on six runs
+### Checked on seven runs
 
-Two jobs, six runs (two without `--gpu`, then two pairs alternating), with a
+Six runs at the earlier defaults (System and Disk 100 Hz; two without
+`--gpu`, then two pairs alternating) and the run in the figure, each with a
 test-only oracle polling the run's cgroup every 10 ms and the launcher's
 `getrusage(RUSAGE_CHILDREN)`:
 
 | | result |
 |---|---|
-| Completeness: every process the oracle saw alive ≥ 100 ms is in the trace (both probes) | **6/6 runs** (7–8 such processes per run, 0 missed); the 3–9 missed per run were each seen alive ≤ 10.5 ms |
-| Per-process CPU of the whole tree (Σ head + samples + tails) vs `getrusage(RUSAGE_CHILDREN)` once vLLM was reaped | trace **15–44 ms below** out of 196–221 s (0.008–0.020%). What the trace cannot hold: the root's CPU after its last sample (a root has no exit tail: its parent, the launcher, is not tracked), and the CPU of the missed sub-100 ms processes |
-| Descendant tracking scan (the trace's `DiscoveryStats`) | p50 0.72–1.25 ms, p99 1.7–2.8 ms, 7–10 processes discovered, all seen exiting |
-| The sidecar's own CPU (exact, from `getrusage` across `stop()`) | **8.6–14.6% of one core** over the run, unpinned. 8.6% in the one run on a quiet node without `--gpu`; 13.2–14.6% while the node was 40–70% busy with other jobs or the launcher ran the GPU probe beside it. Pin it with `sidecar_cpus` to keep it off the server's cores |
+| Completeness: every process the oracle saw alive ≥ 100 ms is in the trace (both probes) | **7/7 runs** (7–8 such processes per run, 0 missed); the 3–9 missed per run were each seen alive ≤ 80.5 ms |
+| Per-process CPU of the whole tree (Σ head + samples + tails) vs `getrusage(RUSAGE_CHILDREN)` once vLLM was reaped | trace **15–74 ms below** out of 196–221 s (0.008–0.035%; the figure's run: 74 ms of 212 s). What the trace cannot hold: the root's CPU after its last sample (a root has no exit tail: its parent, the launcher, is not tracked), and the CPU of the missed sub-100 ms processes |
+| Descendant tracking scan (the trace's `DiscoveryStats`) | p50 0.72–1.25 ms, p99 1.7–2.8 ms, 6–10 processes discovered, all seen exiting (the figure's run: p50 0.92 ms, p99 2.5 ms, 6) |
+| The sidecar's own CPU (exact, from `getrusage` across `stop()`) | At 100 Hz: **8.6–14.6% of one core** over the run, unpinned (8.6% on a quiet node without `--gpu`; 13.2–14.6% while the node was 40–70% busy or the launcher ran the GPU probe beside it). At the 50 Hz default, the figure's run: **8.3%** (8.8% under load, with `--gpu`). What each rate costs, measured: [Sampling frequency guidance](../system-guide.md#sampling-frequency-guidance). Pin it with `sidecar_cpus` to keep it off the server's cores |
 
 ## GPU: device-wide counters from the launcher
 
@@ -151,19 +150,21 @@ CUPTI PM Sampling runs in the launcher's own CUDA context, but the counters it
 samples are the **device's**: SM activity, warps and DRAM throughput include
 every context on the GPU, vLLM's among them. Measured in this example's runs:
 
-| window | SM active (% of peak, mean) — run in the figure | second run | third run |
+| window | SM active (% of peak, mean) — run in the figure (500 Hz) | earlier run (1000 Hz) | earlier run (1000 Hz) |
 |---|---|---|---|
 | startup (spawn → ready) | 0.9 | 0.9 | 0.9 |
-| load, concurrency 4 / 16 / 64 / 64 / 16 / 4 | 25.7 / 27.1 / 37.9 / 34.6 / 26.0 / 25.7 | 23.6 / 22.2 / 31.0 / 32.2 / 18.7 / 17.5 | 24.8 / 23.8 / 32.0 / 33.1 / 25.0 / 24.8 |
+| load, concurrency 4 / 16 / 64 / 64 / 16 / 4 | 23.9 / 22.0 / 29.2 / 28.7 / 23.0 / 23.0 | 23.6 / 22.2 / 31.0 / 32.2 / 18.7 / 17.5 | 24.8 / 23.8 / 32.0 / 33.1 / 25.0 / 24.8 |
 | idle, after the load | 0.0 | 0.0 | 0.0 |
 
 SM activity follows vLLM's load, so **from a launcher the GPU panels are
 meaningful, device-wide**. It did not conflict with vLLM: every run started
-and served every request. It may cost a little: in each of the three pairs
-of runs with and without `--gpu`, the `--gpu` run completed 4.5–8.0% fewer
-requests in the same 90 s, a spread that n = 3 cannot separate from
-run-to-run noise (up to 11% between runs of the same kind). `--gpu` is
-therefore off by default.
+and served every request. **It does cost throughput**: at 500 Hz, in 12
+interleaved pairs against the same server with and without the probe
+(System and Disk at 50 Hz in both), vLLM served **6.9% fewer requests per
+second** (95% CI 4.8–9.0%) and mean time-to-first-token rose 23%; the
+launcher hosting the probe used 93% of one core throughout, competing with
+the server for CPUs — whether that or the counter collection is the cause
+was not isolated. `--gpu` is off by default.
 
 What the launcher cannot give you: anything per context or per kernel
 (the counters are whole-device, so another job on the same GPU would show up
@@ -177,8 +178,9 @@ one CPU thread in the launcher.
 - **Weight loading shows in the syscall layer, not the storage layer.**
   vLLM 0.29's default safetensors loader reads the checkpoint with `read()`:
   EngineCore's `rchar` grows by the checkpoint's size (1.63 GiB for
-  `Qwen/Qwen3.5-0.8B`) in about 0.5 s (vLLM logs "Loading weights took
-  0.54 seconds"), while `read_bytes` stays at 0
+  `Qwen/Qwen3.5-0.8B`; 1.66 GiB in the figure's 36–41 s window) in about
+  0.5 s (vLLM logs "Loading weights took 0.52 seconds"), while `read_bytes`
+  stays at 0
   because the file is already in the page cache. **A loader that `mmap`s
   from a warm cache would be invisible to every per-process counter**; see
   [per-PID I/O counters](../metric-model.md#per-pid-io-counters-who-records-what).
@@ -192,9 +194,11 @@ one CPU thread in the launcher.
   `IoReapAdjustment`, so per-process I/O is each process's own and sums
   over the tree correctly; see
   [reaped children's I/O](../system-guide.md#reaped-childrens-io).
-  **The figure above predates this** (it was recorded before the change):
-  it still shows the API server's one-sample jump at shutdown, which
-  stretches the syscall-layer rate axis.
+  In the figure's run, EngineCore's 2.43 GiB is subtracted from the API
+  server at 183.1 s, so neither syscall-layer panel shows a jump at
+  shutdown. A tracked process that reaps a child and then exits and is
+  reaped itself within one sampling interval is handled too (the chain is
+  subtracted at the first live tracked ancestor).
 - `wchar` includes socket and pipe traffic (the server's responses, its
   log on stdout), so it is not a file-write rate.
 
