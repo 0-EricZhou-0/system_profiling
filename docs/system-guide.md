@@ -327,6 +327,7 @@ All public types live under `<cupti_profiler/...>` and the `cupti_profiler::` na
 | `<cupti_profiler/disk_profiler.h>` | `DiskProfiler`, `DiskProfilerConfig` |
 | `<cupti_profiler/event_profiler.h>` | `EventProfiler`, `EventProfilerConfig`, `EventTracker` (with `Domain::{GENERIC,GPU}`) |
 | `<cupti_profiler/tracked_process.h>` | `TrackedProcess` (shared by system + disk configs) |
+| `<cupti_profiler/child_subreaper.h>` | `EnableChildSubreaper()`, `ChildSubreaperEnabled()` — see [Subreaper helper](#subreaper-helper-adopt_orphans) |
 
 ### `ProfilerSuite`
 
@@ -348,6 +349,8 @@ public:
     // Mid-run PID tracking. Fans out to every probe that supports
     // per-PID sampling (currently System + Disk).
     void AddTrackedProcess(uint32_t pid, std::string alias = {});
+    // ... with a per-root descendant-tracking override.
+    void AddTrackedProcess(uint32_t pid, std::string alias, bool trackDescendants);
     void RemoveTrackedProcess(uint32_t pid);
 };
 ```
@@ -357,10 +360,11 @@ public:
 | `LoadConfig(path)` | Parse a protobuf text-format `.pbtxt` (`ProfilerSuiteConfig` schema) and apply it to all sub-profilers. Resolves `pid: 0` to the calling process. |
 | `LoadConfigFromBytes(buf)` | Same as above but takes a serialized binary `ProfilerSuiteConfig`. Used by language bindings. |
 | `Get*Profiler()` | Access individual sub-profilers — needed to grab `EventTracker` references for region annotation. |
-| `Configure()` | Loads `MetricCatalog` (from `metric_catalog_path` in the config, or a default path next to the binary) and then calls `Configure()` on every sub-profiler whose `enabled = true`. |
+| `Configure()` | Loads `MetricCatalog` (from `metric_catalog_path` in the config, or a default path next to the binary) and then calls `Configure()` on every sub-profiler whose `enabled = true`. With System or Disk enabled, also runs the [startup situation report](#startup-situation-report). |
 | `Start()` / `Stop()` | Lifecycle fan-out. Both write `session_metadata.pb` (atomically — `.tmp` + `rename(2)`); the manifest carries the inlined `MetricCatalog` so visualizers don't need a separate catalog file. |
-| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage). Thread-safe. |
-| `RemoveTrackedProcess(pid)` | Stop tracking a PID. The PID appears one more time in the next flush of each affected probe with `TrackedProcessV2.removed=true` (visualizer renders a removal marker), then is dropped. Thread-safe. |
+| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage). Its descendants are tracked if `process_discovery.enabled`. Thread-safe. |
+| `AddTrackedProcess(pid, alias, trackDescendants)` | Same, overriding `process_discovery.enabled` for this root — see [Descendant tracking](#descendant-tracking). |
+| `RemoveTrackedProcess(pid)` | Stop tracking a PID. The PID appears one more time in the next flush of each affected probe with `TrackedProcessV2.removed=true` (visualizer renders a removal marker), then is dropped. Descendants already discovered under it stay tracked until they exit. Thread-safe. |
 
 ### `ProfilerConfig` (GPU)
 
@@ -752,6 +756,204 @@ python tools/visualize_single.py -i my_trace.pb -o my_trace.png
 
 ---
 
+## Descendant tracking
+
+Off by default: the System and Disk probes trace exactly the PIDs they
+are given. Turn it on to also trace every descendant of a listed PID —
+what a server that forks workers (vLLM's API server → `EngineCore`,
+helpers, startup compile workers) needs.
+
+### Configuration
+
+```protobuf title:"proto/profiler_config.proto (excerpt)"
+message ProcessDiscoveryConfig {
+    bool   enabled              = 1;  // default false: trace listed PIDs only
+    bool   direct_children_only = 2;  // default false => RECURSIVE
+    uint64 scan_interval_ms     = 3;  // 0 => 100
+}
+message ProfilerSuiteConfig { ...; ProcessDiscoveryConfig process_discovery = 8; }
+```
+
+One setting drives **both** the System and Disk probes, which share the
+tracked set. `direct_children_only` is inverted because proto3 bools
+default to `false`: the default is recursive.
+
+A per-root override wins over `enabled` for that root, so you can follow
+a spawned server's tree without also following the host's own children:
+
+```python
+suite = cp.ProfilerSuite()
+cp.configure_suite(suite, {..., "process_discovery": {"enabled": False, "scan_interval_ms": 100}})
+suite.start()
+server = subprocess.Popen(["vllm", "serve", ...])
+suite.add_tracked_process(server.pid, "vllm", track_descendants=True)   # None = inherit
+```
+
+C++: `AddTrackedProcess(pid, alias, /*trackDescendants=*/true)`. PIDs
+listed in the config's `processes` inherit `enabled`.
+
+### Guarantee
+
+**A process that is a child of a tracked process for at least one full
+scan interval is discovered; once discovered, it is tracked until it
+exits, regardless of reparenting.** A child that lives less than one
+interval may be missed — lower `scan_interval_ms` to catch it (at the
+cost below).
+
+### How a scan works
+
+One discovery thread per observer: in the workload process under
+LEGACY, inside the sidecar under SIDECAR (the settings travel in the
+serialized config, the per-root override in `MSG_ADD_PID`'s optional
+trailing byte). It starts only once some root tracks its descendants.
+Every `scan_interval_ms`:
+
+1. For **every** followed process — listed roots with descendants on,
+   and (recursive mode) every process already discovered under them,
+   not just the tree currently reachable from a root — read
+   `/proc/<pid>/task/*/children`, **every thread's** file: a child
+   hangs off whichever thread forked it.
+2. For each new PID: `pidfd_open` (raw syscall), then re-read its parent
+   from `/proc/<pid>/stat` and **require that parent to be followed** —
+   the PID-reuse guard (a PID listed in a `children` file can exit and be
+   recycled by an unrelated process before `pidfd_open`). The pidfd is
+   checked still-alive after the read, so the data describes the process
+   the pidfd pins. The process is registered on both probes as
+   `<root alias>/<comm>` (the root's PID if it has no alias) with
+   `TrackedProcessV2.parent_pid` and `discovered = true`. The alias
+   follows later `comm` changes (a forked child carries its parent's
+   `comm` until it execs or renames itself, as vLLM's `EngineCore` does).
+3. Poll the held pidfds: a discovered process that exited gets
+   `RemoveTrackedProcess`, so it appears once more in the next flush with
+   `removed = true` and is then dropped.
+4. Record the scan's own wall time; every system/disk flush carries the
+   cumulative `DiscoveryStats` (`scans`, `scan_p50_ns` / `p99` / `max`,
+   `discovered`, `exited`, `rejected`).
+
+Step 1 is what makes the guarantee hold across reparenting: when an
+intermediate process exits, its discovered children leave the root's
+tree but keep being scanned, so their own later children are found too.
+
+### Cost
+
+The scan is dominated by opening one `children` file per thread of every
+followed process. Measured in C++ on a compute node (sprc01) against a
+vLLM-shaped tree — root with 41 threads, children with 77 and 1 (119
+threads, 3 processes), recursive:
+
+| Interval | Per scan (library self-metric) | Observer CPU |
+| -------- | ------------------------------ | ------------ |
+| 100 ms (default) | p50 1.77–1.84 ms, p99 1.84–1.95 ms | **1.7–1.8% of one core** |
+| 10 ms | p50 0.66–1.64 ms, p99 0.72–1.90 ms | 6.5–15% of one core (varies run to run: at this cadence the caches sometimes stay warm) |
+
+A single `children` read costs ~4.5 µs when hot but ~14 µs after the
+scan thread has slept for an interval (cold caches): a bare sweep of 120
+threads measured 0.57 ms back-to-back and 1.65 ms after a 100 ms sleep.
+Discovery's own bookkeeping adds ~0.15 ms. Under SIDECAR this CPU is the
+sidecar's; under LEGACY it is charged to the host process.
+
+### Limits
+
+- **Short-lived children** (< 1 interval) may be missed; see the guarantee.
+- **`CLONE_PARENT` from a root, and work delegated over IPC to processes
+  outside the tree**, are the user's responsibility: track the process
+  that actually spawns them.
+- **Listed roots are the caller's.** An exited root is not removed by
+  discovery (only discovered processes are), and removing a root leaves
+  its already-discovered descendants tracked until they exit.
+- **The observer never tracks itself** (the sidecar is a child of the
+  host, but is never discovered).
+- With System and Disk in **different** modes (one LEGACY, one SIDECAR),
+  each observer runs its own scan.
+- CPU a discovered process used between its fork and its discovery is
+  not in its samples (its first sample is a baseline), and neither is
+  the slice between its last sample and its exit.
+
+### Subreaper helper: `adopt_orphans()`
+
+When an intermediate process exits, its children are re-parented to the
+nearest *subreaper* ancestor, or to init. Discovery keeps tracking the
+ones it already found either way. **Opt in** to make your launcher that
+subreaper — `cupti_profiler.adopt_orphans()` in Python,
+`EnableChildSubreaper()` (`<cupti_profiler/child_subreaper.h>`) in C++;
+the library never sets it by itself. Call it once, before spawning the
+workload.
+
+It buys: adopted orphans' **CPU and storage I/O fold into the
+launcher's `getrusage`** (measured 0.001 s → 0.501 s for a 0.500 s
+orphan), and orphans stay under the launcher instead of vanishing to
+init. It does **not** buy: an orphan whose intermediate parent died
+*before the first scan* shows up as the launcher's child,
+indistinguishable from the launcher's other children, so it is not
+auto-tracked.
+
+**Reaping.** Adopted orphans become the launcher's zombies. A reaper that
+calls `waitpid(-1)` would also steal the exit status of the launcher's
+*own* children — `Popen.wait()` on the server would see `ECHILD`, which
+Python reports as return code 0. So the helper reaps **only processes
+discovery saw being adopted** — found with a parent other than the
+launcher, and whose parent at exit is the launcher — one at a time,
+through their pidfd (`waitid(P_PIDFD)`), after checking in `/proc` that
+it is the launcher's zombie with the start time recorded at discovery.
+Under LEGACY the discovery thread reaps directly; under SIDECAR the
+sidecar sends the PID to the launcher over a dedicated pipe (sidecar
+fd 5), and a thread in the launcher that otherwise sleeps in `read()`
+reaps it.
+
+#### What changes when `adopt_orphans()` is enabled
+
+Every row was measured or verified on 2026-09-24 (kernel 5.15) unless
+marked.
+
+| Aspect | Without it | With it |
+|---|---|---|
+| **Who is marked** | — | the calling process (the launcher) only |
+| **Inherited by its children?** | — | **no** — neither `fork` nor `Popen` children get it, so vLLM itself is never a subreaper (verified) |
+| **Survives the launcher `execve`-ing?** | — | **yes** (verified) — if the launcher execs another program, that program is still a subreaper |
+| **Where orphaned descendants go** | init, or the nearest existing subreaper such as `systemd --user` or `slurmstepd` | **the launcher** — their `PPid` becomes the launcher's PID |
+| **Signals to the launcher** | none for orphans | **`SIGCHLD` for every adopted orphan that exits** — code that handles `SIGCHLD` or calls `waitpid(-1)` will see children it never started |
+| **Zombies** | reaped by init | owned by the launcher until reaped. The helper reaps those discovery saw adopted; **orphans adopted before the first scan are not reaped by the helper** and stay zombies until the launcher exits. A zombie holds a PID and a process-table slot, no memory or CPU |
+| **Accounting** | orphans' CPU and storage I/O are credited to init — invisible to you | credited to the launcher: `getrusage(RUSAGE_CHILDREN)` and `os.times()` child fields **increase** (measured 0.001 s → 0.501 s for a 0.500 s orphan; 32.0 MiB written → 32.0 MiB folded) |
+| **Process group, session, signal delivery** | — | **unchanged** — Ctrl-C still reaches the orphans if they remain in the foreground process group |
+| **Attached (not spawned) targets** | — | **no effect** — only descendants of the launcher are covered |
+| **Cost** | — | zero at steady state; ~45–85 µs per orphan event, on the launcher, never on the target (measured with the 2026-09-24 prototype, not re-measured on this implementation) |
+| **Turning it off** | — | `prctl(PR_SET_CHILD_SUBREAPER, 0)`; already-adopted orphans stay adopted |
+
+The startup situation report records whether it is set, so a trace
+always says which guarantee it was collected under.
+
+### Startup situation report
+
+`ProfilerSuite::Configure()` (System or Disk enabled) checks, from the
+observer's side, which of the guarantees above hold here, logs it once
+to stderr, and writes it to `session_metadata.pb` as
+`repeated SituationCheck situation` (`check`, `observed`, `consequence`,
+`degraded`). Every line states what it means for the trace:
+
+| Check | Why it matters |
+| ----- | -------------- |
+| `observer` | in-process (LEGACY) or the sidecar's PID and binary (SIDECAR) |
+| `/proc/<pid>/task/<tid>/children` | absent (no `CONFIG_PROC_CHILDREN`) = no descendant tracking |
+| `pidfd_open (syscall)` | probed with the raw syscall, not a language binding; absent = no descendant tracking |
+| `descendant tracking` | the configured default, mode and interval, with the guarantee it implies |
+| `yama ptrace_scope` | restricts ptrace *attach* only; `/proc/<pid>/io` reads are unaffected |
+| `observer effective capabilities` | `CAP_DAC_READ_SEARCH` + `CAP_SYS_PTRACE` = other users' `io` readable |
+| `secure-exec (AT_SECURE) of the observer` | setuid or file capabilities make the loader strip `LD_LIBRARY_PATH` — CUDA forward compat included |
+| `CUDA forward-compat on LD_LIBRARY_PATH` | whether a newer CUDA runtime can run on the installed driver |
+| `filesystem of <observer binary>` | `nosuid` mounts ignore file caps and setuid; **network filesystems (NFS, CIFS, Lustre, …) cannot hold file capabilities at all** — install the observer on a local filesystem to grant it any |
+| `child subreaper (this process)` | re-probed on every manifest write, since `adopt_orphans()` may be called after `Configure()` |
+| `taskstats per-PID query` | `EPERM` without `CAP_NET_ADMIN`: `/proc` backend only |
+| `target <pid>` (one per root, added as roots are added) | uid (same / other user), **spawned** by this process vs **attached**, `/proc/<pid>/io` readable |
+
+### Testing hook: `CUPTI_PROFILER_PROC_ROOT`
+
+**Test-only, not a supported setting.** When set, discovery reads
+`children`, `stat` and `comm` under this directory instead of `/proc`,
+so the algorithm can be exercised on a synthetic tree
+(`tests/python/test_discovery.py::test_pid_reuse_guard`). pidfds and the
+probes' own reads still use the real kernel, so every PID in the
+synthetic tree must be a real, live process.
+
 ## Output format
 
 A full-suite run produces five `.pb` files under `output_dir`:
@@ -803,6 +1005,8 @@ message SystemMetricsTrace {
     // One ProcessSample per (tick × tracked PID).
     repeated ProcessSample process_samples       = 5;
     repeated FlushStats    flush_stats           = 6;
+    // Present while descendant tracking runs (cumulative).
+    DiscoveryStats   discovery_stats             = 7;
 }
 ```
 
@@ -818,6 +1022,7 @@ message DiskMetricsTrace {
     repeated DeviceSample  device_samples        = 5;
     repeated ProcessSample process_samples       = 6;
     repeated FlushStats    flush_stats           = 7;
+    DiscoveryStats   discovery_stats             = 8;
 }
 ```
 
@@ -830,7 +1035,11 @@ message ProcessSample    { uint64 timestamp_ns; uint32 pid; repeated double valu
 message DeviceSample     { uint64 timestamp_ns; string device_name; repeated double values; }
 message GPUSample        { uint64 timestamp_ns; uint32 gpu_index;   repeated double values; }
 
-message TrackedProcessV2 { uint32 pid; string alias; bool removed; }
+message TrackedProcessV2 { uint32 pid; string alias; bool removed;
+                           uint32 parent_pid;   // discovered only: parent when found
+                           bool discovered; }   // true = found by descendant tracking
+message DiscoveryStats   { uint64 scan_interval_ns, scans, scan_p50_ns, scan_p99_ns,
+                                  scan_max_ns, discovered, exited, rejected; }
 message GPUDeviceInfo    { uint32 device_index; string device_name; string chip_name;
                            double peak_dram_bw_bytes_per_s, peak_pcie_bw_bytes_per_s,
                                   peak_nvlink_bw_bytes_per_s; }
@@ -875,12 +1084,17 @@ message SessionMetadata {
     // Inlined active catalog (proto/metric_catalog.proto) so the
     // visualizer reads only ONE file to bootstrap.
     MetricCatalog catalog = 5;
+    // Startup situation report (see "Startup situation report").
+    repeated SituationCheck situation = 6;
 }
+
+message SituationCheck { string check; string observed; string consequence; bool degraded; }
 ```
 
 `session_metadata.pb` is written atomically (`.tmp` + `rename(2)`) at
 `ProfilerSuite::Start()` AND `Stop()` — tailers (live visualizer) never
-observe a torn file.
+observe a torn file. The Stop() copy may additionally carry situation
+lines for roots added mid-run, and the current subreaper state.
 
 ### Length-delimited streaming format
 

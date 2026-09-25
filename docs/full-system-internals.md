@@ -91,11 +91,16 @@ across the thread group — so it caps a multi-threaded workload at
 thread's `sum_exec_runtime` and diffing per TID loses every thread
 that exits between ticks — the slice from its last sighting to its
 exit, and *all* of the CPU of a thread that lives less than one
-tick. Measured against a process whose 30 threads burned 6.000 s
-and exited, the CPU clock reported 6.014 s and the live-thread
-walk 0.010 s. The walk also costs one `opendir` plus one file read
-per thread per tick; the CPU clock is one syscall regardless of the
-thread count.
+tick. Measured on a compute node at 100 Hz sampling, against a
+process that ran 300 threads one after another, each burning 2 ms
+and exiting: the walk traced 0.049–0.125 s of a 0.62–0.64 s ground
+truth; the CPU clock traced 0.635–0.642 s (six runs each;
+`tests/python/test_cpu_clock.py`). The walk also costs one `opendir`
+plus one file read per thread per tick — measured in C++ (`-O2`) at
+11.9 / 204 / 780 µs per read for 1 / 31 / 120 threads, against
+0.69 / 0.81 / 1.43 µs for the CPU clock (545× at vLLM's ~120
+threads); the CPU clock is one syscall regardless of the thread
+count.
 
 **Per-process CPU %:**
 
