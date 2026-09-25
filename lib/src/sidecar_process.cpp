@@ -13,7 +13,6 @@
 #include <iostream>
 #include <pthread.h>
 #include <string>
-#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <signal.h>
@@ -220,18 +219,11 @@ ProfilerError SidecarProcess::Spawn() {
         }
     });
 
-    // Grant the sidecar ptrace-mode access to us so it can read
-    // /proc/<workload>/io. Under Yama ptrace_scope >= 1 (Ubuntu's
-    // default), descendants can't trace their ancestors without
-    // this hint — the sidecar's DiskProfiler reads of the workload's
-    // I/O counters would return EPERM and silently zero out.
-    // PR_SET_PTRACER is per-target-PID; failure is not fatal, just
-    // means per-PID I/O for the workload won't appear in disk_metrics.pb.
-    if (::prctl(PR_SET_PTRACER, static_cast<unsigned long>(child), 0, 0, 0) != 0) {
-        std::cerr << "[ProfilerSuite] PR_SET_PTRACER(" << child
-                  << ") failed: " << ::strerror(errno)
-                  << " — per-PID I/O may be zero in the sidecar's trace.\n";
-    }
+    // No PR_SET_PTRACER. Reading /proc/<pid>/io needs the same uid and
+    // a dumpable target (or CAP_SYS_PTRACE + CAP_DAC_READ_SEARCH); Yama's
+    // ptrace_scope restricts ptrace ATTACH only, not these reads. The
+    // hint granted the sidecar attach rights over this process that
+    // nothing uses.
 
     return ProfilerError::Ok;
 }

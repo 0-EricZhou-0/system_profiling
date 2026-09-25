@@ -258,9 +258,11 @@ PYBIND11_MODULE(_native, m) {
                 }
             },
             "Configure all enabled sub-profilers. Must be called after "
-            "load_config*. Raises RuntimeError if the sidecar spawn or "
-            "capability check fails under SIDECAR mode; Legacy mode "
-            "never raises.",
+            "load_config*. Under SIDECAR mode, raises RuntimeError if the "
+            "sidecar cannot be found or spawned (SidecarNotFound, "
+            "SidecarSpawnFailed), dies or rejects its config (SidecarExited, "
+            "SidecarBadHandshake), or cannot apply sidecar_cpus "
+            "(SidecarAffinityFailed). Legacy mode never raises.",
             py::call_guard<py::gil_scoped_release>())
         .def("start",
             [](ProfilerSuite& self) {

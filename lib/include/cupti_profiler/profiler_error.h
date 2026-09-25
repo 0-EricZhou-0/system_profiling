@@ -1,9 +1,9 @@
 // Error codes returned by ProfilerSuite::Configure() / Start().
 //
 // Introduced with the SIDECAR mode series: the sidecar spawn +
-// capability handshake can fail in several distinct ways that
-// callers should be able to distinguish (missing binary vs. missing
-// caps vs. exec failure). The previous void-returning API forced
+// handshake can fail in several distinct ways that callers should be
+// able to distinguish (missing binary vs. exec failure vs. a sidecar
+// that died or rejected its config). The previous void-returning API forced
 // std::cerr + std::exit(1) on any setup failure; this enum lets
 // the workload handle setup errors as data.
 //
@@ -40,7 +40,8 @@ enum class ProfilerError {
     // Sidecar-specific problems (SIDECAR mode only)
     SidecarNotFound      = 200,  // couldn't locate the sidecar binary
     SidecarSpawnFailed   = 201,  // fork() or execve() failed
-    SidecarMissingCaps   = 202,  // sidecar started but lacks CAP_NET_ADMIN
+    // 202 was SidecarMissingCaps: never returned (the /proc backend
+    // needs no capability for same-uid targets). Do not reuse.
     SidecarBadHandshake  = 203,  // sidecar returned an unexpected message
     SidecarExited        = 204,  // sidecar died before completing handshake
     SidecarAffinityFailed = 205, // sidecar_cpus could not be applied

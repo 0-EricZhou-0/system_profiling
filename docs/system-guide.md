@@ -1278,7 +1278,7 @@ Per-process samples:
 
 ### Permissions for per-PID I/O
 
-`/proc/<pid>/io` is the only `/proc` file the profiler reads that requires elevated permissions. On Linux it's mode `0400` (owner-only) and access additionally goes through `PTRACE_MODE_READ_FSCREDS`, which on Ubuntu's default `kernel.yama.ptrace_scope = 1` restricts even same-user reads to direct ancestors of the target process.
+`/proc/<pid>/io` is the only `/proc` file the profiler reads that requires elevated permissions. On Linux it's mode `0400` (owner-only) and access additionally goes through `PTRACE_MODE_READ_FSCREDS`: the reader must have the target's uid **and** the target must be *dumpable*, unless the reader holds `CAP_SYS_PTRACE` (plus `CAP_DAC_READ_SEARCH` for the file mode). Yama's `kernel.yama.ptrace_scope` does **not** apply here — it restricts ptrace *attach* only — so no ancestor relationship and no `PR_SET_PTRACER` hint is needed (verified 2026-09-24 with `ptrace_scope = 1`). A process is not dumpable after it executes a setuid/setgid or file-capability binary, or after `prctl(PR_SET_DUMPABLE, 0)`.
 
 ```text ln:false
 $ ls -la /proc/<pid>/io
@@ -1289,7 +1289,7 @@ Symptom when permissions are missing: `disk_metrics.pb` is produced, per-device 
 
 **Fixes** (any one of):
 
-1. **Run the profiler as the target PID's owner with a parent-ancestor relationship** — e.g. spawn the workload from inside the profiler binary, or set `kernel.yama.ptrace_scope = 0` system-wide. This is the simplest path when you control how the workload is launched.
+1. **Run the profiler as the target PID's owner** — same uid, target dumpable. This covers the usual case: your own workload, launched by you or attached by PID, under LEGACY or SIDECAR alike. Changing `kernel.yama.ptrace_scope` makes no difference.
 
 2. **Grant Linux file capabilities to the binary** — add `CAP_DAC_READ_SEARCH` (bypass file mode `0400`) and `CAP_SYS_PTRACE` (satisfy the `PTRACE_MODE_READ_FSCREDS` check):
 

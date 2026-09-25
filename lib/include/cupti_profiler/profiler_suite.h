@@ -58,10 +58,11 @@ public:
     /// to stderr and written to session_metadata.pb.
     ///
     /// Under SystemProbeMode::Sidecar, this is where the sidecar
-    /// process is spawned and the initial handshake (config +
-    /// sync anchor) runs — capability failures surface here as
-    /// ProfilerError::SidecarMissingCaps rather than as a silent
-    /// no-sample run. Under Legacy, always returns Ok.
+    /// process is spawned and sent its config. Failures surface here
+    /// rather than as a silent no-sample run: SidecarNotFound,
+    /// SidecarSpawnFailed, SidecarExited, SidecarBadHandshake (the
+    /// sidecar rejected the config) or SidecarAffinityFailed
+    /// (sidecar_cpus unusable). Under Legacy, always returns Ok.
     /// Returns ProfilerError::NotConfigured if LoadConfig has not
     /// been called yet.
     ProfilerError Configure();

@@ -9,7 +9,6 @@ const char* ToString(ProfilerError err) {
         case ProfilerError::ProbeStartFailed:     return "ProbeStartFailed";
         case ProfilerError::SidecarNotFound:      return "SidecarNotFound";
         case ProfilerError::SidecarSpawnFailed:   return "SidecarSpawnFailed";
-        case ProfilerError::SidecarMissingCaps:   return "SidecarMissingCaps";
         case ProfilerError::SidecarBadHandshake:  return "SidecarBadHandshake";
         case ProfilerError::SidecarExited:        return "SidecarExited";
         case ProfilerError::SidecarAffinityFailed: return "SidecarAffinityFailed";
