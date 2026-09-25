@@ -194,6 +194,52 @@ For the full Python API (with parameter names + docstrings forwarded to
 `.pyi` stubs) see `python/binding.cpp` or any IDE pointed at the
 installed package.
 
+## Profiling a process tree (sidecar mode, descendant tracking)
+
+Two opt-in features for profiling a workload you launch, such as a
+server that forks workers:
+
+- **Sidecar mode** (`mode: SYSTEM_PROBE_MODE_SIDECAR` on the `system` /
+  `disk` blocks) runs the CPU/memory/disk samplers in a separate
+  `cupti-profiler-sidecar` process, so their CPU is not charged to the
+  process you are measuring.
+- **Descendant tracking** (`process_discovery`) also traces every
+  descendant of a listed PID, each as its own series:
+
+```python
+import subprocess
+import cupti_profiler as cp
+
+SIDECAR = 2   # SYSTEM_PROBE_MODE_SIDECAR
+suite = cp.ProfilerSuite()
+cp.configure_suite(suite, {
+    "output_dir": "server_run/",
+    "system": {"enabled": True, "sampling_frequency_hz": 100, "mode": SIDECAR,
+               "output_file": "system_metrics.pb"},
+    "disk":   {"enabled": True, "sampling_frequency_hz": 100, "mode": SIDECAR,
+               "output_file": "disk_metrics.pb"},
+    "process_discovery": {"enabled": False, "scan_interval_ms": 100},
+})
+suite.start()
+server = subprocess.Popen(["my-server", "--port", "8000"])
+suite.add_tracked_process(server.pid, "server", track_descendants=True)
+# ... drive the server ...
+suite.stop()
+```
+
+Every tracked process is written to the trace's process table (pid,
+parent, `comm` including renames, start and end time) and removed
+automatically when it exits. Per-process I/O is reported as all five
+`/proc/<pid>/io` counters, which see different things (a warm `mmap`
+read shows up in none of them). Where to read more:
+
+- [Configuration reference](docs/system-guide.md#configuration-reference-sidecar-mode-descendant-tracking-process-table)
+  — every knob, where it lives, and its default;
+- [Sidecar mode](docs/system-guide.md#sidecar-mode),
+  [Process table and exit detection](docs/system-guide.md#process-table-and-exit-detection),
+  [Descendant tracking](docs/system-guide.md#descendant-tracking);
+- [Per-PID I/O counters](docs/metric-model.md#per-pid-io-counters-who-records-what).
+
 ## Tools
 
 | Tool | What it does |

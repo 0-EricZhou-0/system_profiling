@@ -46,9 +46,14 @@ system {
     # alias is optional (omit it for plain "PID xxx" labels in the
     # visualizer; otherwise the legend shows "<alias> (PID xxx)").
     # pid: 0 is resolved to the current process at runtime.
+    # A tracked process that exits is removed automatically.
     processes { pid: 0  alias: "self" }
     flush_interval_ms: 5000
     output_file: "system_metrics.pb"
+    # Where the sampler + flush threads run. LEGACY (default) = in this
+    # process; SIDECAR = in a separate cupti-profiler-sidecar process,
+    # so their CPU is not charged to the workload.
+    # mode: SYSTEM_PROBE_MODE_LEGACY
 }
 
 disk {
@@ -59,7 +64,23 @@ disk {
     processes { pid: 0  alias: "self" }   # see `system` block above
     flush_interval_ms: 5000
     output_file: "disk_metrics.pb"
+    # mode: SYSTEM_PROBE_MODE_LEGACY      # see `system` block above
 }
+
+# Descendant tracking for the system + disk probes: also trace every
+# descendant of the listed PIDs. Shown at the defaults (off).
+# process_discovery {
+#     enabled: false                # true = trace descendants too
+#     direct_children_only: false   # false = recursive; true = direct children only
+#     scan_interval_ms: 100         # 0 = 100; children living < 1 interval may be missed
+# }
+
+# SIDECAR mode only: pin the sidecar (and every thread it runs) to these
+# CPUs, e.g. a core the workload does not use. Default: empty = no pinning.
+# sidecar_cpus: 7
+
+# Every knob with its default: docs/system-guide.md, "Configuration
+# reference: sidecar mode, descendant tracking, process table".
 
 events {
     enabled: true

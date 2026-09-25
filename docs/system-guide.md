@@ -362,7 +362,7 @@ public:
 | `Get*Profiler()` | Access individual sub-profilers — needed to grab `EventTracker` references for region annotation. |
 | `Configure()` | Loads `MetricCatalog` (from `metric_catalog_path` in the config, or a default path next to the binary) and then calls `Configure()` on every sub-profiler whose `enabled = true`. With System or Disk enabled, also runs the [startup situation report](#startup-situation-report). |
 | `Start()` / `Stop()` | Lifecycle fan-out. Both write `session_metadata.pb` (atomically — `.tmp` + `rename(2)`); the manifest carries the inlined `MetricCatalog` so visualizers don't need a separate catalog file. `Start()` returns `ProbeStartFailed` if a System/Disk probe did not start (e.g. its output file cannot be opened; under SIDECAR the sidecar reports it) or `SidecarExited` / `SidecarBadHandshake` if the sidecar did not answer; every other probe is running, so call `Stop()` as usual. Python's `start()` raises `RuntimeError`. |
-| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage). Its descendants are tracked if `process_discovery.enabled`. Thread-safe. |
+| `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage); its CPU counts from then on (no head, unlike a discovered process). Its descendants are tracked if `process_discovery.enabled`. When it exits it is removed automatically ([exit detection](#process-table-and-exit-detection)). Thread-safe. |
 | `AddTrackedProcess(pid, alias, trackDescendants)` | Same, overriding `process_discovery.enabled` for this root — see [Descendant tracking](#descendant-tracking). |
 | `RemoveTrackedProcess(pid)` | Stop tracking a PID. The PID appears one more time in the next flush of each affected probe with `TrackedProcessV2.removed=true` (visualizer renders a removal marker), then is dropped. Descendants already discovered under it stay tracked until they exit. Thread-safe. |
 
@@ -688,15 +688,26 @@ disk {
     devices: "nvme0n1"
     processes { pid: 0 alias: "self" }
     output_file: "disk_metrics.pb"
+    # mode: SYSTEM_PROBE_MODE_SIDECAR  # see "Sidecar mode"
 }
 
 events {
     enabled: true
     output_file: "events.pb"
 }
+
+# Descendant tracking for system + disk (default: off).
+process_discovery {
+    enabled: false                 # true = also trace descendants of listed PIDs
+    direct_children_only: false    # false = recursive
+    scan_interval_ms: 100          # 0 = 100
+}
+
+# SIDECAR mode only: CPUs to pin the sidecar to. Empty = no pinning.
+# sidecar_cpus: 7
 ```
 
-Each block can be omitted or set `enabled: false` to skip that profiler. Each `processes { ... }` entry is independent — `pid` only, or `pid` + `alias`. Empty `processes` = system-wide samples only. The PID set may grow or shrink mid-run via `ProfilerSuite::AddTrackedProcess()` / `RemoveTrackedProcess()`.
+Each block can be omitted or set `enabled: false` to skip that profiler. Each `processes { ... }` entry is independent — `pid` only, or `pid` + `alias`. Empty `processes` = system-wide samples only. The PID set may grow or shrink mid-run via `ProfilerSuite::AddTrackedProcess()` / `RemoveTrackedProcess()`, and a tracked process that exits is removed automatically ([exit detection](#process-table-and-exit-detection)). Every knob of sidecar mode, descendant tracking and the process table, with its default, is in the [configuration reference](#configuration-reference-sidecar-mode-descendant-tracking-process-table).
 
 #### Option B — GPU-only with `GpuProfiler`
 
@@ -756,6 +767,32 @@ python tools/visualize_single.py -i my_trace.pb -o my_trace.png
 
 ---
 
+## Configuration reference: sidecar mode, descendant tracking, process table
+
+Every knob these features added, where it lives, and its default. The
+longer-standing fields (sampling rates, flush intervals, output files,
+devices, GPU metrics) are described with their config structs under
+[Public API reference](#public-api-reference).
+
+| Knob | Where | Default | What it does |
+|---|---|---|---|
+| `system.mode`, `disk.mode` | `.pbtxt` / proto `SystemProfilerConfig.mode` (6), `DiskProfilerConfig.mode` (7); C++ `SystemProfilerConfig::mode`, `DiskProfilerConfig::mode` | `SYSTEM_PROBE_MODE_LEGACY` (unset = LEGACY) | `SYSTEM_PROBE_MODE_SIDECAR` runs that probe's sampler and flush threads in the `cupti-profiler-sidecar` process instead of this one, so their CPU is not charged to the workload. One sidecar serves both probes. See [Sidecar mode](#sidecar-mode) |
+| `sidecar_cpus` | `.pbtxt` / proto `ProfilerSuiteConfig.sidecar_cpus` (9, repeated) | empty = no pinning | CPUs the sidecar and all its threads are pinned to. A CPU outside this process's allowed set fails `Configure()` with `SidecarAffinityFailed`. Ignored, with a note, when no probe is in SIDECAR mode |
+| `CUPTI_PROFILER_SIDECAR` | environment variable, read at `Configure()` | unset | Path of the sidecar binary to run instead of the built-in one. Used only if it is an executable regular file; otherwise the built-in path is used silently |
+| `CUPTI_PROFILER_SIDECAR_PATH` | CMake cache variable, build time | `<build dir>/tools/cupti-profiler-sidecar` | The built-in sidecar path. Without it and without `CUPTI_PROFILER_SIDECAR`, SIDECAR mode fails `Configure()` with `SidecarNotFound` |
+| `process_discovery.enabled` | `.pbtxt` / proto `ProfilerSuiteConfig.process_discovery` (8) → `ProcessDiscoveryConfig.enabled` (1) | `false` | Also trace the descendants of listed PIDs, on both System and Disk. See [Descendant tracking](#descendant-tracking) |
+| `process_discovery.direct_children_only` | `ProcessDiscoveryConfig.direct_children_only` (2) | `false` = recursive | `true`: only the listed roots' direct children |
+| `process_discovery.scan_interval_ms` | `ProcessDiscoveryConfig.scan_interval_ms` (3) | `0` = 100 ms | How often every followed process's children are scanned; a child that lives less than one interval may be missed |
+| `track_descendants` (per root) | Python `suite.add_tracked_process(pid, alias, track_descendants=None)`; C++ `ProfilerSuite::AddTrackedProcess(pid, alias, bool trackDescendants)` | `None` / the 2-argument overload = inherit `process_discovery.enabled` | Overrides `enabled` for that root only |
+| `adopt_orphans()` | Python `cupti_profiler.adopt_orphans()`; C++ `EnableChildSubreaper()` (`<cupti_profiler/child_subreaper.h>`) | off; the library never sets it | Makes the calling process (the launcher) a child subreaper, so orphaned descendants are re-parented to it, and reaps those discovery saw adopted. See [what it changes](#what-changes-when-adopt_orphans-is-enabled) |
+| `CUPTI_PROFILER_PROC_ROOT` | environment variable | unset = `/proc` | **Test-only, not supported.** Directory read instead of `/proc` for the process-table reads (`children`, `stat`, `comm`). See [the hook](#testing-hook-cupti_profiler_proc_root) |
+| flush gate | C++ `<cupti_profiler/testing.h>`; Python `_native._testing_arm_flush_gate()`, `_testing_wait_flush_held()`, `_testing_release_flush_gate()` | disarmed | **Test-only, not supported.** Holds an in-process flush between writing and committing removals. See [the hook](#testing-hook-flush-gate) |
+
+Fixed behaviour, not configurable: exit detection (a pidfd per tracked
+process, polled every sample tick) is always on; `comm` is re-read every
+100 ms; `comm_history` keeps at most 16 entries. See
+[Process table and exit detection](#process-table-and-exit-detection).
+
 ## Sidecar mode
 
 `mode: SYSTEM_PROBE_MODE_SIDECAR` on the System and/or Disk config moves
@@ -778,6 +815,16 @@ the same way — probes stopped, final flush written, exit status 0 — when:
   host). The host's later `Stop()` then logs how the sidecar ended and
   returns normally; a C++ host that has not ignored SIGPIPE is not killed
   by writing to it.
+
+**Which binary.** The sidecar is `cupti-profiler-sidecar`, found at the
+path baked in at build time (CMake `CUPTI_PROFILER_SIDECAR_PATH`, default
+`<build dir>/tools/cupti-profiler-sidecar`). The environment variable
+**`CUPTI_PROFILER_SIDECAR`** overrides it at `Configure()` — e.g. for an
+installed copy on a local filesystem, or one with file capabilities. It
+is used only if it names an executable regular file; otherwise the
+built-in path is used without a warning. If neither exists,
+`Configure()` fails with `SidecarNotFound`. The startup situation report
+records which binary ran (`observer`).
 
 **Errors.** `Configure()` fails with `SidecarNotFound`,
 `SidecarSpawnFailed`, `SidecarExited`, `SidecarBadHandshake` or
@@ -807,6 +854,100 @@ SIDECAR and LEGACY.
 
 **Permissions.** None beyond LEGACY's: see
 [Permissions for per-PID I/O](#permissions-for-per-pid-io).
+
+## Process table and exit detection
+
+Always on, for every tracked process — listed roots and discovered
+processes alike, in LEGACY and SIDECAR, **with descendant tracking on or
+off**.
+
+**Exit detection.** Each probe (System, Disk) holds a pidfd on every
+process it tracks, opened when the process is registered, and polls them
+all once per sample tick (one `poll()` over all of them), right after
+reading that tick's values. When a process exits — as soon as it is a
+zombie, reaped or not — the probe:
+
+1. stops sampling it: **no sample of it is later than its end time**;
+2. emits it once more with `removed = true` and `end_time_ns`, in the
+   next flush;
+3. drops it from later flushes.
+
+That entry is never sampled again. A process that later gets the same
+PID number is a **different process**: it is not tracked unless it is
+added again (`AddTrackedProcess`; a re-add made while the old entry's
+removal is still pending is registered right after that flush) or
+discovered as a child of a tracked process. Explicit
+`RemoveTrackedProcess()` still works as before; such an entry has
+`end_time_ns = 0`. A PID that does not exist when it is added is
+recorded as exited straight away (logged, `removed = true` in the next
+flush).
+
+**The table.** Every flush of `system_metrics.pb` and `disk_metrics.pb`
+carries one `TrackedProcessV2` per tracked process
+(`proto/metric_sample.proto`):
+
+| Field | Meaning |
+|---|---|
+| `pid` | the process ID |
+| `parent_pid` | the parent when it was registered: for a discovered process, the tracked parent it was found under; for a root, its parent when it was listed. Not updated on reparenting |
+| `discovered` | kind: `true` = found by descendant tracking, `false` = listed root |
+| `label` | roots: the alias they were listed with; discovered: their root's alias |
+| `alias` | display name: roots keep their listed alias; discovered processes are `<label>/<comm>`, following `comm` |
+| `comm` | current `/proc/<pid>/comm` (≤ 15 characters), re-read every 100 ms |
+| `comm_history` | every `comm` it has had, oldest first, each with the trace time it was first seen (the first at registration, later ones within 100 ms of the rename); at most 16 — the first and the 15 most recent |
+| `start_time_ns` | when the process started: the kernel's `/proc/<pid>/stat` field 22 converted to the trace clock. **10 ms resolution** (`USER_HZ` ticks). 0 = unknown |
+| `end_time_ns` | with `removed = true` after an exit: the first instant the probe saw it gone, on the trace clock. The exit happened **within one sampling tick** before it. 0 while alive and for a removal by request |
+| `removed` | this is the entry's last flush |
+| `cpu_before_discovery_ns` | System trace, discovered processes only: see [Head and tail CPU](#head-and-tail-cpu) |
+
+The trace clock is the samples' `timestamp_ns` clock (`steady_clock` =
+`CLOCK_MONOTONIC`, system-wide, so identical under SIDECAR). Field 22
+counts on `CLOCK_BOOTTIME`, which also runs during suspend; the
+conversion subtracts the current offset between the two.
+
+Rebuilding the tree from a trace — keep each PID's latest row:
+
+```python
+table = {}
+for frame in frames:                       # SystemMetricsTrace messages, in order
+    for tp in frame.tracked_processes:
+        table[tp.pid] = tp                 # latest alias, comm, end time
+roots = [tp for tp in table.values() if not tp.discovered]
+children = {}
+for tp in table.values():
+    if tp.discovered:
+        children.setdefault(tp.parent_pid, []).append(tp)
+```
+
+Take the **latest** row, not the first: a discovered process's alias
+changes when it renames itself (vLLM's `EngineCore` is found as
+`vllm/python3.12` and becomes `vllm/VLLM::EngineCor` seconds later).
+
+**On stderr**, discovery logs the tree as it grows and shrinks:
+
+```text ln:false
+[discovery] + 3858012 python3.12 (parent 3857844 vllm)
+[discovery] - 3858336 ninja exited
+```
+
+### PID reuse
+
+A PID names a process only while that process lives; once it has exited
+and been reaped, the kernel may hand the number to a new process. Where
+that could bite, and what guards it:
+
+| Where | Guard |
+|---|---|
+| A listed PID, between the call and registration | the probe opens the pidfd first, reads `/proc/<pid>/stat`, then checks the pidfd is still alive: the recorded start time and parent belong to the process the pidfd pins |
+| Samples: values are read from `/proc` **by number** every tick | **read-then-verify**: each tick reads every process's values first and polls the pidfds after; a reading of a process found gone is dropped. A kept reading was taken while the pinned process still existed (a zombie's number cannot be reused), so it is that process's |
+| After a tracked process exits | its entry is removed and never sampled again. Per-PID baselines are keyed by the entry, not the number, so a new process never inherits an old one's |
+| Registering a number whose old entry is still awaiting its removal flush | the new process gets its own entry once the old one is flushed and dropped, so a flush never carries one number twice |
+| Discovery: a PID in a `children` file exits and is reused before `pidfd_open` | the parent check (the new owner's parent must be tracked), done after `pidfd_open` and checked against it; the probes duplicate that very pidfd |
+| **Gap A: a discovered process exits and its number is reused before the next scan** (≤ one interval) | documented, not specifically guarded (user decision, 2026-09-25). Before the probes held their own pidfds, this could attribute up to one scan interval of the new process's samples to the old entry. **The probe-level pidfds remove that**: the probe marks the old entry exited at its next tick and never samples it again, whatever discovery does. What remains keyed by number is the **CPU tail** bookkeeping (`CpuTail`): it notices that an exited child has been reaped by its `/proc/<pid>` entry disappearing, and reads a reparented child's new parent by number. If the number is reused within one sampling tick of the reap, that child's tail can be missing or attributed to the wrong parent. `pid_max` is 4,194,304 on the compute nodes and allocation is sequential, so reuse needs the whole PID space to wrap within that window; never observed |
+
+**Cost.** Per probe and sample tick: one `poll()` over all pidfds. Every
+100 ms: one `/proc/<pid>/comm` read per tracked process. One pidfd per
+tracked process per probe (plus discovery's own, with discovery on).
 
 ## Descendant tracking
 
@@ -870,14 +1011,18 @@ Every `scan_interval_ms`:
    the PID-reuse guard (a PID listed in a `children` file can exit and be
    recycled by an unrelated process before `pidfd_open`). The pidfd is
    checked still-alive after the read, so the data describes the process
-   the pidfd pins. The process is registered on both probes as
-   `<root alias>/<comm>` (the root's PID if it has no alias) with
-   `TrackedProcessV2.parent_pid` and `discovered = true`. The alias
-   follows later `comm` changes (a forked child carries its parent's
-   `comm` until it execs or renames itself, as vLLM's `EngineCore` does).
-3. Poll the held pidfds: a discovered process that exited gets
-   `RemoveTrackedProcess`, so it appears once more in the next flush with
-   `removed = true` and is then dropped.
+   the pidfd pins. The process is registered on both probes (which
+   duplicate that pidfd) with `label` = the root's alias (its PID if it
+   has none), `parent_pid` and `discovered = true`; its alias is
+   `<label>/<comm>` and follows later `comm` changes (a forked child
+   carries its parent's `comm` until it execs or renames itself, as
+   vLLM's `EngineCore` does). It is logged:
+   `[discovery] + <pid> <comm> (parent <ppid> <parent comm>)`.
+3. Poll the held pidfds, to stop following processes that exited (and
+   reap adopted ones, see below). Removing them from the trace is the
+   probes' job: every tracked process — discovered or listed — is watched
+   by the probes' own pidfds, see
+   [Process table and exit detection](#process-table-and-exit-detection).
 4. Record the scan's own wall time; every system/disk flush carries the
    cumulative `DiscoveryStats` (`scans`, `scan_p50_ns` / `p99` / `max`,
    `discovered`, `exited`, `rejected`).
@@ -910,9 +1055,17 @@ sidecar's; under LEGACY it is charged to the host process.
 - **`CLONE_PARENT` from a root, and work delegated over IPC to processes
   outside the tree**, are the user's responsibility: track the process
   that actually spawns them.
-- **Listed roots are the caller's.** An exited root is not removed by
-  discovery (only discovered processes are), and removing a root leaves
-  its already-discovered descendants tracked until they exit.
+- **Removing a root** (`RemoveTrackedProcess`) leaves its
+  already-discovered descendants tracked until they exit. A root that
+  exits is removed like any tracked process (see
+  [exit detection](#process-table-and-exit-detection)); its descendants
+  stay tracked.
+- **PID reuse within one scan interval** ("gap A"): no longer able to
+  misattribute samples; what remains is described under
+  [PID reuse](#pid-reuse).
+- **Aliases name the process as it is now**: a discovered process's alias
+  follows its `comm`, so a reader should take the alias of the latest
+  flush (or `comm_history`), not the first one seen.
 - **The observer never tracks itself** (the sidecar is a child of the
   host, but is never discovered).
 - With System and Disk in **different** modes (one LEGACY, one SIDECAR),
@@ -929,7 +1082,19 @@ sample:
 
 - **Head** — `TrackedProcessV2.cpu_before_discovery_ns`: its CPU clock at
   its first sample, i.e. what it used from fork until discovery found it.
-  Recorded once. Listed roots get 0: their earlier CPU predates tracking.
+  Recorded once.
+
+> [!NOTE]
+> **Roots and discovered processes are counted differently at the
+> start (user decision, 2026-09-25).** A listed root gets **no head**:
+> its CPU counts from when it was added (listed in the config: from
+> `Start()`; `AddTrackedProcess` mid-run: from that call), and what it
+> used before is not in the trace — `cpu_before_discovery_ns` is 0. A
+> discovered process gets its CPU from fork to discovery as its head.
+> So for a server attached some time after launch, the root's traced
+> CPU is "since attach", while each child's `head + samples + tail` is
+> its whole life. To get a root's whole life, add it right after
+> spawning it, before it has done any work.
 - **Tail** — a `CpuTail` in `SystemMetricsTrace.cpu_tails`, emitted once:
   CPU used after its last sample, up to its exit. Measured on its tracked
   parent: when the parent reaps it, the parent's `cutime + cstime` grow
@@ -1039,10 +1204,11 @@ to stderr, and writes it to `session_metadata.pb` as
 
 **Test-only, not a supported setting.** When set, discovery reads
 `children`, `stat` and `comm` under this directory instead of `/proc`,
-so the algorithm can be exercised on a synthetic tree
-(`tests/python/test_discovery.py::test_pid_reuse_guard`). pidfds and the
-probes' own reads still use the real kernel, so every PID in the
-synthetic tree must be a real, live process.
+and so do the probes' process-table reads (`stat` and `comm` at
+registration, the `comm` refresh), so the algorithm can be exercised on
+a synthetic tree (`tests/python/test_discovery.py::test_pid_reuse_guard`).
+pidfds and the probes' samples still use the real kernel, so every PID
+in the synthetic tree must be a real, live process.
 
 ### Testing hook: flush gate
 
@@ -1095,9 +1261,10 @@ message SystemMetricsTrace {
     // Two entries: SCOPE_SYSTEM (CPU + memory FQNs combined) and
     // SCOPE_PROCESS (per-PID CPU + memory FQNs combined).
     repeated ScopeMetricNames scope_metric_names = 2;
-    // Grows mid-run via ProfilerSuite::AddTrackedProcess(). Entries
-    // with removed=true appear in exactly one flush as a removal
-    // marker before being dropped.
+    // The process table. Grows mid-run via AddTrackedProcess() and
+    // discovery. Entries with removed=true (removed by request, or
+    // exited: then with end_time_ns) appear in exactly one flush as a
+    // removal marker before being dropped.
     repeated TrackedProcessV2 tracked_processes  = 3;
     // One Sample per tick — values[] combines CPU% + mem bytes.
     repeated Sample        system_samples        = 4;
@@ -1140,9 +1307,15 @@ message DeviceSample     { uint64 timestamp_ns; string device_name; repeated dou
 message GPUSample        { uint64 timestamp_ns; uint32 gpu_index;   repeated double values; }
 
 message TrackedProcessV2 { uint32 pid; string alias; bool removed;
-                           uint32 parent_pid;   // discovered only: parent when found
-                           bool discovered;     // true = found by descendant tracking
-                           uint64 cpu_before_discovery_ns; }  // system trace, discovered only
+                           uint32 parent_pid;   // parent when registered (roots too)
+                           bool discovered;     // kind: true = found by descendant tracking
+                           uint64 cpu_before_discovery_ns;  // system trace, discovered only
+                           string label;        // root alias (discovered: alias = label/comm)
+                           string comm;         // current comm, re-read every 100 ms
+                           uint64 start_time_ns;   // kernel start time, trace clock, 10 ms res.
+                           uint64 end_time_ns;     // exit seen (<= 1 tick late); 0 = alive/removed
+                           repeated CommChange comm_history; }  // <= 16, oldest first
+message CommChange       { uint64 timestamp_ns; string comm; }
 message DiscoveryStats   { uint64 scan_interval_ns, scans, scan_p50_ns, scan_p99_ns,
                                   scan_max_ns, discovered, exited, rejected; }
 message GPUDeviceInfo    { uint32 device_index; string device_name; string chip_name;
