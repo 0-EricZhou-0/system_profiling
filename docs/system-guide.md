@@ -342,9 +342,9 @@ public:
     DiskProfiler&   GetDiskProfiler();
     EventProfiler&  GetEventProfiler();
 
-    void Configure();    // load catalog + configure all enabled probes
-    void Start();        // start all enabled probes + emit session_metadata.pb
-    void Stop();         // stop, flush, re-emit session_metadata.pb
+    ProfilerError Configure();  // load catalog + configure all enabled probes
+    ProfilerError Start();      // start all enabled probes + emit session_metadata.pb
+    void Stop();                // stop, flush, re-emit session_metadata.pb
 
     // Mid-run PID tracking. Fans out to every probe that supports
     // per-PID sampling (currently System + Disk).
@@ -361,7 +361,7 @@ public:
 | `LoadConfigFromBytes(buf)` | Same as above but takes a serialized binary `ProfilerSuiteConfig`. Used by language bindings. |
 | `Get*Profiler()` | Access individual sub-profilers — needed to grab `EventTracker` references for region annotation. |
 | `Configure()` | Loads `MetricCatalog` (from `metric_catalog_path` in the config, or a default path next to the binary) and then calls `Configure()` on every sub-profiler whose `enabled = true`. With System or Disk enabled, also runs the [startup situation report](#startup-situation-report). |
-| `Start()` / `Stop()` | Lifecycle fan-out. Both write `session_metadata.pb` (atomically — `.tmp` + `rename(2)`); the manifest carries the inlined `MetricCatalog` so visualizers don't need a separate catalog file. |
+| `Start()` / `Stop()` | Lifecycle fan-out. Both write `session_metadata.pb` (atomically — `.tmp` + `rename(2)`); the manifest carries the inlined `MetricCatalog` so visualizers don't need a separate catalog file. `Start()` returns `ProbeStartFailed` if a System/Disk probe did not start (e.g. its output file cannot be opened; under SIDECAR the sidecar reports it) or `SidecarExited` / `SidecarBadHandshake` if the sidecar did not answer; every other probe is running, so call `Stop()` as usual. Python's `start()` raises `RuntimeError`. |
 | `AddTrackedProcess(pid, alias)` | Begin tracking a PID mid-run. First sample for the PID lands one sample-tick after `Add` returns (the first tick seeds the `/proc` baseline so the first delta isn't garbage). Its descendants are tracked if `process_discovery.enabled`. Thread-safe. |
 | `AddTrackedProcess(pid, alias, trackDescendants)` | Same, overriding `process_discovery.enabled` for this root — see [Descendant tracking](#descendant-tracking). |
 | `RemoveTrackedProcess(pid)` | Stop tracking a PID. The PID appears one more time in the next flush of each affected probe with `TrackedProcessV2.removed=true` (visualizer renders a removal marker), then is dropped. Descendants already discovered under it stay tracked until they exit. Thread-safe. |
@@ -756,6 +756,58 @@ python tools/visualize_single.py -i my_trace.pb -o my_trace.png
 
 ---
 
+## Sidecar mode
+
+`mode: SYSTEM_PROBE_MODE_SIDECAR` on the System and/or Disk config moves
+those probes' sampler and flush threads into a separate process,
+`cupti-profiler-sidecar`, forked by `Configure()`, so their CPU is not
+charged to the workload's PID. One sidecar serves both probes. GPU and
+Events probes always stay in-process.
+
+**Lifecycle.** `Configure()` spawns the sidecar and sends it the config;
+`Start()` tells it to start its probes; `Stop()` sends `MSG_STOP` and
+waits for its final flush. Without `MSG_STOP`, the sidecar still stops
+the same way — probes stopped, final flush written, exit status 0 — when:
+
+- **the host process exits**, however it dies (`kill -9` included). The
+  sidecar holds a pidfd on the host *process*, so the thread that called
+  `Configure()` may exit freely; and it works even when a process the
+  host forked still holds the control pipe open;
+- its **control pipe closes**;
+- it receives **SIGTERM or SIGINT** (a terminal Ctrl-C reaches it with the
+  host). The host's later `Stop()` then logs how the sidecar ended and
+  returns normally; a C++ host that has not ignored SIGPIPE is not killed
+  by writing to it.
+
+**Errors.** `Configure()` fails with `SidecarNotFound`,
+`SidecarSpawnFailed`, `SidecarExited`, `SidecarBadHandshake` or
+`SidecarAffinityFailed`; `Start()` with `ProbeStartFailed` when a probe
+inside the sidecar could not start. Python raises `RuntimeError` naming
+the code.
+
+**CPU affinity (`sidecar_cpus`).** Empty by default: no pinning. List CPUs
+to pin the sidecar and every thread it starts to them — e.g. a core the
+workload does not use — so it interferes less with the workload, not
+just shows up under a different PID:
+
+```python
+cp.configure_suite(suite, {..., "sidecar_cpus": [7]})
+```
+
+A CPU outside this process's allowed set fails `Configure()` with
+`SidecarAffinityFailed`. The host's own affinity is never changed; with
+no probe in SIDECAR mode the field is ignored with a note.
+
+**Clocks.** Sidecar samples are stamped with `steady_clock`
+(`CLOCK_MONOTONIC`), which is system-wide, so they line up with the
+host's GPU and Events traces with no clock handshake. Measured: a marker
+made at the same instant in the GPU trace (spin kernel) and the system
+trace (RSS jump) lines up within one system tick, identically under
+SIDECAR and LEGACY.
+
+**Permissions.** None beyond LEGACY's: see
+[Permissions for per-PID I/O](#permissions-for-per-pid-io).
+
 ## Descendant tracking
 
 Off by default: the System and Disk probes trace exactly the PIDs they
@@ -865,9 +917,47 @@ sidecar's; under LEGACY it is charged to the host process.
   host, but is never discovered).
 - With System and Disk in **different** modes (one LEGACY, one SIDECAR),
   each observer runs its own scan.
-- CPU a discovered process used between its fork and its discovery is
-  not in its samples (its first sample is a baseline), and neither is
-  the slice between its last sample and its exit.
+- CPU before a discovered process's first sample and after its last one
+  is not in its samples; it is reported separately — see below.
+
+### Head and tail CPU
+
+A process's CPU clock counts from its fork, but a discovered process is
+sampled only from its first sample (a baseline) to its last. The two
+missing pieces are reported on the System trace, never folded into a
+sample:
+
+- **Head** — `TrackedProcessV2.cpu_before_discovery_ns`: its CPU clock at
+  its first sample, i.e. what it used from fork until discovery found it.
+  Recorded once. Listed roots get 0: their earlier CPU predates tracking.
+- **Tail** — a `CpuTail` in `SystemMetricsTrace.cpu_tails`, emitted once:
+  CPU used after its last sample, up to its exit. Measured on its tracked
+  parent: when the parent reaps it, the parent's `cutime + cstime` grow
+  by the child's whole CPU (plus what the child itself reaped); the tail
+  is that growth minus the child's clock at its last sample and minus
+  its own reaped children's CPU.
+
+For a discovered process tracked until it exits,
+`head + Σ samples + tail` equals its total CPU (tests: within 10 ms of the
+process's own clock at 2 Hz sampling, where tails were 0.27–0.42 s).
+
+Limits of the tail:
+
+- `cutime`/`cstime` are in `USER_HZ` ticks (10 ms), truncated per field:
+  about ±20 ms, clamped at 0;
+- it exists only once the parent **reaps** the child — a parent that never
+  waits, or exits first, yields none, as does a child reparented to an
+  untracked process;
+- it also includes any short-lived child the same parent reaped in that
+  interval that discovery never saw;
+- when several tracked children of one parent are reaped within one
+  sample interval, their shares cannot be told apart: **one `CpuTail`
+  lists all of them in `pids`** with their combined tail, rather than a
+  guessed split.
+
+Cost: nothing with discovery off; otherwise one `/proc/<pid>/stat` read
+per sample tick for each tracked process that has discovered children,
+plus one per exited child until it is reaped.
 
 ### Subreaper helper: `adopt_orphans()`
 
@@ -954,6 +1044,15 @@ so the algorithm can be exercised on a synthetic tree
 probes' own reads still use the real kernel, so every PID in the
 synthetic tree must be a real, live process.
 
+### Testing hook: flush gate
+
+**Test-only, not a supported API** (`<cupti_profiler/testing.h>`,
+Python `_native._testing_*`). Holds an in-process System/Disk flush
+thread after it has written a flush and before it commits that flush's
+removals, so a test can make a `RemoveTrackedProcess()` land exactly in
+that window (`tests/python/test_removal_race.py`). Disarmed, it is one
+atomic load per flush.
+
 ## Output format
 
 A full-suite run produces five `.pb` files under `output_dir`:
@@ -1007,7 +1106,12 @@ message SystemMetricsTrace {
     repeated FlushStats    flush_stats           = 6;
     // Present while descendant tracking runs (cumulative).
     DiscoveryStats   discovery_stats             = 7;
+    // Exit tails of discovered processes, each emitted once.
+    repeated CpuTail cpu_tails                   = 8;
 }
+message CpuTail { uint64 timestamp_ns; uint32 parent_pid;
+                  repeated uint32 pids;               // several = not apportionable
+                  uint64 cpu_after_last_sample_ns; }
 ```
 
 ### Disk schema
@@ -1037,7 +1141,8 @@ message GPUSample        { uint64 timestamp_ns; uint32 gpu_index;   repeated dou
 
 message TrackedProcessV2 { uint32 pid; string alias; bool removed;
                            uint32 parent_pid;   // discovered only: parent when found
-                           bool discovered; }   // true = found by descendant tracking
+                           bool discovered;     // true = found by descendant tracking
+                           uint64 cpu_before_discovery_ns; }  // system trace, discovered only
 message DiscoveryStats   { uint64 scan_interval_ns, scans, scan_p50_ns, scan_p99_ns,
                                   scan_max_ns, discovered, exited, rejected; }
 message GPUDeviceInfo    { uint32 device_index; string device_name; string chip_name;
