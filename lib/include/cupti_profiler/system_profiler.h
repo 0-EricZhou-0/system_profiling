@@ -59,6 +59,11 @@ public:
     void Configure(const SystemProfilerConfig& config);
     void Start();
 
+    /// True between a Start() that succeeded and Stop(). Start() fails
+    /// (logged, returns with nothing running) when called before
+    /// Configure() or when the output file cannot be opened.
+    bool IsRunning() const;
+
     /// Signal sampling to stop (non-blocking). Call Stop() after to join and flush.
     void SignalStop();
 

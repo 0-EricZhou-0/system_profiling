@@ -341,6 +341,17 @@ int main(int argc, char** argv) {
                   << dc.Processes.size() << " PID(s)\n";
     }
 
+    // A probe that did not start (output file cannot be opened, ...) is
+    // reported to the host as an error rather than a silent run with
+    // no data. Nothing else is left running: stop the other one, exit.
+    if ((sys && !sys->IsRunning()) || (dsk && !dsk->IsRunning())) {
+        std::cerr << "[sidecar] a probe failed to start — reporting ProbeStartFailed, exit\n";
+        if (sys) sys->Stop();
+        if (dsk) dsk->Stop();
+        SendStatus(ProfilerError::ProbeStartFailed);
+        return 1;
+    }
+
     // Descendant tracking for both probes, fed the listed PIDs of each.
     // Adopted orphans that exit are reported to the parent (the
     // launcher, which may be a subreaper) over kSidecarNoticeFd; it

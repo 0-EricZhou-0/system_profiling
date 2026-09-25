@@ -262,8 +262,20 @@ PYBIND11_MODULE(_native, m) {
             "capability check fails under SIDECAR mode; Legacy mode "
             "never raises.",
             py::call_guard<py::gil_scoped_release>())
-        .def("start",     &ProfilerSuite::Start,
-            "Start all enabled sub-profilers.",
+        .def("start",
+            [](ProfilerSuite& self) {
+                auto err = self.Start();
+                if (err != ProfilerError::Ok) {
+                    throw std::runtime_error(
+                        std::string("ProfilerSuite::Start failed: ") + ToString(err));
+                }
+            },
+            "Start all enabled sub-profilers. Raises RuntimeError if a "
+            "System/Disk probe did not start (ProbeStartFailed, e.g. its "
+            "output file cannot be opened; under SIDECAR reported by the "
+            "sidecar) or the sidecar did not answer (SidecarExited, "
+            "SidecarBadHandshake). The other probes are running; call "
+            "stop() as usual.",
             py::call_guard<py::gil_scoped_release>())
         .def("stop",      &ProfilerSuite::Stop,
             "Stop all sub-profilers and write session_metadata.pb.",

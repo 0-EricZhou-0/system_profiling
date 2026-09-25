@@ -226,6 +226,8 @@ void DiskProfiler::Start() {
     std::cout << "[Disk] Profiler started\n";
 }
 
+bool DiskProfiler::IsRunning() const { return m_impl->running; }
+
 void DiskProfiler::SignalStop() {
     if (!m_impl->running) return;
     m_impl->stopSample = true;

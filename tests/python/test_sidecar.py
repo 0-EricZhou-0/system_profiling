@@ -272,3 +272,17 @@ def test_sidecar_timestamps_share_host_clock(tmp_path):
         edge = next(ts for ts, v in rss if ts >= t0 - 100_000_000 and v > base + (32 << 20))
         assert t0 <= edge <= t1 + 2 * tick, \
             f"RSS marker seen at {(edge - t0) / 1e6:+.1f} ms (fill took {(t1 - t0) / 1e6:.1f} ms)"
+
+
+@pytest.mark.parametrize("mode", ["legacy", "sidecar"])
+def test_start_failure_raises(tmp_path, mode):
+    # A system probe whose output file cannot be opened used to run with
+    # no data and one stderr line (in the sidecar's stderr, under SIDECAR).
+    cfg = suite_config(tmp_path, mode, processes=[(0, "self")])
+    cfg["system"]["output_file"] = "no_such_dir/system_metrics.pb"
+    suite = cp.ProfilerSuite()
+    cp.configure_suite(suite, cfg)
+    with pytest.raises(RuntimeError, match="ProbeStartFailed"):
+        suite.start()
+    suite.stop()   # still fine after a failed start
+    assert sidecar_pids() == [], "the failed sidecar must have been reaped"

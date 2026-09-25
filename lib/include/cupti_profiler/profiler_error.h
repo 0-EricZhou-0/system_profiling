@@ -33,6 +33,9 @@ enum class ProfilerError {
 
     // Generic setup problems
     NotConfigured        = 100,  // Configure() called before LoadConfig()
+    ProbeStartFailed     = 101,  // a System/Disk probe did not start (e.g. its
+                                 // output file cannot be opened); in SIDECAR
+                                 // mode, reported by the sidecar
 
     // Sidecar-specific problems (SIDECAR mode only)
     SidecarNotFound      = 200,  // couldn't locate the sidecar binary

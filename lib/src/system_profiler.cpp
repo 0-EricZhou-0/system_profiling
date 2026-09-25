@@ -256,6 +256,8 @@ void SystemProfiler::Start() {
     std::cout << "[System] Profiler started\n";
 }
 
+bool SystemProfiler::IsRunning() const { return m_impl->running; }
+
 void SystemProfiler::SignalStop() {
     if (!m_impl->running) return;
     m_impl->stopSample = true;

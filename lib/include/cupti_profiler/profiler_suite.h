@@ -67,7 +67,14 @@ public:
     ProfilerError Configure();
 
     /// Start all enabled profilers.
-    void Start();
+    ///
+    /// Returns ProfilerError::ProbeStartFailed if a System or Disk probe
+    /// did not start (typically: its output file cannot be opened) —
+    /// under SIDECAR the sidecar reports this and exits — or
+    /// SidecarExited / SidecarBadHandshake if the sidecar did not answer.
+    /// Every other enabled probe has still been started, so call Stop()
+    /// as usual; the failed probe simply writes nothing.
+    ProfilerError Start();
 
     /// Stop all enabled profilers.
     void Stop();

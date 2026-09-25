@@ -487,27 +487,35 @@ void ProfilerSuite::Impl::WriteSessionManifest() {
     internal::WriteSessionMetadata(sessionMetadataPath, meta);
 }
 
-void ProfilerSuite::Start() {
+ProfilerError ProfilerSuite::Start() {
+    ProfilerError result = ProfilerError::Ok;
     m_impl->startWallClockEpochNs =
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
     if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Start();
     // Legacy sys/disk start in-process; Sidecar sys/disk are started
     // by the sidecar on receipt of MSG_START.
-    if (m_impl->sysEnabled  && m_impl->sysConfig.mode  == SystemProbeMode::Legacy)
+    if (m_impl->SysLegacy()) {
         m_impl->systemProfiler.Start();
-    if (m_impl->diskEnabled && m_impl->diskConfig.mode == SystemProbeMode::Legacy)
+        if (!m_impl->systemProfiler.IsRunning()) result = ProfilerError::ProbeStartFailed;
+    }
+    if (m_impl->DiskLegacy()) {
         m_impl->diskProfiler.Start();
+        if (!m_impl->diskProfiler.IsRunning()) result = ProfilerError::ProbeStartFailed;
+    }
     if (m_impl->eventEnabled) m_impl->eventProfiler.Start();
     if (m_impl->discovery) m_impl->discovery->Start();
 
-    // Nudge the sidecar to begin sampling (if one is running). Errors
-    // from this handshake are logged; we don't fail Start() over them
-    // because the in-process probes may still be usefully sampling.
+    // Tell the sidecar to begin sampling. On failure it has exited (or
+    // is exiting) without sampling anything: reap it and report the
+    // error, after the in-process probes above have started, so the
+    // caller can still decide to run without system/disk data.
     if (m_impl->sidecar) {
         if (auto e = m_impl->sidecar->SendStart(); e != ProfilerError::Ok) {
-            std::cerr << "[ProfilerSuite] sidecar SendStart: "
-                      << ToString(e) << "\n";
+            std::cerr << "[ProfilerSuite] sidecar failed to start its probes ("
+                      << ToString(e) << "); no system/disk data will be recorded\n";
+            m_impl->sidecar.reset();
+            if (result == ProfilerError::Ok) result = e;
         }
     }
 
@@ -515,6 +523,7 @@ void ProfilerSuite::Start() {
     // --live) have a starting point. Stop() re-emits the identical content
     // atomically.
     m_impl->WriteSessionManifest();
+    return result;
 }
 
 void ProfilerSuite::Stop() {
