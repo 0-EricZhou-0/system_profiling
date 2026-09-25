@@ -73,7 +73,9 @@ public:
     //     their own reaped children's CPU as last read.
     //   childrenCpuNs: last cutime+cstime (ns) of every tracked process
     //     that currently has discovered children — the baseline the
-    //     reaping parent's growth is measured against.
+    //     reaping parent's growth is measured against — and of every
+    //     discovered process, whose own tail must subtract the CPU of the
+    //     children it reaped (its cutime), even once they are all gone.
     struct ExitedChild {
         uint32_t parent            = 0;
         uint64_t lastCpuNs         = 0;
@@ -126,11 +128,18 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
     const uint64_t nsPerTick = 1000000000ull / static_cast<uint64_t>(internal::GetCLKTCK());
     std::unordered_map<uint32_t, std::vector<uint32_t>> kids;   // parent -> awaiting children
     std::unordered_set<uint32_t> parents;
-    for (const auto& [pid, parent] : discoveredParent) parents.insert(parent);
+    // A discovered process's own cutime is read too: when its parent
+    // reaps it, the parent's growth includes the CPU of every child it
+    // reaped, which that process's cutime holds.
+    for (const auto& [pid, parent] : discoveredParent) {
+        parents.insert(parent);
+        parents.insert(pid);
+    }
     for (auto it = awaitingTail.begin(); it != awaitingTail.end(); ) {
         if (!trackedPids.count(it->second.parent)) { it = awaitingTail.erase(it); continue; }
         kids[it->second.parent].push_back(it->first);
         parents.insert(it->second.parent);
+        parents.insert(it->first);
         ++it;
     }
     // An exited child that was itself a parent: its own reaped children's

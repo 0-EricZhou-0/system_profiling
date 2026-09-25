@@ -158,3 +158,54 @@ def test_cpu_tail_siblings_reported_per_parent(tmp_path, mode):
     truth = sum(truths.values())
     print(f"accounted {accounted:.3f} s vs truth {truth:.3f} s")
     assert abs(accounted - truth) <= 0.06 + 0.02 * truth
+
+
+# Root -> middle -> spinner. On each stdin line "<seconds> <linger>", the
+# root starts a middle process that runs one spinner, reaps it, then lives
+# on for <linger> s before reporting its own CPU clock and exiting.
+MIDDLE = """
+import json, os, subprocess, sys, time
+SPIN = %r
+s = subprocess.Popen([sys.executable, "-c", SPIN, sys.argv[1]])
+s.wait()
+time.sleep(float(sys.argv[2]))
+print(json.dumps({"middle": os.getpid(), "cpu_ns": time.process_time_ns()}), flush=True)
+os._exit(0)
+""" % SPINNER
+
+NESTED = """
+MID = %r
+for line in sys.stdin:
+    secs, linger = line.split()
+    m = subprocess.Popen([PY, "-c", MID, secs, linger])
+    m.wait()
+    emit(reaped=[m.pid])
+""" % MIDDLE
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_cpu_tail_excludes_reaped_grandchildren(tmp_path, mode):
+    # The middle process reaps the spinner long before it exits itself, so
+    # when the root reaps the middle, the root's cutime grows by the
+    # middle's CPU AND the spinner's (a reaped child's CPU folds into its
+    # parent's cutime). The middle's tail must subtract the spinner's CPU,
+    # which its own samples and tail already account for.
+    with tree(NESTED) as t:
+        with running_suite(tmp_path, mode, hz=20, processes=[(t.pid, "root")],
+                           discovery={"enabled": True, "scan_interval_ms": 50}):
+            time.sleep(0.2)
+            t.proc.stdin.write(b"0.8 0.6\n")
+            t.proc.stdin.flush()
+            spinner = t.read("spinner", 30)
+            middle = t.read("middle", 30)
+            t.read("reaped", 30)
+            time.sleep(0.6)
+    frames = system_frames(tmp_path)
+    for pid, truth in ((spinner["spinner"], spinner["cpu_ns"] / 1e9),
+                       (middle["middle"], middle["cpu_ns"] / 1e9)):
+        head, samples, tails, _ = cpu_accounting(frames, pid)
+        tail = sum(c.cpu_after_last_sample_ns for c in tails) / 1e9
+        print(f"{pid}: head {head:.3f} + samples {samples:.3f} + tail {tail:.3f} = "
+              f"{head + samples + tail:.3f} s vs truth {truth:.3f} s")
+        assert abs(head + samples + tail - truth) <= 0.04 + 0.02 * truth
+
