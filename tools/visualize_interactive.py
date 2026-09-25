@@ -1645,7 +1645,7 @@ def _live_series_factory(entry, fqn, scope_key, color, ts_s, vals,
     cds = ColumnDataSource(data=dict(x=list(ts_s), y=list(vals)))
     # Short legend label — just the pretty counter name (the panel
     # title already conveys the entity + suffix).
-    base = metric_suffix.pretty_counter(descriptor.counter) or fqn
+    base = metric_suffix.pretty_counter(descriptor.counter, descriptor.entity) or fqn
     if descriptor.scope == mc_pb.SCOPE_PROCESS:
         tp = projector.tracked_processes.get(int(scope_key))
         if tp and tp.alias:

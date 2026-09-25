@@ -154,7 +154,8 @@ class ResolvedSeries:
         plot legends from spilling across the page. The panel title
         already carries the entity + suffix; the legend only needs to
         differentiate series *within* one panel."""
-        return _suffix.pretty_counter(self.descriptor.counter) or self.fqn
+        d = self.descriptor
+        return _suffix.pretty_counter(d.counter, d.entity) or self.fqn
 
 
 def disambiguate_short_labels(

@@ -64,12 +64,23 @@ def pretty_entity(entity: str) -> str:
     return ENTITY_PRETTY.get(entity.lower(), entity.upper())
 
 
-def pretty_counter(counter: str) -> str:
-    """`warps_active` -> `Active Warps`, `cycles_active` -> `Cycles Active`,
-    `read_throughput` -> `Read Throughput`. Best-effort; relies on
-    snake_case + a handful of word reorderings."""
+# Counters whose name means something else for a given entity: a
+# process's `cycles_active` is its on-CPU time (% of one core), not GPU
+# active cycles. Keyed by (entity, counter).
+ENTITY_COUNTER_PRETTY: dict[tuple[str, str], str] = {
+    ("proc", "cycles_active"): "CPU",
+}
+
+
+def pretty_counter(counter: str, entity: str = "") -> str:
+    """`warps_active` -> `Active Warps`, `cycles_active` -> `Active Cycles`
+    (but `CPU` for entity `proc`), `read_throughput` -> `Read Throughput`.
+    Best-effort; relies on snake_case + a handful of word reorderings."""
     if not counter:
         return ""
+    special = ENTITY_COUNTER_PRETTY.get((entity.lower(), counter))
+    if special:
+        return special
     # Word reorderings for the most common counters where the natural
     # English order differs from the underscore order.
     REORDER = {
