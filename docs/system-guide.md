@@ -1723,13 +1723,40 @@ Symptom when permissions are missing: `disk_metrics.pb` is produced, per-device 
 
 ### Sampling frequency guidance
 
-| Profile | Recommended Hz | Notes |
-| ------- | -------------- | ----- |
-| `system` (CPU + memory) | 100 Hz | Per-process CPU% needs at least ~50 Hz to resolve sub-second bursts; 100 Hz is the sweet spot. |
-| `disk` (devices + per-PID I/O) | 10 – 100 Hz | `/proc/diskstats` updates relatively slowly; >100 Hz wastes cycles. |
+| Profile | Default | Notes |
+| ------- | ------- | ----- |
+| `system` (CPU + memory) | 50 Hz | Per-process CPU% needs roughly ≥ 50 Hz to resolve sub-second bursts. |
+| `disk` (devices + per-PID I/O) | 50 Hz | `/proc/diskstats` updates slowly; per-PID I/O rates benefit from the same rate as CPU. |
 | `events` | n/a | No periodic sampling — it's an inline log. Just choose `flush_interval_ms`. |
 
-`/proc` parsing is the dominant cost. Empirically, `system` at 100 Hz with 4 tracked PIDs costs <0.1% of one CPU; `disk` at 100 Hz with 2 devices and 4 PIDs is similar.
+**What a rate costs** (measured 2026-09-25 with the vLLM example's
+configuration — System + Disk in SIDECAR mode, descendant tracking every
+100 ms, every whole block device — attached to a serving vLLM 0.29 tree of 3
+processes, 41 + 77 + 1 threads, on an idle 128-CPU H100 node; sidecar CPU
+exact, from `getrusage` across `stop()`; the split from per-thread
+`schedstat` during load):
+
+| System = Disk rate | sidecar, % of one core | system sampler | disk sampler | discovery | runs |
+|---|---|---|---|---|---|
+| 100 Hz | 12.0 | 5.5 | 5.3 | 1.1 | 2 |
+| **50 Hz** | **7.3** | 3.0 | 3.2 | 1.1 | 8 |
+| 25 Hz | 5.0 | 1.8 | 1.9 | 1.2 | 2 |
+| 10 Hz | 3.1 | 0.8 | 1.0 | 1.2 | 2 |
+
+Each sampler tick costs 0.55–0.9 ms per probe (more per tick at low rates:
+colder caches), dominated by fixed per-tick `/proc` work, so the samplers'
+cost is close to proportional to the rate; discovery's ~1.1% is independent
+of it. vLLM's throughput with the 50 Hz sidecar attached was **−0.43%**
+(95% CI −0.95% to +0.09%, 8 interleaved pairs against no profiler, same
+server and request set); every latency mean moved by less than 1.4% at the
+CI's far end.
+
+**GPU probe.** The GPU probe runs in the calling process, not the sidecar.
+In the vLLM example at 500 Hz (2026-09-25, 12 interleaved pairs, same setup
+plus `--gpu`), serving throughput dropped **6.9%** (95% CI 4.8–9.0%) and
+mean TTFT rose 23%, while the launcher hosting the probe used 93% of one
+core during load. Whether that CPU (competing with vLLM for the job's
+CPUs) or the counter collection itself is the cause was not isolated.
 
 ---
 
