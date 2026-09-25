@@ -1006,7 +1006,7 @@ marked.
 | **Accounting** | orphans' CPU and storage I/O are credited to init — invisible to you | credited to the launcher: `getrusage(RUSAGE_CHILDREN)` and `os.times()` child fields **increase** (measured 0.001 s → 0.501 s for a 0.500 s orphan; 32.0 MiB written → 32.0 MiB folded) |
 | **Process group, session, signal delivery** | — | **unchanged** — Ctrl-C still reaches the orphans if they remain in the foreground process group |
 | **Attached (not spawned) targets** | — | **no effect** — only descendants of the launcher are covered |
-| **Cost** | — | zero at steady state; ~45–85 µs per orphan event, on the launcher, never on the target (measured with the 2026-09-24 prototype, not re-measured on this implementation) |
+| **Cost** | — | zero at steady state; ~41 µs of launcher CPU per adopted orphan that exits, never on the target (measured 2026-09-25 on this implementation, SIDECAR mode: 41.4 µs, 95% CI ±3.0 µs, 5 runs × 600 orphans, all of it on the launcher's notice-reader thread; under LEGACY the cost is too small to separate from the in-process sampler's own CPU) |
 | **Turning it off** | — | `prctl(PR_SET_CHILD_SUBREAPER, 0)`; already-adopted orphans stay adopted |
 
 The startup situation report records whether it is set, so a trace

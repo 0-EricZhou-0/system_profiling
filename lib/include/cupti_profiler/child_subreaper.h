@@ -31,8 +31,10 @@
 //     written -> 32.0 MiB folded).
 //   * Process group, session, signal delivery: unchanged.
 //   * Attached (not spawned) targets: no effect.
-//   * Cost: zero at steady state; ~45-85 us per orphan event, on the
-//     launcher, never on the target (prototype measurement).
+//   * Cost: zero at steady state; ~41 us of launcher CPU per adopted
+//     orphan that exits, never on the target (SIDECAR, 2026-09-25:
+//     41.4 us, 95% CI +/-3.0 us, 5 x 600 orphans; under LEGACY it is
+//     too small to separate from the in-process sampler's own CPU).
 //   * Turning it off: prctl(PR_SET_CHILD_SUBREAPER, 0); already-adopted
 //     orphans stay adopted.
 //
