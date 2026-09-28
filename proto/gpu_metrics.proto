@@ -28,4 +28,35 @@ message GPUMetricsTrace {
     // Per-flush write accounting; carries the PREVIOUS flush's stats
     // (the current flush's byte size is unknowable before write).
     repeated FlushStats flush_stats              = 5;
+
+    // Decode health per device, cumulative since Start(); on every
+    // flush, so the last message has the run's totals.
+    repeated GpuDecodeStats decode_stats         = 6;
+}
+
+// How well the host kept up with one device's PM sampler. A clean run
+// has samples_lost, invalid_samples, counter_data_full and
+// hw_buffer_overflows all 0. Anything else is also reported on stderr
+// ("[cupti-profiler] warning: GPU <n> ...").
+message GpuDecodeStats {
+    uint32 gpu_index           = 1;
+    // cuptiPmSamplingDecodeData calls.
+    uint64 decode_calls        = 2;
+    // Samples decoded and kept (the ones in `samples`).
+    uint64 samples             = 3;
+    // Samples missing between two kept ones, from the gap between one
+    // sample's end and the next one's start (consecutive samples are
+    // contiguous), in sampling intervals.
+    uint64 samples_lost        = 4;
+    // Samples CUPTI returned without timestamps (or not after the
+    // previous one); dropped. CUPTI 13.3 returns such samples after a
+    // decode that filled the counter-data image.
+    uint64 invalid_samples     = 5;
+    // Decodes that stopped because the counter-data image was full
+    // (max_samples too small for one decode pass). Samples are lost
+    // after each one.
+    uint64 counter_data_full   = 6;
+    // Decodes that reported a hardware-buffer overflow. After the
+    // first, CUPTI returns no more samples for this device.
+    uint64 hw_buffer_overflows = 7;
 }

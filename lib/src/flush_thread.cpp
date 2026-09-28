@@ -71,6 +71,18 @@ GPUMetricsTrace BuildTrace(const std::string& hostname,
                 sample->add_values(v);
             }
         }
+
+        if (d.decode_stats) {
+            const auto& st = *d.decode_stats;
+            auto* ds = trace.add_decode_stats();
+            ds->set_gpu_index(d.gpu_index);
+            ds->set_decode_calls(st.decodeCalls.load());
+            ds->set_samples(st.samples.load());
+            ds->set_samples_lost(st.samplesLost.load());
+            ds->set_invalid_samples(st.invalidSamples.load());
+            ds->set_counter_data_full(st.counterDataFull.load());
+            ds->set_hw_buffer_overflows(st.hwBufferOverflows.load());
+        }
     }
 
     return trace;
@@ -125,6 +137,7 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
             p.peak_nvlink_bw_bytes_per_s = *slot.peak_nvlink_bw_bytes_per_s;
             p.max_warps_per_sm           = *slot.max_warps_per_sm;
             p.samples                    = slot.host->DrainSamples();
+            p.decode_stats               = slot.decode_stats;
             totalSamples += p.samples.size();
             payloads.push_back(std::move(p));
         }

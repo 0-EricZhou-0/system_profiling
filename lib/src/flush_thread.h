@@ -4,6 +4,7 @@
 // `gpu_index`, and emits one merged GPUMetricsTrace per flush.
 #pragma once
 
+#include "decode_thread.h"
 #include "profiler_host_internal.h"
 #include <cupti_profiler/gpu_profiler.h>
 
@@ -30,6 +31,7 @@ struct GpuDevicePayload {
     double                    peak_nvlink_bw_bytes_per_s;
     uint32_t                  max_warps_per_sm;
     std::vector<SamplerRange> samples;
+    const DecodeStats*        decode_stats = nullptr;   // owned by GpuProfiler::Impl
 };
 
 /// Pending flush stats carried from one flush cycle to the next.
@@ -65,6 +67,7 @@ struct DeviceDrainSlot {
     double*             peak_nvlink_bw_bytes_per_s;
     uint32_t*           max_warps_per_sm;
     CuptiProfilerHost*  host;
+    const DecodeStats*  decode_stats;
 };
 
 /// Background flush thread function. Iterates `devices` each cycle,

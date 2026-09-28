@@ -123,6 +123,7 @@ public:
         std::thread                  decodeThread;
         std::atomic<bool>            stopDecode{false};
         CUptiResult                  decodeResult = CUPTI_SUCCESS;
+        internal::DecodeStats        decodeStats;
     };
     // unique_ptr because DeviceState holds an std::atomic which is
     // non-movable — std::vector resize would otherwise invalidate.
@@ -325,11 +326,16 @@ void GpuProfiler::Start() {
     for (auto& d : m_impl->devices) {
         d->stopDecode   = false;
         d->decodeResult = CUPTI_SUCCESS;
+        internal::DecodeTarget device;
+        device.gpuIndex           = static_cast<uint32_t>(d->deviceIndex);
+        device.samplingIntervalNs = static_cast<uint64_t>(1e9 / m_impl->config.samplingFrequencyHz);
         d->decodeThread = std::thread(internal::DecodeThreadFunc,
                                        std::ref(d->counterDataImage),
                                        std::ref(m_impl->metricsCstr),
                                        std::ref(d->target),
                                        std::ref(d->host),
+                                       device,
+                                       std::ref(d->decodeStats),
                                        std::ref(d->stopDecode),
                                        std::ref(d->decodeResult));
     }
@@ -350,6 +356,7 @@ void GpuProfiler::Start() {
             s.peak_nvlink_bw_bytes_per_s = &d->peakNvlinkBwBytesPerSec;
             s.max_warps_per_sm           = &d->maxWarpsPerSm;
             s.host                       = &d->host;
+            s.decode_stats               = &d->decodeStats;
             slots.push_back(std::move(s));
         }
         m_impl->flushThread = std::thread(internal::FlushThreadFunc,
@@ -401,6 +408,7 @@ void GpuProfiler::Stop() {
             std::cerr << "Decode thread error on device " << d->deviceIndex << ": "
                       << errstr << "\n";
         }
+        internal::ReportDecodeSummary(static_cast<uint32_t>(d->deviceIndex), d->decodeStats);
     }
 
     // Write the final residual flush — one trace covering every device's
@@ -419,12 +427,14 @@ void GpuProfiler::Stop() {
             p.peak_nvlink_bw_bytes_per_s = d->peakNvlinkBwBytesPerSec;
             p.max_warps_per_sm           = d->maxWarpsPerSm;
             p.samples                    = d->host.DrainSamples();
+            p.decode_stats               = &d->decodeStats;
             totalRemaining              += p.samples.size();
             payloads.push_back(std::move(p));
         }
         std::cout << "Remaining samples after flush: " << totalRemaining << "\n";
 
-        if (totalRemaining > 0 || m_impl->flushStatsPending.valid) {
+        // Always: the last frame carries the run's decode totals.
+        {
             GPUMetricsTrace finalTrace = internal::BuildTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz, m_impl->hostCpuCount,
                 m_impl->metricsCstr, payloads,
