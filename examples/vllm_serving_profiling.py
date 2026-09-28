@@ -297,6 +297,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     base = f"http://{args.host}:{args.port}"
 
+    # This launcher becomes a child subreaper, before vLLM exists: an
+    # orphaned descendant (a daemonized helper, a process whose parent
+    # exits first) re-parents here instead of to init, so descendant
+    # tracking keeps it; and reap chains (a shell reaping its compiler,
+    # then exiting, within one sample interval) can be resolved, so their
+    # CPU and I/O are not counted twice (without it they are flagged
+    # ambiguous in the trace). See docs/examples/vllm_serving.md.
+    cp.adopt_orphans()
+    print("launcher is a child subreaper (adopt_orphans)", flush=True)
+
     suite = cp.ProfilerSuite()
     cp.configure_suite(suite, suite_config(args))
     suite.start()

@@ -13,20 +13,32 @@ every one of them, from spawn to shutdown, from a small launcher.
 
 ## What it does
 
-1. Builds a `ProfilerSuite` with the **System and Disk probes in SIDECAR
+1. Makes itself a **child subreaper** (`cp.adopt_orphans()`), before vLLM
+   exists. Orphaned descendants then re-parent to the launcher instead of
+   init, so they stay tracked, and the launcher's orphan reaper is what
+   lets **reap chains** be resolved: a `sh -c` that reaps its compiler and
+   exits within one sample interval (vLLM's kernel builds, with cold
+   compile caches) folds the compiler's CPU and I/O into its own, and only
+   with the reaper can the profiler tell that it did and take it out
+   again. Without it those chains are flagged ambiguous in the trace
+   (`CpuTail.ambiguous_pids` / `ambiguous_cpu_ns`, `IoReapAdjustment`
+   `ambiguous`) and their CPU counted twice: a cold start measured 58% over
+   the kernel's total, against −0.36% with it. What it changes for the
+   launcher: [adopt_orphans()](../system-guide.md#what-changes-when-adopt_orphans-is-enabled).
+2. Builds a `ProfilerSuite` with the **System and Disk probes in SIDECAR
    mode** (the samplers run in the `cupti-profiler-sidecar` child, not in
    the launcher), **descendant tracking on, recursive, 100 ms scan**, and an
    Events probe for the phase markers. With `--gpu`, also the GPU probe
    (see [GPU](#gpu-device-wide-counters-from-the-launcher)).
-2. Starts `vllm serve <model>` and **immediately** calls
+3. Starts `vllm serve <model>` and **immediately** calls
    `suite.add_tracked_process(pid, "vllm", track_descendants=True)`, before
    the server is ready, so the startup workers are found while they exist.
-3. Waits for `/v1/models`, then drives six batches of completions, each for
+4. Waits for `/v1/models`, then drives six batches of completions, each for
    1/6 of `--load-seconds` (default 90 s), at concurrency 4, 16, 64, 64,
    16, 4. Every request has a fresh random prompt of 32–3000 words (so the
    prefix cache cannot short-cut it) and a fixed output of 16, 64 or 256
    tokens (`ignore_eos`). Each batch is a region in the trace.
-4. Sends `SIGTERM` to the server, stops the suite, prints the trace's
+5. Sends `SIGTERM` to the server, stops the suite, prints the trace's
    **process table**, and renders the figure with
    [`tools/visualize_all.py`](../tools/README.md) and the example's panel
    layout.

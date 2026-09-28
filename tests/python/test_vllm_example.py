@@ -17,3 +17,14 @@ def test_vllm_example_pins_the_launcher(tmp_path):
                         "--output-dir", str(tmp_path), "--ready-timeout", "30"],
                        capture_output=True, text=True, timeout=120)
     assert f"launcher pinned to CPUs [{cpu}]" in p.stdout, p.stdout + p.stderr
+
+
+def test_vllm_example_adopts_orphans(tmp_path):
+    """The launcher is a child subreaper before vLLM starts (reap chains
+    resolvable, orphans kept): the situation report says so."""
+    p = subprocess.run([sys.executable, os.path.join(REPO, "examples", "vllm_serving_profiling.py"),
+                        "--vllm", "false", "--no-render", "--output-dir", str(tmp_path),
+                        "--ready-timeout", "30"], capture_output=True, text=True, timeout=120)
+    assert "launcher is a child subreaper (adopt_orphans)" in p.stdout, p.stdout + p.stderr
+    sub = [l for l in p.stderr.splitlines() if "child subreaper (this process)" in l]
+    assert sub and "not set" not in sub[0], sub

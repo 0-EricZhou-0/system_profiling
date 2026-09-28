@@ -1200,8 +1200,13 @@ leaving C to a subreaper or init, is decided exactly as for reaped I/O
 (below): C reaped by the launcher's orphan reaper → not in P; the reaper
 runs and C's tree hangs under the launcher → P reaped C, subtracted;
 otherwise C is listed in `CpuTail.ambiguous_pids` and **not** subtracted
-(its CPU may then be counted twice), never guessed. Without
-`adopt_orphans()` every such chain is ambiguous. Measured on the vLLM
+(its CPU may then be counted twice), never guessed, and
+`CpuTail.ambiguous_cpu_ns` says how much: the CPU of those children
+already in their own samples, which the tail holds a second time if P did
+reap them. So the true tail lies between
+`max(0, cpu_after_last_sample_ns − ambiguous_cpu_ns)` and
+`cpu_after_last_sample_ns`. Without `adopt_orphans()` every such chain is
+ambiguous; the vLLM example calls it for this reason. Measured on the vLLM
 example started with cold compile caches (2026-09-28, ~70 compiler
 processes, 32 of them in such chains): with `adopt_orphans()` the trace's
 CPU of the whole tree is 329.2 s against the kernel's 330.4 s (−0.36%;
