@@ -6,6 +6,7 @@
 #pragma once
 
 #include "metric_descriptor.h"
+#include "stop_signal.h"
 
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/process_tracking_probe.h>
@@ -112,7 +113,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
                          uint32_t hostCpuCount,
                          const std::vector<std::string>& devices,
                          ProcessTrackingProbe& probe,
-                         std::atomic<bool>& stop,
+                         StopSignal& stop,
                          uint64_t flushIntervalMs,
                          uint64_t steadyClockRefNs,
                          uint64_t wallClockEpochNs,

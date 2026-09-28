@@ -66,9 +66,9 @@ public:
 
     /// Write MSG_STOP to the sidecar WITHOUT waiting for the ack.
     /// Lets the parent kick off the sidecar's shutdown early so its
-    /// sample threads can wind down in parallel with any slow
-    /// in-process Stop paths (e.g. GPU flush thread joining an
-    /// uninterruptible sleep_for). Follow up with JoinStopAck() once
+    /// sample threads can wind down in parallel with the in-process
+    /// Stop paths (e.g. the GPU's final decode and flush). Follow up
+    /// with JoinStopAck() once
     /// the local work is done to reap the STATUS reply.
     ProfilerError SignalStop();
 

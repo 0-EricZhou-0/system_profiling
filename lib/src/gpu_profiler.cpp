@@ -1,5 +1,6 @@
 #include <cupti_profiler/gpu_profiler.h>
 
+#include "stop_signal.h"
 #include "cupti_pm_sampling.h"
 #include "profiler_host_internal.h"
 #include "decode_thread.h"
@@ -150,7 +151,7 @@ public:
 
     // Single flush thread, one output file.
     std::thread flushThread;
-    std::atomic<bool> stopFlush{false};
+    internal::StopSignal stopFlush;
     std::ofstream outFile;
     std::mutex outMutex;
 
@@ -394,7 +395,7 @@ void GpuProfiler::Start() {
     }
 
     // Launch one flush thread that pulls from every device.
-    m_impl->stopFlush = false;
+    m_impl->stopFlush.Reset();
     if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
         std::cout << "Periodic flush every " << m_impl->config.flushIntervalMs << " ms\n";
         std::vector<internal::DeviceDrainSlot> slots;
@@ -451,7 +452,7 @@ void GpuProfiler::Stop() {
     }
 
     // Join flush thread.
-    m_impl->stopFlush = true;
+    m_impl->stopFlush.Set();
     if (m_impl->flushThread.joinable()) m_impl->flushThread.join();
 
     for (auto& d : m_impl->devices) {

@@ -1,5 +1,6 @@
 #include <cupti_profiler/event_profiler.h>
 
+#include "stop_signal.h"
 #include "event_tracker_internal.h"
 #include "event_flush_thread.h"
 
@@ -32,7 +33,7 @@ public:
     std::mutex outMutex;
 
     std::thread flushThread;
-    std::atomic<bool> stopFlush{false};
+    internal::StopSignal stopFlush;
 
     internal::EventPendingFlushStats flushStatsPending;
     std::mutex flushStatsMutex;
@@ -86,7 +87,7 @@ void EventProfiler::Start() {
     m_impl->wallClockEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    m_impl->stopFlush = false;
+    m_impl->stopFlush.Reset();
     if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
         m_impl->flushThread = std::thread(internal::EventFlushThreadFunc,
                                           std::ref(*m_impl->generic),
@@ -108,12 +109,12 @@ void EventProfiler::Start() {
 
 void EventProfiler::SignalStop() {
     if (!m_impl->running) return;
-    m_impl->stopFlush = true;
+    m_impl->stopFlush.Set();
 }
 
 void EventProfiler::Stop() {
     if (!m_impl->running) return;
-    m_impl->stopFlush = true;
+    m_impl->stopFlush.Set();
     if (m_impl->flushThread.joinable()) m_impl->flushThread.join();
 
     // Final flush — block until any in-flight cudaEvents complete so the last

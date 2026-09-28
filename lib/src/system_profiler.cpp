@@ -1,5 +1,6 @@
 #include <cupti_profiler/system_profiler.h>
 
+#include "stop_signal.h"
 #include "proc_readers.h"
 #include "system_flush_thread.h"
 #include "tracked_process_proto.h"
@@ -42,8 +43,8 @@ public:
     // Threads
     std::thread sampleThread;
     std::thread flushThread;
-    std::atomic<bool> stopSample{false};
-    std::atomic<bool> stopFlush{false};
+    internal::StopSignal stopSample;
+    internal::StopSignal stopFlush;
 
     // Sync anchor
     uint64_t steadyClockRefNs = 0;
@@ -271,14 +272,13 @@ void SystemProfiler::Start() {
     m_impl->prevCPU = internal::ReadCPUStat();
 
     // Launch sample thread
-    m_impl->stopSample = false;
+    m_impl->stopSample.Reset();
     m_impl->sampleThread = std::thread([this]() {
         auto& impl = *m_impl;
         long pageSize = internal::GetPageSize();
 
-        while (!impl.stopSample) {
-            std::this_thread::sleep_for(std::chrono::microseconds(1000000 / impl.config.samplingFrequencyHz));
-            if (impl.stopSample) break;
+        const auto period = std::chrono::microseconds(1000000 / impl.config.samplingFrequencyHz);
+        while (!impl.stopSample.WaitUntil(std::chrono::steady_clock::now() + period)) {
 
             auto now = std::chrono::steady_clock::now().time_since_epoch();
             uint64_t tsNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
@@ -426,7 +426,7 @@ void SystemProfiler::Start() {
     });
 
     // Launch flush thread
-    m_impl->stopFlush = false;
+    m_impl->stopFlush.Reset();
     if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
         m_impl->flushThread = std::thread(internal::SystemFlushThreadFunc,
                                            std::ref(m_impl->batch),
@@ -453,16 +453,16 @@ bool SystemProfiler::IsRunning() const { return m_impl->running; }
 
 void SystemProfiler::SignalStop() {
     if (!m_impl->running) return;
-    m_impl->stopSample = true;
-    m_impl->stopFlush = true;
+    m_impl->stopSample.Set();
+    m_impl->stopFlush.Set();
 }
 
 void SystemProfiler::Stop() {
     if (!m_impl->running) return;
 
     // Signal if not already signaled
-    m_impl->stopSample = true;
-    m_impl->stopFlush = true;
+    m_impl->stopSample.Set();
+    m_impl->stopFlush.Set();
 
     if (m_impl->sampleThread.joinable()) m_impl->sampleThread.join();
     if (m_impl->flushThread.joinable()) m_impl->flushThread.join();

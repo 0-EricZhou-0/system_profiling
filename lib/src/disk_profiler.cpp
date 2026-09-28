@@ -1,5 +1,6 @@
 #include <cupti_profiler/disk_profiler.h>
 
+#include "stop_signal.h"
 #include "disk_readers.h"
 #include "proc_readers.h"
 #include "disk_flush_thread.h"
@@ -51,8 +52,8 @@ public:
 
     std::thread sampleThread;
     std::thread flushThread;
-    std::atomic<bool> stopSample{false};
-    std::atomic<bool> stopFlush{false};
+    internal::StopSignal stopSample;
+    internal::StopSignal stopFlush;
 
     uint64_t steadyClockRefNs = 0;
     uint64_t wallClockEpochNs = 0;
@@ -284,13 +285,12 @@ void DiskProfiler::Start() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
     for (auto& ds : initDisk) m_impl->prevDisk[ds.device] = {ds, initTsNs};
 
-    m_impl->stopSample = false;
+    m_impl->stopSample.Reset();
     m_impl->sampleThread = std::thread([this]() {
         auto& impl = *m_impl;
 
-        while (!impl.stopSample) {
-            std::this_thread::sleep_for(std::chrono::microseconds(1000000 / impl.config.samplingFrequencyHz));
-            if (impl.stopSample) break;
+        const auto period = std::chrono::microseconds(1000000 / impl.config.samplingFrequencyHz);
+        while (!impl.stopSample.WaitUntil(std::chrono::steady_clock::now() + period)) {
 
             auto now = std::chrono::steady_clock::now().time_since_epoch();
             uint64_t tsNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
@@ -528,7 +528,7 @@ void DiskProfiler::Start() {
     });
 
     // Launch flush thread
-    m_impl->stopFlush = false;
+    m_impl->stopFlush.Reset();
     if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
         m_impl->flushThread = std::thread(internal::DiskFlushThreadFunc,
                                            std::ref(m_impl->batch),
@@ -556,15 +556,15 @@ bool DiskProfiler::IsRunning() const { return m_impl->running; }
 
 void DiskProfiler::SignalStop() {
     if (!m_impl->running) return;
-    m_impl->stopSample = true;
-    m_impl->stopFlush = true;
+    m_impl->stopSample.Set();
+    m_impl->stopFlush.Set();
 }
 
 void DiskProfiler::Stop() {
     if (!m_impl->running) return;
 
-    m_impl->stopSample = true;
-    m_impl->stopFlush = true;
+    m_impl->stopSample.Set();
+    m_impl->stopFlush.Set();
 
     if (m_impl->sampleThread.joinable()) m_impl->sampleThread.join();
     if (m_impl->flushThread.joinable()) m_impl->flushThread.join();

@@ -564,13 +564,11 @@ void ProfilerSuite::Stop() {
     // wind down in parallel with our slow local teardown below. The
     // sidecar signal is fire-and-forget here (write MSG_STOP, don't
     // wait for the ack); we collect the ack at the very end via
-    // JoinStopAck. Rationale: gpuProfiler.Stop() below may block for
-    // up to flush_interval_ms (10 s in the default config) waiting
-    // for its flush thread to wake from an uninterruptible sleep_for.
-    // If we waited on the sidecar's ack synchronously here, the
-    // sidecar's sample threads wouldn't hear MSG_STOP for that
-    // entire window and would collect ~10 s of samples past the
-    // workload's real end.
+    // JoinStopAck. Rationale: gpuProfiler.Stop() below does the GPU's
+    // final decode, flush and CUPTI teardown; waiting for the sidecar's
+    // ack first would serialize the two and let the sidecar sample past
+    // the workload's real end for that long. (Every probe thread's wait
+    // is interruptible, so no Stop() waits out an interval.)
     //
     // Discovery stops first (it only takes a condvar wake + join), so
     // nothing is registered during teardown and its final stats reach

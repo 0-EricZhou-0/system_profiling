@@ -6,6 +6,8 @@
 
 #include "decode_thread.h"
 #include "profiler_host_internal.h"
+#include "stop_signal.h"
+
 #include <cupti_profiler/gpu_profiler.h>
 
 #include <atomic>
@@ -79,7 +81,7 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
                      uint64_t samplingFrequencyHz,
                      uint32_t hostCpuCount,
                      const std::vector<const char*>& metricNames,
-                     std::atomic<bool>& stop,
+                     StopSignal& stop,
                      uint64_t flushIntervalMs,
                      uint64_t steadyClockRefNs,
                      uint64_t cuptiRefNs,

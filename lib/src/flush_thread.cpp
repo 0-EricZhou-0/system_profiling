@@ -109,7 +109,7 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
                      uint64_t samplingFrequencyHz,
                      uint32_t hostCpuCount,
                      const std::vector<const char*>& metricNames,
-                     std::atomic<bool>& stop,
+                     StopSignal& stop,
                      uint64_t flushIntervalMs,
                      uint64_t steadyClockRefNs,
                      uint64_t cuptiRefNs,
@@ -119,9 +119,9 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
 {
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;
-    while (!stop) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(flushIntervalMs));
-        if (stop) break;
+    // Stop() wakes the wait; the final flush is Stop()'s.
+    while (!stop.WaitUntil(std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(flushIntervalMs))) {
 
         // Drain every device. Skip the flush if no device produced
         // anything this cycle.

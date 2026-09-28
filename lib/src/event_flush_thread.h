@@ -2,6 +2,7 @@
 #pragma once
 
 #include "event_tracker_internal.h"
+#include "stop_signal.h"
 
 #include <atomic>
 #include <cstdint>
@@ -30,7 +31,7 @@ void EventFlushThreadFunc(EventTracker& generic,
                           EventTracker& gpu,
                           std::ofstream& outFile,
                           std::mutex& outMutex,
-                          std::atomic<bool>& stop,
+                          StopSignal& stop,
                           uint64_t flushIntervalMs,
                           uint64_t steadyClockRefNs,
                           uint64_t cuptiRefNs,

@@ -267,7 +267,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
                            uint64_t samplingFrequencyHz,
                            uint32_t hostCpuCount,
                            ProcessTrackingProbe& probe,
-                           std::atomic<bool>& stop,
+                           StopSignal& stop,
                            uint64_t flushIntervalMs,
                            uint64_t steadyClockRefNs,
                            uint64_t wallClockEpochNs,
@@ -276,9 +276,9 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
 {
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;
-    while (!stop) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(flushIntervalMs));
-        if (stop) break;
+    // Stop() wakes the wait; the final flush is Stop()'s.
+    while (!stop.WaitUntil(std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(flushIntervalMs))) {
 
         SystemSampleBatch drained;
         {

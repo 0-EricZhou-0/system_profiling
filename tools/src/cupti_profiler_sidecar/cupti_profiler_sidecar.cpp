@@ -482,7 +482,7 @@ int main(int argc, char** argv) {
     // Discovery first, so nothing is registered during teardown and its
     // final stats reach the probes' last flush. Then SignalStop both
     // probes so their sample threads see the flag in parallel while
-    // their flush threads finish their current sleep_for; Stop() joins.
+    // their flush threads wake from their wait; Stop() joins.
     if (discovery) discovery->Stop();
     if (sys) sys->SignalStop();
     if (dsk) dsk->SignalStop();

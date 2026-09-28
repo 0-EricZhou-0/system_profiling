@@ -14,6 +14,7 @@
 #pragma once
 
 #include "metric_descriptor.h"
+#include "stop_signal.h"
 
 #include <cupti_profiler/process_tracking_probe.h>
 #include <cupti_profiler/system_profiler.h>
@@ -122,7 +123,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
                            uint64_t samplingFrequencyHz,
                            uint32_t hostCpuCount,
                            ProcessTrackingProbe& probe,
-                           std::atomic<bool>& stop,
+                           StopSignal& stop,
                            uint64_t flushIntervalMs,
                            uint64_t steadyClockRefNs,
                            uint64_t wallClockEpochNs,

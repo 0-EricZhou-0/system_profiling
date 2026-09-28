@@ -62,7 +62,7 @@ void EventFlushThreadFunc(EventTracker& generic,
                           EventTracker& gpu,
                           std::ofstream& outFile,
                           std::mutex& outMutex,
-                          std::atomic<bool>& stop,
+                          StopSignal& stop,
                           uint64_t flushIntervalMs,
                           uint64_t steadyClockRefNs,
                           uint64_t cuptiRefNs,
@@ -71,9 +71,9 @@ void EventFlushThreadFunc(EventTracker& generic,
                           std::mutex& pendingMutex)
 {
     uint64_t prevFlushNs = 0;
-    while (!stop) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(flushIntervalMs));
-        if (stop) break;
+    // Stop() wakes the wait; the final flush is Stop()'s.
+    while (!stop.WaitUntil(std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(flushIntervalMs))) {
 
         EventTrace trace;
         auto* meta = trace.mutable_metadata();
