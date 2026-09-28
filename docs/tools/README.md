@@ -116,8 +116,8 @@ listed entries never share a colour. Cumulative companion panels carry
 each series' run total in its legend entry (`+k more` carries theirs
 combined). Every series, listed or not, is in `<output>.legend.txt`.
 In a panel with several metrics per process (the per-process I/O
-panels), the legend's first row is the line-style key alone (`── Io
-Rchar (sum)  - - Io Wchar (sum)`), the processes on the rows under it;
+panels), the legend's first row is the line-style key alone (`── IO
+rchar (sum)  - - IO wchar (sum)`), the processes on the rows under it;
 the processes' entries name the process only. On a cumulative panel
 each process entry carries its totals, each marked with its line
 style's glyph instead of the metric's name: `vllm (PID 4106078): ──

@@ -124,7 +124,7 @@ def _io_trace(tmp_path):
     return viz_trace.write_trace(str(tmp_path / "t"), procs, disk=True)
 
 
-KEY = ["Io Rchar (sum)", "Io Wchar (sum)"]
+KEY = ["IO rchar (sum)", "IO wchar (sum)"]
 
 
 def test_style_key_on_its_own_first_row_and_process_only_totals(tmp_path):
@@ -147,8 +147,8 @@ def test_style_key_on_its_own_first_row_and_process_only_totals(tmp_path):
         assert len(ky) == 1                                   # one row
         assert min(ky) > max(t.get_window_extent(rend).y1 for t in procs)   # above the processes
         for t in procs:
-            assert "PID" in t.get_text() and "Rchar" not in t.get_text() \
-                and "Wchar" not in t.get_text(), t.get_text()
+            assert "PID" in t.get_text() and "rchar" not in t.get_text() \
+                and "wchar" not in t.get_text(), t.get_text()
         if kind == "integrated":
             assert all("──" in t.get_text() for t in procs)   # totals, marked by style
 
@@ -165,5 +165,5 @@ def test_style_key_own_legend_bokeh(tmp_path):
         procs, key = legends                       # the key added last: stacked on top
         assert [it.label.value for it in key.items] == KEY and key.ncols == len(KEY)
         labels = [it.label.value for it in procs.items]
-        assert len(labels) == 2 and all("PID" in l and "Rchar" not in l and "Wchar" not in l
+        assert len(labels) == 2 and all("PID" in l and "rchar" not in l and "wchar" not in l
                                         for l in labels), labels

@@ -60,10 +60,10 @@ def test_metric_line_styles_and_compact_legend(tmp_path):
     labels = [it.label.value for it in items]
     # 3 processes + 2 line styles, not 3 x 2 pairs
     assert len(labels) == 5, labels
-    assert labels[-2:] == ["CPU (sum)", "Rss Bytes"]
+    assert labels[-2:] == ["CPU (sum)", "RSS"]
     assert "(PID 11, child of 10)" in labels[1] and "child of" not in labels[0]
     dashes = {it.label.value: it.renderers[-1].glyph.line_dash for it in items[-2:]}
-    assert dashes["CPU (sum)"] != dashes["Rss Bytes"]
+    assert dashes["CPU (sum)"] != dashes["RSS"]
     assert {it.renderers[-1].glyph.line_color for it in items[-2:]} == {"black"}
     # every drawn series: its process's colour, its metric's style
     styles = {(r.glyph.line_color, tuple(r.glyph.line_dash) if isinstance(r.glyph.line_dash, list)

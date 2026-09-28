@@ -98,3 +98,23 @@ def test_peak_line_is_labelled_peak_bokeh(tmp_path):
     labels = [r.text for r in fig.center if type(r).__name__ == "Label"]
     assert labels == ["Peak: 100 %"], labels
     assert [it.label.value for it in fig.legend[0].items] == ["Active Cycles (avg)"]
+
+
+@pytest.mark.parametrize("fqn,label", [
+    ("proc__io_rchar.sum.per_second", "IO rchar (sum)"),
+    ("proc__io_wchar.sum.per_second", "IO wchar (sum)"),
+    ("proc__io_read_bytes.sum.per_second", "IO read_bytes (sum)"),
+    ("proc__io_write_bytes.sum.per_second", "IO write_bytes (sum)"),
+    ("proc__io_cancelled_write_bytes.sum.per_second", "IO cancelled_write_bytes (sum)"),
+    ("proc__rss_bytes", "RSS"),
+    ("proc__vms_bytes", "VMS"),
+    ("proc__cycles_active.sum.per_second", "CPU (sum)"),
+    ("disk__read_bytes.sum.per_second", "Read Bytes (sum)"),
+    ("mem__used_bytes", "Used Bytes"),
+])
+def test_display_names(fqn, label):
+    """Acronyms fully capitalised; /proc/<pid>/io fields verbatim; the
+    statistic suffix as before."""
+    d = descriptor(fqn)
+    s = metric_layout.ResolvedSeries(d.fqn, d.scope, 1, d)
+    assert metric_layout.disambiguate_short_labels([s])[(d.fqn, 1)] == label
