@@ -995,6 +995,7 @@ def _build_event_strip(events, t0_ns: int, x_range) -> "figure":
 
 
 _LANE_PX = 16   # process timeline: pixels per lane
+_TIMELINE_CHAR_PX = 7 * 96 / 72 * 0.55   # 7pt label: an upper estimate of a character's width
 
 
 def _timeline_data(projector: TraceProjector, proj: dict, t0_ns: int, t_end_ns: int):
@@ -1017,10 +1018,17 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     per process (lifetime, lane packed), listed roots outlined solid,
     orphans dashed, fork links from parent to child; `comm (pid)` on the
     bars wide enough at the full view, everything in the hover."""
+    # Every process labelled (process_timeline.place_labels): inside its
+    # bar where the label fits at the full view, else in rows under the
+    # lanes with a leader, spread so none overlaps another.
+    text_px = lambda t: len(t) * _TIMELINE_CHAR_PX
+    placed, n_rows = process_timeline.place_labels(procs, lanes, t0_ns, t_end_ns,
+                                                   _FRAME_WIDTH, text_px, pad_units=6.0)
+    height = process_timeline.height_in_lanes(n_lanes, n_rows)
     fig = figure(
         title="Processes (bars: lifetime, packed into the fewest lanes; lines: fork links)",
-        width=1200, frame_height=max(1, n_lanes) * _LANE_PX, frame_width=_FRAME_WIDTH,
-        min_border_left=_STRIP_LEFT_PX, x_range=x_range, y_range=Range1d(n_lanes, 0),
+        width=1200, frame_height=max(1, round(height * _LANE_PX)), frame_width=_FRAME_WIDTH,
+        min_border_left=_STRIP_LEFT_PX, x_range=x_range, y_range=Range1d(height, 0),
         tools=[], toolbar_location=None, output_backend=_RENDER_BACKEND,
     )
     fig.yaxis.visible = False
@@ -1031,7 +1039,6 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                              ppid=[], kind=[], start=[], end=[])
                      for k in (process_timeline.ROOT, process_timeline.DISCOVERED,
                                process_timeline.ORPHAN)}
-    labels = dict(x=[], y=[], text=[], color=[])
     for p in procs:
         lane = lanes[p.key]
         left, right = (p.start_ns - t0_ns) / 1e9, (p.end_ns - t0_ns) / 1e9
@@ -1049,12 +1056,6 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                          + (", alive at the end" if p.alive else ""))
         d["start"].append(left)
         d["end"].append(right)
-        text = f"{p.comm} ({p.pid})"
-        if len(text) * _LEGEND_CHAR_EM * _LEGEND_FONT_PX + 6 < (right - left) / span_s * _FRAME_WIDTH:
-            labels["x"].append((left + right) / 2)
-            labels["y"].append(lane + 0.5)
-            labels["text"].append(text)
-            labels["color"].append(color)
     style = {process_timeline.ROOT: dict(line_color="black", line_width=1.5),
              process_timeline.DISCOVERED: dict(line_color="color", line_width=0.5),
              process_timeline.ORPHAN: dict(line_color="black", line_width=1.0,
@@ -1081,9 +1082,33 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                       line_color="#444444", line_width=1.0)
     fig.scatter("x", "y0", source=ColumnDataSource(link), size=3, color="#444444")
     shown.append(("fork link (parent -> child)", seg))
-    fig.text(x="x", y="y", text="text", source=ColumnDataSource(labels),
+    inside = dict(x=[], y=[], text=[])
+    outside = dict(x=[], y=[], text=[])
+    leaders = dict(x0=[], y0=[], x1=[], y1=[])
+    for lab in placed:
+        if lab.row < 0:
+            inside["x"].append(lab.x_s)
+            inside["y"].append(lab.lane + 0.5)
+            inside["text"].append(lab.text)
+        else:
+            y = process_timeline.label_row_y(n_lanes, lab.row)
+            outside["x"].append(lab.x_s)
+            outside["y"].append(y)
+            outside["text"].append(lab.text)
+            leaders["x0"].append(lab.anchor_s)
+            leaders["y0"].append(lab.lane + 0.89)
+            leaders["x1"].append(lab.x_s)
+            leaders["y1"].append(y - process_timeline.LABEL_ROW * 0.42)
+    lead = fig.segment(x0="x0", y0="y0", x1="x1", y1="y1", source=ColumnDataSource(leaders),
+                       line_color="#aaaaaa", line_width=0.5)
+    fig.renderers.remove(lead)
+    fig.renderers.insert(0, lead)                      # under the bars
+    fig.text(x="x", y="y", text="text", source=ColumnDataSource(inside),
              text_align="center", text_baseline="middle", text_font_size="7pt",
              text_color="white")
+    fig.text(x="x", y="y", text="text", source=ColumnDataSource(outside),
+             text_align="center", text_baseline="middle", text_font_size="7pt",
+             text_color="#333333")
     fig.add_tools(HoverTool(renderers=bars, tooltips=[
         ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),
         ("start", "@start{0.000}s"), ("end", "@end{0.000}s")]))

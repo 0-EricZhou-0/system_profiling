@@ -59,6 +59,7 @@ import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
 import panel_legend  # noqa: E402
 import process_timeline  # noqa: E402
+import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 
@@ -686,12 +687,10 @@ def _spread_rotated_label_groups(ax, groups, renderer,
     the group's members, so name + 2-line time stay vertically
     aligned regardless of which one is wider.
 
-    Algorithm: sort groups by current bbox center. Right half walks
-    left-to-right, pushing rightward when a group's left edge would
-    cross the previous group's right edge plus padding. Left half
-    walks right-to-left, pushing leftward by the same rule. Both
-    halves use a soft clamp at the strip's axis bounds +/-
-    LABEL_CLAMP_CLEARANCE_PX."""
+    Placement: label_spread.spread_1d (overlapping groups merge into
+    clusters centred on their members' true positions), with a soft
+    clamp at the strip's axis bounds +/- LABEL_CLAMP_CLEARANCE_PX. The
+    process timeline's outside labels use the same function."""
     if not groups:
         return
     items = []
@@ -711,39 +710,16 @@ def _spread_rotated_label_groups(ax, groups, renderer,
             "cx":      orig_cx,
             "width":   max_w,
         })
-    items.sort(key=lambda d: d["cx"])
-    n = len(items)
-    if n == 0:
+    if not items:
         return
     ax_bbox = ax.get_window_extent()
-    pivot = n // 2
-
     # Soft clamp: groups may extend LABEL_CLAMP_CLEARANCE_PX past
     # the strip's bounds before stopping.
-    right_clamp = ax_bbox.x1 + LABEL_CLAMP_CLEARANCE_PX
-    left_clamp  = ax_bbox.x0 - LABEL_CLAMP_CLEARANCE_PX
-
-    prev_right = -float("inf")
-    for k in range(pivot, n):
-        d = items[k]
-        left = d["cx"] - d["width"] / 2
-        if left < prev_right + padding_px:
-            d["cx"] += (prev_right + padding_px) - left
-        max_cx = right_clamp - d["width"] / 2
-        if d["cx"] > max_cx:
-            d["cx"] = max_cx
-        prev_right = d["cx"] + d["width"] / 2
-
-    next_left = float("inf")
-    for k in range(pivot - 1, -1, -1):
-        d = items[k]
-        right = d["cx"] + d["width"] / 2
-        if right > next_left - padding_px:
-            d["cx"] += (next_left - padding_px) - right
-        min_cx = left_clamp + d["width"] / 2
-        if d["cx"] < min_cx:
-            d["cx"] = min_cx
-        next_left = d["cx"] - d["width"] / 2
+    centres = label_spread.spread_1d([(d["orig_cx"], d["width"]) for d in items],
+                                     ax_bbox.x0 - LABEL_CLAMP_CLEARANCE_PX,
+                                     ax_bbox.x1 + LABEL_CLAMP_CLEARANCE_PX, padding_px)
+    for d, c in zip(items, centres):
+        d["cx"] = c
 
     pts_per_px = 72.0 / ax.figure.dpi
     for d in items:
@@ -848,7 +824,8 @@ class _Timeline:
     """The process timeline's data (process_timeline): processes, lanes,
     fork links."""
 
-    def __init__(self, projector: TraceProjector, projection: dict, t0_ns: int, t_end_ns: int):
+    def __init__(self, projector: TraceProjector, projection: dict, t0_ns: int, t_end_ns: int,
+                 width_pt: float):
         first, last = {}, {}
         for (fqn, key), (ts, _v) in projection.items():
             if ts.size and projector.descriptors.get(fqn) is not None \
@@ -859,10 +836,18 @@ class _Timeline:
                                             first_sample_ns=first, last_sample_ns=last)
         self.lanes, self.n_lanes = process_timeline.pack_lanes(self.procs)
         self.links = process_timeline.fork_links(self.procs, self.lanes)
+        self.labels, self.n_label_rows = process_timeline.place_labels(
+            self.procs, self.lanes, t0_ns, t_end_ns, width_pt,
+            lambda t: _text_width_pt(t, PROCESS_LABEL_FONTSIZE), pad_units=4.0)
+
+    @property
+    def height_lanes(self) -> float:
+        """Lanes plus the rows of outside labels under them."""
+        return process_timeline.height_in_lanes(self.n_lanes, self.n_label_rows)
 
     @property
     def height_in(self) -> float:
-        return self.n_lanes * PROCESS_LANE_HEIGHT
+        return self.height_lanes * PROCESS_LANE_HEIGHT
 
 
 def _text_color_on(color: str) -> str:
@@ -876,11 +861,13 @@ def _render_process_timeline(ax, tl: _Timeline, t0_ns: int, xmax_s: float,
     colour from the per-process panels; listed roots outlined solid,
     orphans (discovered, parent not tracked) dashed. A thin line joins
     the parent's bar to each child's at the child's start (fork link).
-    Bars are labelled `comm (pid)` where the label fits."""
+    Every bar is labelled: `comm (pid)` inside it where that fits (else
+    `comm`), otherwise in rows under the lanes, spread so no two labels
+    overlap, with a grey leader to its bar (drawn under the bars)."""
     from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
     ax.set_xlim(0, xmax_s)
-    ax.set_ylim(tl.n_lanes, 0)               # lane 0 on top
+    ax.set_ylim(tl.height_lanes, 0)          # lane 0 on top, label rows under the lanes
     ax.set_yticks([])
     ax.tick_params(bottom=False, labelbottom=False)
     for side in ("top", "right", "left"):
@@ -891,7 +878,6 @@ def _render_process_timeline(ax, tl: _Timeline, t0_ns: int, xmax_s: float,
     ax.set_title("Processes (bars: lifetime, packed into the fewest lanes; lines: fork links)",
                  fontsize=10, loc="left", pad=_timeline_legend_pad_pt())
 
-    width_pt = _axes_width_pt(ax)
     for p in tl.procs:
         lane = tl.lanes[p.key]
         x0 = (p.start_ns - t0_ns) / 1e9
@@ -904,11 +890,22 @@ def _render_process_timeline(ax, tl: _Timeline, t0_ns: int, xmax_s: float,
             edge, ls, lw = "black", "--", 0.9
         ax.barh(lane + 0.5, max(w, xmax_s * 1e-4), left=x0, height=PROCESS_BAR_FILL,
                 color=color, edgecolor=edge, linestyle=ls, linewidth=lw, zorder=2)
-        label = f"{p.comm} ({p.pid})"
-        if _text_width_pt(label, PROCESS_LABEL_FONTSIZE) + 4 < w / xmax_s * width_pt:
-            ax.text(x0 + w / 2, lane + 0.5, label, ha="center", va="center",
-                    fontsize=PROCESS_LABEL_FONTSIZE, color=_text_color_on(color),
-                    clip_on=True, zorder=4)
+    labels_of = {lab.key: lab for lab in tl.labels}
+    for p in tl.procs:
+        lab = labels_of[p.key]
+        color = pid_color_map.get(p.pid, "#9e9e9e")
+        if lab.row < 0:
+            t = ax.text(lab.x_s, lab.lane + 0.5, lab.text, ha="center", va="center",
+                        fontsize=PROCESS_LABEL_FONTSIZE, color=_text_color_on(color),
+                        clip_on=True, zorder=4)
+        else:
+            y = process_timeline.label_row_y(tl.n_lanes, lab.row)
+            t = ax.text(lab.x_s, y, lab.text, ha="center", va="center",
+                        fontsize=PROCESS_LABEL_FONTSIZE, color="#333333", zorder=4)
+            ax.plot([lab.anchor_s, lab.x_s],
+                    [lab.lane + 0.5 + PROCESS_BAR_FILL / 2, y - process_timeline.LABEL_ROW * 0.42],
+                    color="#aaaaaa", lw=0.4, zorder=1)
+        t._process_key = p.key
     for link in tl.links:
         x = (link.t_ns - t0_ns) / 1e9
         y0, y1 = link.parent_lane + 0.5, link.child_lane + 0.5
@@ -1294,7 +1291,7 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
     has_regions = bool(probes["events"]["regions"])
     if has_events:  annot_panels.append(("event",  PANEL_HEIGHT_EVENT, 0.0))
     if has_regions: annot_panels.append(("region", PANEL_HEIGHT_REGION, 0.0))
-    timeline = _Timeline(projector, proj, t0_ns, t_end_ns)
+    timeline = _Timeline(projector, proj, t0_ns, t_end_ns, legend_width_pt)
     if timeline.procs:
         annot_panels.append(("process", timeline.height_in, _timeline_legend_pad_pt() / 72.0))
     if annot_panels:

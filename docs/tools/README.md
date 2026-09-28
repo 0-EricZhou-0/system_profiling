@@ -105,8 +105,16 @@ combined). Every series, listed or not, is in `<output>.legend.txt`.
 **Process timeline.** Directly under the Region strip, on the same time
 axis: one bar per tracked process (processes only — threads are not
 traced) from its start to its exit, or to the end of the trace if it was
-still running, in the process's colour from the per-process panels and
-labelled `comm (pid)` where the label fits (`comm` = its latest name).
+still running, in the process's colour from the per-process panels.
+Every process is labelled with its latest name: `comm (pid)` inside its
+bar where that fits (else `comm` alone); otherwise `comm (pid)` in rows
+under the lanes, joined to its bar by a thin grey leader drawn beneath
+the bars. The outside labels never overlap one another or a bar: they
+are spread along the axis (`tools/label_spread.py`, the same routine the
+event and region strips use) in as many rows as it takes — up to 16 —
+for each to sit within 8% of the axis width of its bar; a burst of
+short-lived compilers (a cold vLLM start, ~90 processes in a few
+seconds) becomes a few rows of labels near the burst.
 Listed roots are outlined solid, orphans — discovered processes whose
 parent is not in the trace — dashed. A thin line with a dot on the
 parent's bar marks each fork: from the parent's bar at the child's start

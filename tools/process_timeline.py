@@ -127,3 +127,70 @@ def name_history(p: TimelineProcess) -> str:
     """'python3.12 -> VLLM::EngineCor' (every name it had, oldest first)."""
     names = [c for i, (_t, c) in enumerate(p.comms) if i == 0 or c != p.comms[i - 1][1]]
     return " -> ".join(names) if names else p.comm
+
+
+# ---------------------------------------------------------------------------
+# Labels: every process gets one
+# ---------------------------------------------------------------------------
+
+LABEL_GAP = 0.3   # lanes between the last lane and the first label row
+LABEL_ROW = 0.9   # lanes per external-label row
+
+
+@dataclass
+class ProcessLabel:
+    key: tuple
+    text: str
+    lane: int
+    anchor_s: float            # the bar's centre (s from the trace start)
+    x_s: float                 # the label's centre
+    row: int                   # -1: inside its bar; else its row under the lanes
+
+
+LABEL_MAX_ROWS = 16      # outside-label rows at most
+LABEL_MAX_SHIFT = 0.08   # a label within this fraction of the axis width of its bar, rows allowing
+
+
+def place_labels(procs: list[TimelineProcess], lanes: dict, t0_ns: int, t_end_ns: int,
+                 width_units: float, text_width, pad_units: float = 4.0) -> tuple[list, int]:
+    """A label for every process: `comm (pid)` inside its bar where it
+    fits (else `comm` alone); otherwise outside, in rows under the lanes,
+    joined to the bar by a leader. The outside labels are spread with
+    label_spread.assign_rows over the width of the axis, so none overlaps
+    another, and none overlaps a bar (they are under the lanes): as many
+    rows as it takes (up to LABEL_MAX_ROWS) for each to stay within
+    LABEL_MAX_SHIFT of the axis width from its bar. Units:
+    whatever text_width(text) and width_units measure the axis width in
+    (points, pixels). Returns (labels, number of label rows)."""
+    import label_spread
+    span_s = max((t_end_ns - t0_ns) / 1e9, 1e-9)
+    per_s = width_units / span_s
+    labels, outside = [], []
+    for p in procs:
+        start = (p.start_ns - t0_ns) / 1e9
+        end = (p.end_ns - t0_ns) / 1e9
+        bar = (end - start) * per_s
+        full = f"{p.comm} ({p.pid})"
+        text = full if text_width(full) + pad_units < bar else p.comm
+        lab = ProcessLabel(key=p.key, text=text, lane=lanes[p.key],
+                           anchor_s=(start + end) / 2, x_s=(start + end) / 2, row=-1)
+        if text_width(text) + pad_units >= bar:
+            lab.text = full
+            outside.append(lab)
+        labels.append(lab)
+    rows, centres = label_spread.assign_rows(
+        [(lab.anchor_s * per_s, text_width(lab.text)) for lab in outside],
+        0.0, width_units, pad_units, max_rows=LABEL_MAX_ROWS,
+        max_shift=LABEL_MAX_SHIFT * width_units)
+    for lab, r, c in zip(outside, rows, centres):
+        lab.row, lab.x_s = r, c / per_s
+    return labels, (max(rows) + 1 if rows else 0)
+
+
+def label_row_y(n_lanes: int, row: int) -> float:
+    """Centre of external-label row `row`, in lane units (lane 0 on top)."""
+    return n_lanes + LABEL_GAP + (row + 0.5) * LABEL_ROW
+
+
+def height_in_lanes(n_lanes: int, n_rows: int) -> float:
+    return n_lanes + (LABEL_GAP + n_rows * LABEL_ROW if n_rows else 0.0)
