@@ -38,6 +38,18 @@ def scale_factor() -> float:
     return _scale_factor
 
 
+# --fit-axis-to-data (opt-in): a ceiling more than this many times the
+# largest plotted value is "off-scale" — the data would fill under a fifth
+# of an axis stretched to it — so the axis fits the data and the Peak is
+# written, not drawn.
+OFFSCALE_FACTOR = 5.0
+
+
+def off_scale(peak: float | None, data_max: float) -> bool:
+    """Is this ceiling off-scale for data up to data_max (see OFFSCALE_FACTOR)?"""
+    return peak is not None and peak > 0 and peak > OFFSCALE_FACTOR * max(data_max, 0.0)
+
+
 def byte_unit(largest: float | None, rate: bool = False,
               factor: float | None = None) -> tuple[float, str]:
     """(divisor, unit label) for values up to `largest` bytes (or bytes/s):

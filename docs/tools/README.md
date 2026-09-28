@@ -86,6 +86,14 @@ Quality / size knobs:
   the given window (per-probe kernel size). `0` (default) = no
   smoothing. Cumulative companion panels stay raw so their run totals
   remain faithful.
+- `--fit-axis-to-data` (off by default): a panel whose ceiling (the
+  Peak line) is more than 5× the largest plotted value — the data would
+  fill under a fifth of an axis stretched to it — gets a y-axis sized to
+  its data and the ceiling written as `Peak: <value> (off-scale)` instead
+  of drawn (the full-system figure's NVLink panel: a few KiB/s under a
+  279 GiB/s ceiling). Panels whose ceiling is near their data are
+  unchanged. Off, every panel reaches its Peak as before. Also on
+  `visualize_interactive.py` and passed through by the vLLM example.
 - `--unit-scale-factor <F>` (default 2, must be ≥ 1): the byte-unit
   threshold — an axis, run total or footer rate uses the largest prefix P
   (KiB, MiB, GiB, TiB) with its largest value ≥ F × P (see "Byte units"

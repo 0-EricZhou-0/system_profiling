@@ -60,7 +60,7 @@ DEV_FQNS = ["disk__read_bytes.sum.per_second", "disk__write_bytes.sum.per_second
 
 
 def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_values=None,
-                disk=False, devices=None):
+                disk=False, devices=None, pcie_peak=0.0):
     """Write a trace of `procs` (see proc()) over duration_s seconds.
     regions: (name, start_s, end_s). gpu_fqns: GPU metrics to add, each
     a constant: gpu_values[i], else 50. disk: also a Disk trace with each
@@ -144,7 +144,8 @@ def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_va
         g.header.hostname = "synthetic"
         g.header.sampling_frequency_hz = HZ
         g.scope_metric_names.add(scope=metric_catalog_pb2.SCOPE_GPU, fqns=list(gpu_fqns))
-        g.tracked_gpus.add(device_index=0, device_name="GPU", chip_name="X")
+        g.tracked_gpus.add(device_index=0, device_name="GPU", chip_name="X",
+                           peak_pcie_bw_bytes_per_s=pcie_peak)
         for ts in ticks:
             g.samples.add(timestamp_ns=ts, gpu_index=0,
                           values=list(gpu_values or [50.0] * len(gpu_fqns)))

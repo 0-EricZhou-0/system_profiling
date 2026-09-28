@@ -525,6 +525,7 @@ def _render_metric_panel(
     pid_color_map: dict[int, str],
     display_hz: float = 0.0,
     plan: _LegendPlan | None = None,
+    fit_to_data: bool = False,
 ) -> None:
     if plan is None:
         plan = _plan_legend(panel, series_list, "metric", projector, projection,
@@ -561,7 +562,17 @@ def _render_metric_panel(
         _plot_styled(ax, time_s, scale_fn(vals), key, plan)
 
     peak_scaled = None
-    if peak_hint is not None and peak_hint > 0:
+    data_max = units.largest(v for _k, _t, v in plotted)
+    if fit_to_data and units.off_scale(peak_hint, data_max):
+        # --fit-axis-to-data: the axis fits the data; the ceiling, far
+        # above it, is written instead of drawn.
+        unit_str = f" {ylabel}" if ylabel else ""
+        ax.text(MAX_LABEL_X_AXES_FRAC, 0.97,
+                f"Peak: {_fmt_plain(scale_fn(peak_hint))}{unit_str} (off-scale)",
+                transform=ax.transAxes, va="top", ha="left",
+                fontsize=8, color="black", fontweight="bold", zorder=5)
+        ax.set_ylim(0.0, max(scale_fn(data_max), 1e-12) * YLIM_HEADROOM)
+    elif peak_hint is not None and peak_hint > 0:
         peak_scaled = scale_fn(peak_hint)
         # Dotted black horizontal reference line at the peak (ceiling).
         ax.axhline(peak_scaled, color="black", linestyle=":",
@@ -583,7 +594,7 @@ def _render_metric_panel(
     # peak-bearing panel). No peak -> let matplotlib pick the top.
     if peak_scaled is not None:
         ax.set_ylim(0.0, peak_scaled * YLIM_HEADROOM)
-    else:
+    elif not (fit_to_data and units.off_scale(peak_hint, data_max)):
         ax.set_ylim(bottom=0.0)
 
     # Plain (non-scientific) numeric tick labels on both axes.
@@ -1173,6 +1184,13 @@ def main() -> int:
     parser.add_argument("--panel-layout", default=None,
                         help="Override PanelLayout pbtxt (default: "
                              "configs/visualizer_panels.pbtxt)")
+    parser.add_argument("--fit-axis-to-data", action="store_true",
+                        help="Size a panel's y-axis to its data when its "
+                             "ceiling (the Peak line) is more than "
+                             f"{units.OFFSCALE_FACTOR:g}x the largest plotted "
+                             "value; the Peak is then written as 'Peak: <value> "
+                             "(off-scale)' instead of drawn. Default: off (the "
+                             "axis reaches the Peak).")
     parser.add_argument("--unit-scale-factor", type=_unit_scale_factor,
                         default=units.DEFAULT_SCALE_FACTOR, metavar="F",
                         help="Byte-unit threshold: an axis (and every run total "
@@ -1196,7 +1214,8 @@ def main() -> int:
                             panel_layout=args.panel_layout,
                             smooth_window_s=args.smooth_window_s,
                             display_hz=args.display_hz,
-                            unit_scale_factor=args.unit_scale_factor)
+                            unit_scale_factor=args.unit_scale_factor,
+                            fit_axis_to_data=args.fit_axis_to_data)
     if rendered is None:
         return 1
 
@@ -1224,10 +1243,12 @@ class Rendered:
 
 def build_figure(metadata, *, catalog=None, panel_layout=None,
                  smooth_window_s: float = 0.0, display_hz: float = 0.0,
-                 unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR):
+                 unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR,
+                 fit_axis_to_data: bool = False):
     """Render the trace whose session_metadata.pb is `metadata` into a
     matplotlib figure (not saved). Returns a Rendered, or None when there
-    is nothing to plot. unit_scale_factor: see units.py (ValueError < 1)."""
+    is nothing to plot. unit_scale_factor: see units.py (ValueError < 1).
+    fit_axis_to_data: see --fit-axis-to-data."""
     units.set_scale_factor(unit_scale_factor)
     metadata_path = Path(metadata).resolve()
     _log(f"loading session metadata from {metadata_path}")
@@ -1439,6 +1460,7 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
                 pid_color_map=pid_color_map,
                 display_hz=display_hz,
                 plan=plan,
+                fit_to_data=fit_axis_to_data,
             )
 
     # ---------------- Strips + overlays ----------------

@@ -433,6 +433,9 @@ _RENDER_BACKEND = "canvas"
 # peak-reference line isn't drawn right at the plot edge.
 _YLIM_HEADROOM = 1.10
 
+# --fit-axis-to-data (see units.OFFSCALE_FACTOR). Set by main() / build_static().
+_FIT_AXIS = False
+
 
 # Per-theme colors. The plot internals are handled by Bokeh's
 # `dark_minimal` theme; this table covers the bits Bokeh doesn't
@@ -655,7 +658,16 @@ def _build_panel(
     # can't drift past the meaningful range. When no peak is known,
     # only clamp the floor at 0 — every metric this profiler emits is
     # non-negative, and a drifting negative axis just wastes space.
-    if peak_hint is not None and peak_hint > 0:
+    data_max = units.largest(projection[(s.fqn, s.scope_key)][1] for s in series_list)
+    if _FIT_AXIS and units.off_scale(peak_hint, data_max):
+        # The axis fits the data; the ceiling, far above it, is written.
+        unit_str = f" {ylabel}" if ylabel else ""
+        fig.y_range.bounds = (0.0, None)
+        fig.add_layout(Label(x=4, x_units="screen", y=_FRAME_HEIGHT - 4, y_units="screen",
+                             text=f"Peak: {_fmt_total(scale_fn(peak_hint))}{unit_str} (off-scale)",
+                             text_font_size="8pt", text_font_style="bold",
+                             text_baseline="top"))
+    elif peak_hint is not None and peak_hint > 0:
         scaled_peak = scale_fn(peak_hint)
         upper = scaled_peak * _YLIM_HEADROOM
         fig.y_range = Range1d(start=0.0, end=upper, bounds=(0.0, upper))
@@ -1482,12 +1494,16 @@ def static_page(metadata, **kw) -> str:
 
 def build_static(metadata, *, catalog=None, panel_layout=None,
                  smooth_window_s: float = 0.0, display_hz: float = 0.0,
-                 unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR):
+                 unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR,
+                 fit_axis_to_data: bool = False):
     """Load the trace whose session_metadata.pb is `metadata` and build
     the static page's Bokeh document (not written). Returns a
     StaticDocument, or None when there is nothing to render.
-    unit_scale_factor: see units.py (ValueError < 1)."""
+    unit_scale_factor: see units.py (ValueError < 1); fit_axis_to_data:
+    see --fit-axis-to-data."""
+    global _FIT_AXIS
     units.set_scale_factor(unit_scale_factor)
+    _FIT_AXIS = fit_axis_to_data
     metadata_path = Path(metadata).resolve()
     meta = _load_session_metadata(metadata_path)
     cat = (metric_catalog.load_catalog(catalog) if catalog
@@ -1776,7 +1792,7 @@ def _unit_scale_factor(text: str) -> float:
 
 
 def main() -> int:
-    global _RENDER_BACKEND, _THEME
+    global _RENDER_BACKEND, _THEME, _FIT_AXIS
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("metadata", help="Path to session_metadata.pb")
@@ -1802,6 +1818,13 @@ def main() -> int:
     parser.add_argument("--allow-websocket-origin", action="append", default=None,
                         help="Live mode: extra origin allowed for the Bokeh "
                              "WebSocket. Repeatable. Default: '*' (any).")
+    parser.add_argument("--fit-axis-to-data", action="store_true",
+                        help="Size a panel's y-axis to its data when its "
+                             "ceiling (the Peak line) is more than "
+                             f"{units.OFFSCALE_FACTOR:g}x the largest plotted "
+                             "value; the Peak is then written as 'Peak: <value> "
+                             "(off-scale)' instead of drawn. Default: off (the "
+                             "axis reaches the Peak).")
     parser.add_argument("--unit-scale-factor", type=_unit_scale_factor,
                         default=units.DEFAULT_SCALE_FACTOR, metavar="F",
                         help="Byte-unit threshold: an axis (and every run total "
@@ -1842,6 +1865,7 @@ def main() -> int:
     _RENDER_BACKEND = args.render_backend
     _THEME = args.theme
     units.set_scale_factor(args.unit_scale_factor)   # static and live mode alike
+    _FIT_AXIS = args.fit_axis_to_data
 
     metadata_path = Path(args.metadata).resolve()
     if args.live:

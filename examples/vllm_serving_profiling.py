@@ -276,6 +276,9 @@ def parser():
                     help="seconds to wait for /v1/models (default: %(default)s)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-render", action="store_true", help="skip visualize_all.py")
+    ap.add_argument("--fit-axis-to-data", action="store_true",
+                    help="passed to visualize_all.py: fit a panel's y-axis to its data when its "
+                         "ceiling is far above it (see docs/tools/README.md)")
     ap.add_argument("--unit-scale-factor", type=float, default=2.0,
                     help="byte-unit threshold passed to visualize_all.py (default: %(default)s; "
                          "see docs/tools/README.md)")
@@ -357,7 +360,8 @@ def main():
         subprocess.run([sys.executable, VISUALIZER,
                         os.path.join(args.output_dir, "session_metadata.pb"), "-o", png,
                         "--panel-layout", PANELS,
-                        "--unit-scale-factor", str(args.unit_scale_factor)], check=True)
+                        "--unit-scale-factor", str(args.unit_scale_factor)]
+                       + (["--fit-axis-to-data"] if args.fit_axis_to_data else []), check=True)
         print("figure:", png)
 
 
