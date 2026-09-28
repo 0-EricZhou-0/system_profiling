@@ -276,6 +276,9 @@ def parser():
                     help="seconds to wait for /v1/models (default: %(default)s)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-render", action="store_true", help="skip visualize_all.py")
+    ap.add_argument("--unit-scale-factor", type=float, default=2.0,
+                    help="byte-unit threshold passed to visualize_all.py (default: %(default)s; "
+                         "see docs/tools/README.md)")
     ap.add_argument("vllm_args", nargs="*", help="after `--`: extra arguments for `vllm serve`")
     return ap
 
@@ -353,7 +356,8 @@ def main():
         png = args.png or os.path.join(args.output_dir, "vllm_serving.png")
         subprocess.run([sys.executable, VISUALIZER,
                         os.path.join(args.output_dir, "session_metadata.pb"), "-o", png,
-                        "--panel-layout", PANELS], check=True)
+                        "--panel-layout", PANELS,
+                        "--unit-scale-factor", str(args.unit_scale_factor)], check=True)
         print("figure:", png)
 
 

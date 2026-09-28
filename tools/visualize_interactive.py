@@ -1341,10 +1341,13 @@ def _render_static(
 
 
 def build_static(metadata, *, catalog=None, panel_layout=None,
-                 smooth_window_s: float = 0.0, display_hz: float = 0.0):
+                 smooth_window_s: float = 0.0, display_hz: float = 0.0,
+                 unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR):
     """Load the trace whose session_metadata.pb is `metadata` and build
     the static page's Bokeh document (not written). Returns a
-    StaticDocument, or None when there is nothing to render."""
+    StaticDocument, or None when there is nothing to render.
+    unit_scale_factor: see units.py (ValueError < 1)."""
+    units.set_scale_factor(unit_scale_factor)
     metadata_path = Path(metadata).resolve()
     meta = _load_session_metadata(metadata_path)
     cat = (metric_catalog.load_catalog(catalog) if catalog
@@ -1591,6 +1594,16 @@ def _serve(html_path: Path, host: str, port: int, open_browser: bool) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _unit_scale_factor(text: str) -> float:
+    """argparse type for --unit-scale-factor (a clear error below 1)."""
+    try:
+        f = float(text)
+        units.set_scale_factor(f)          # validates
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return f
+
+
 def main() -> int:
     global _RENDER_BACKEND, _THEME
     parser = argparse.ArgumentParser(description=__doc__,
@@ -1618,6 +1631,13 @@ def main() -> int:
     parser.add_argument("--allow-websocket-origin", action="append", default=None,
                         help="Live mode: extra origin allowed for the Bokeh "
                              "WebSocket. Repeatable. Default: '*' (any).")
+    parser.add_argument("--unit-scale-factor", type=_unit_scale_factor,
+                        default=units.DEFAULT_SCALE_FACTOR, metavar="F",
+                        help="Byte-unit threshold: an axis (and every run total "
+                             "and footer rate) uses the largest prefix P with "
+                             "max value >= F x P (default: %(default)s; 1 = "
+                             "switch as soon as a value reaches the prefix; "
+                             "must be >= 1).")
     parser.add_argument("--smooth-window-s", type=float, default=0.0,
                         help="Boxcar smoothing window in seconds applied to "
                              "every smoothable metric. 0 = none. Kernel size "
@@ -1650,6 +1670,7 @@ def main() -> int:
     args = parser.parse_args()
     _RENDER_BACKEND = args.render_backend
     _THEME = args.theme
+    units.set_scale_factor(args.unit_scale_factor)   # static and live mode alike
 
     metadata_path = Path(args.metadata).resolve()
     if args.live:

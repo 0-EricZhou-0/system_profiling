@@ -2,10 +2,13 @@
 axis (rates, gauges, cumulative panels), the write-rate footer and the
 run totals.
 
-A unit is chosen from the largest value actually plotted, with a 2x
-threshold so it does not switch too early: >= 2 TiB -> TiB, >= 2 GiB ->
-GiB, >= 2 MiB -> MiB, >= 2 KiB -> KiB, else B (a 1.5 GiB peak reads as
-1536 MiB). Rates the same with "/s". An empty or all-zero series: B.
+A unit is chosen from the largest value actually plotted, with a
+threshold factor F (default 2) so it does not switch too early: >= F TiB
+-> TiB, >= F GiB -> GiB, >= F MiB -> MiB, >= F KiB -> KiB, else B (with
+F = 2 a 1.5 GiB peak reads as 1536 MiB; F = 1 switches as soon as a value
+reaches the prefix). Rates the same with "/s". An empty or all-zero
+series: B. F is one process-wide setting (set_scale_factor; the tools'
+--unit-scale-factor), so every axis, total and footer of a render agree.
 """
 
 from __future__ import annotations
@@ -16,20 +19,42 @@ import numpy as np
 
 _LADDER = [(1024.0 ** 4, "TiB"), (1024.0 ** 3, "GiB"), (1024.0 ** 2, "MiB"), (1024.0, "KiB")]
 
+DEFAULT_SCALE_FACTOR = 2.0
+_scale_factor = DEFAULT_SCALE_FACTOR
 
-def byte_unit(largest: float | None, rate: bool = False) -> tuple[float, str]:
-    """(divisor, unit label) for values up to `largest` bytes (or bytes/s)."""
+
+def set_scale_factor(factor: float) -> None:
+    """Set the threshold factor for this process. ValueError unless it is
+    a finite number >= 1."""
+    global _scale_factor
+    f = float(factor)
+    if not math.isfinite(f) or f < 1.0:
+        raise ValueError(f"unit scale factor must be >= 1 (1 = switch to a prefix as soon "
+                         f"as a value reaches it), got {factor!r}")
+    _scale_factor = f
+
+
+def scale_factor() -> float:
+    return _scale_factor
+
+
+def byte_unit(largest: float | None, rate: bool = False,
+              factor: float | None = None) -> tuple[float, str]:
+    """(divisor, unit label) for values up to `largest` bytes (or bytes/s):
+    the largest prefix P with largest >= factor x P (factor: the process
+    setting unless given)."""
+    f = _scale_factor if factor is None else factor
     sfx = "/s" if rate else ""
     if largest is not None and math.isfinite(largest):
         for div, name in _LADDER:
-            if largest >= 2 * div:
+            if largest >= f * div:
                 return div, name + sfx
     return 1.0, "B" + sfx
 
 
-def fmt_bytes(v: float, rate: bool = False) -> str:
+def fmt_bytes(v: float, rate: bool = False, factor: float | None = None) -> str:
     """One value in its own unit (the same rule): '1536 MiB', '3.2 GiB/s'."""
-    div, name = byte_unit(abs(v), rate)
+    div, name = byte_unit(abs(v), rate, factor)
     x = v / div
     if x == int(x):
         s = f"{int(x):,}"

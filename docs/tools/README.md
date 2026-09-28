@@ -86,6 +86,12 @@ Quality / size knobs:
   the given window (per-probe kernel size). `0` (default) = no
   smoothing. Cumulative companion panels stay raw so their run totals
   remain faithful.
+- `--unit-scale-factor <F>` (default 2, must be ≥ 1): the byte-unit
+  threshold — an axis, run total or footer rate uses the largest prefix P
+  (KiB, MiB, GiB, TiB) with its largest value ≥ F × P (see "Byte units"
+  below); 1 switches as soon as a value reaches the prefix. Also on
+  `visualize_interactive.py` (static and live mode) and passed through by
+  `examples/vllm_serving_profiling.py`.
 - `--display-hz <Hz>` stride-decimates every series to the given
   display rate after smoothing. `0` (default) keeps the raw sampling
   rate. Useful for cutting render time on high-frequency GPU traces.
@@ -154,8 +160,9 @@ page 0.84 / 0.56 px).
 **Byte units.** Every bytes and bytes/s axis — rates, gauges and
 cumulative panels, in both renderers — takes its unit from the largest
 value actually plotted on it (after any smoothing or decimation asked
-for; the Peak line does not choose it), with a 2x threshold so it does
-not switch too early: ≥ 2 TiB → TiB, ≥ 2 GiB → GiB, ≥ 2 MiB → MiB,
+for; the Peak line does not choose it), with a threshold factor F
+(`--unit-scale-factor`, default 2) so it does not switch too early; with
+F = 2: ≥ 2 TiB → TiB, ≥ 2 GiB → GiB, ≥ 2 MiB → MiB,
 ≥ 2 KiB → KiB, else B (a 1.5 GiB peak reads as 1,536 MiB); rates the same
 with `/s`; an empty or all-zero panel B. The Peak line is drawn as before
 and labelled in the axis's unit. Run totals in legends and the write-rate

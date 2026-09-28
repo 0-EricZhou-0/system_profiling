@@ -56,3 +56,49 @@ def test_axis_unit_from_the_data_bokeh(tmp_path):
         doc = visualize_interactive.build_static(_trace(tmp_path / str(bps), bps))
         [f] = [f for p, k, f in doc.panel_figs if p.series_glob.startswith("pcie") and k == "metric"]
         assert f.yaxis[0].axis_label == want, (bps, f.yaxis[0].axis_label)
+
+
+@pytest.mark.parametrize("factor,value,unit", [
+    (1.0, K - 1, "B"), (1.0, K, "KiB"), (1.0, G - 1, "MiB"), (1.0, G, "GiB"),
+    (2.0, 2 * G - 1, "MiB"), (2.0, 2 * G, "GiB"),
+    (4.0, 4 * K - 1, "B"), (4.0, 4 * K, "KiB"), (4.0, 4 * G - 1, "MiB"), (4.0, 4 * G, "GiB"),
+])
+def test_factor_thresholds(factor, value, unit):
+    assert units.byte_unit(value, factor=factor)[1] == unit
+    assert units.byte_unit(value, rate=True, factor=factor)[1] == unit + "/s"
+
+
+def test_factor_below_one_rejected():
+    with pytest.raises(ValueError, match=">= 1"):
+        units.set_scale_factor(0.5)
+    assert units.scale_factor() == units.DEFAULT_SCALE_FACTOR
+
+
+@pytest.mark.parametrize("tool", ["visualize_all.py", "visualize_interactive.py"])
+def test_cli_rejects_factor_below_one(tool):
+    import os
+    import subprocess
+    import sys
+    if tool == "visualize_interactive.py":
+        pytest.importorskip("bokeh")
+    p = subprocess.run([sys.executable, os.path.join(viz_trace.TOOLS, tool), "none.pb",
+                        "--unit-scale-factor", "0.5"], capture_output=True, text=True, timeout=60)
+    assert p.returncode == 2 and "--unit-scale-factor" in p.stderr and ">= 1" in p.stderr, p.stderr
+
+
+def test_factor_changes_the_axis_both_renderers(tmp_path):
+    matplotlib = pytest.importorskip("matplotlib")
+    matplotlib.use("Agg")
+    pytest.importorskip("bokeh")
+    import visualize_all
+    import visualize_interactive
+    try:
+        for bps, factor, want in ((3 * G, 4.0, "MiB/s"), (1.5 * G, 1.0, "GiB/s")):
+            meta = _trace(tmp_path / f"{bps}-{factor}", bps)
+            r = visualize_all.build_figure(meta, unit_scale_factor=factor)
+            [ax] = [ax for p, _s, k, ax in r.panel_axes if p.series_glob.startswith("pcie") and k == "metric"]
+            doc = visualize_interactive.build_static(meta, unit_scale_factor=factor)
+            [f] = [f for p, k, f in doc.panel_figs if p.series_glob.startswith("pcie") and k == "metric"]
+            assert ax.get_ylabel() == f.yaxis[0].axis_label == want, (bps, factor)
+    finally:
+        units.set_scale_factor(units.DEFAULT_SCALE_FACTOR)

@@ -1140,6 +1140,16 @@ def _panel_group(series_list: list[metric_layout.ResolvedSeries],
 # Main
 # ---------------------------------------------------------------------------
 
+def _unit_scale_factor(text: str) -> float:
+    """argparse type for --unit-scale-factor (a clear error below 1)."""
+    try:
+        f = float(text)
+        units.set_scale_factor(f)          # validates
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return f
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1152,6 +1162,13 @@ def main() -> int:
     parser.add_argument("--panel-layout", default=None,
                         help="Override PanelLayout pbtxt (default: "
                              "configs/visualizer_panels.pbtxt)")
+    parser.add_argument("--unit-scale-factor", type=_unit_scale_factor,
+                        default=units.DEFAULT_SCALE_FACTOR, metavar="F",
+                        help="Byte-unit threshold: an axis (and every run total "
+                             "and footer rate) uses the largest prefix P with "
+                             "max value >= F x P (default: %(default)s; 1 = "
+                             "switch as soon as a value reaches the prefix; "
+                             "must be >= 1).")
     parser.add_argument("--smooth-window-s", type=float, default=0.0,
                         help="Boxcar smoothing window in seconds. 0 = none.")
     parser.add_argument("--display-hz", type=float, default=0.0,
@@ -1167,7 +1184,8 @@ def main() -> int:
     rendered = build_figure(args.metadata, catalog=args.catalog,
                             panel_layout=args.panel_layout,
                             smooth_window_s=args.smooth_window_s,
-                            display_hz=args.display_hz)
+                            display_hz=args.display_hz,
+                            unit_scale_factor=args.unit_scale_factor)
     if rendered is None:
         return 1
 
@@ -1194,10 +1212,12 @@ class Rendered:
 
 
 def build_figure(metadata, *, catalog=None, panel_layout=None,
-                 smooth_window_s: float = 0.0, display_hz: float = 0.0):
+                 smooth_window_s: float = 0.0, display_hz: float = 0.0,
+                 unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR):
     """Render the trace whose session_metadata.pb is `metadata` into a
     matplotlib figure (not saved). Returns a Rendered, or None when there
-    is nothing to plot."""
+    is nothing to plot. unit_scale_factor: see units.py (ValueError < 1)."""
+    units.set_scale_factor(unit_scale_factor)
     metadata_path = Path(metadata).resolve()
     _log(f"loading session metadata from {metadata_path}")
     meta = _load_session_metadata(metadata_path)
