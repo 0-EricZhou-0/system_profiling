@@ -91,7 +91,18 @@ public:
         uint32_t parent            = 0;
         uint64_t lastCpuNs         = 0;
         uint64_t lastChildrenCpuNs = 0;
+        uint64_t startNs           = 0;   // identity for the host's reaped set
+        uint32_t rootParent        = 0;   // parent of its tree's listed root
     };
+    //   discoveredMeta: start time and root parent of each discovered PID
+    //     in discoveredParent, taken when first seen (reap-chain rule).
+    struct DiscoveredMeta {
+        uint64_t startNs    = 0;
+        uint32_t rootParent = 0;
+    };
+    std::unordered_map<uint32_t, DiscoveredMeta> discoveredMeta;
+    // The host's orphan reaper and its reaped set, refreshed every tick.
+    ProcessTrackingProbe::ReapRuleState reap;
     struct ParentBaseline {
         uint64_t childrenCpuNs = 0;
         uint64_t startTime     = 0;   // guards against a reused PID
@@ -107,6 +118,7 @@ public:
     void NoteExited(uint32_t pid);
     void AttributeTails(uint64_t tsNs,
                         const std::unordered_set<uint32_t>& trackedPids);
+    int64_t ChainCpu(uint32_t pid, internal::CpuTailRecord& r, int depth);
 
     // Per-flush write accounting
     internal::SystemPendingFlushStats flushStatsPending;
@@ -124,10 +136,55 @@ void SystemProfiler::Impl::NoteExited(uint32_t pid) {
     discoveredParent.erase(dp);
     if (auto b = prevPID.find(pid); b != prevPID.end()) c.lastCpuNs = b->second.cpuNs;
     if (auto k = childrenCpu.find(pid); k != childrenCpu.end()) c.lastChildrenCpuNs = k->second.childrenCpuNs;
+    if (auto m = discoveredMeta.find(pid); m != discoveredMeta.end()) {
+        c.startNs    = m->second.startNs;
+        c.rootParent = m->second.rootParent;
+    }
     // Reparented since discovery (its parent exited)? Then the new parent
     // reaps it; follow it if that one is tracked too.
     if (auto st = internal::ReadProcStat("/proc", pid); st && st->ppid != 0) c.parent = st->ppid;
     awaitingTail[pid] = c;
+}
+
+// A reap chain: `pid` was reaped (by its tracked parent, whose cutime
+// grew by pid's whole CPU *including every child pid had reaped*) and
+// some of pid's own tracked children exited in the same interval,
+// before pid's cutime could be read again. The CPU of each child that
+// pid reaped is already in that child's samples (and its children's):
+// return it, to be taken out of pid's tail. Whether pid reaped a child
+// or exited first, leaving it to a subreaper or init, is the reap-chain
+// rule (ProcessTrackingProbe::WhoReaped): the host reaped it -> not in
+// pid; unknown -> listed as ambiguous and not subtracted (its CPU may be
+// counted twice), never guessed. Settles every child it looks at.
+int64_t SystemProfiler::Impl::ChainCpu(uint32_t pid, internal::CpuTailRecord& r, int depth) {
+    if (depth >= 64) return 0;
+    std::vector<uint32_t> kidsOf;
+    for (const auto& [k, e] : awaitingTail)
+        if (e.parent == pid) kidsOf.push_back(k);
+    int64_t sub = 0;
+    for (uint32_t k : kidsOf) {
+        auto it = awaitingTail.find(k);
+        if (it == awaitingTail.end()) continue;
+        if (auto st = internal::ReadProcStat("/proc", k)) {   // not reaped: reparented
+            it->second.parent = st->ppid;
+            continue;
+        }
+        const ExitedChild e = it->second;
+        awaitingTail.erase(it);
+        tailSettled.insert(k);
+        switch (SystemProfiler::WhoReaped(reap, k, e.startNs, e.rootParent)) {
+            case ReapedBy::Host:
+                break;
+            case ReapedBy::Unknown:
+                r.ambiguousPids.push_back(k);
+                break;
+            case ReapedBy::Parent:
+                r.chainPids.push_back(k);
+                sub += static_cast<int64_t>(e.lastCpuNs + e.lastChildrenCpuNs) + ChainCpu(k, r, depth + 1);
+                break;
+        }
+    }
+    return sub;
 }
 
 // Once per tick. For each tracked process with discovered children: read
@@ -139,6 +196,12 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
     for (auto it = tailSettled.begin(); it != tailSettled.end(); ) {
         it = trackedPids.count(*it) ? std::next(it) : tailSettled.erase(it);
     }
+    std::erase_if(discoveredMeta, [&](const auto& kv) {
+        return !discoveredParent.count(kv.first) && !awaitingTail.count(kv.first);
+    });
+    std::erase_if(reap.adopted, [&](const auto& kv) {
+        return !trackedPids.count(kv.first) && !awaitingTail.count(kv.first);
+    });
     if (discoveredParent.empty() && awaitingTail.empty()) {
         childrenCpu.clear();
         return;
@@ -192,8 +255,12 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
             if (!before || !st ||
                 (before->cutime == st->cutime && before->cstime == st->cstime)) break;
         }
-        if (!st) {                       // parent gone: nobody left to measure
-            for (uint32_t c : waiting) { awaitingTail.erase(c); tailSettled.insert(c); }
+        if (!st) {                       // parent gone: nobody left to measure it
+            // ...unless the parent itself awaits its tail: then its tracked
+            // parent reaped it, and the children it reaped in the same
+            // interval are inside that reap (ChainCpu). Keep them for it.
+            if (!awaitingTail.count(parent))
+                for (uint32_t c : waiting) { awaitingTail.erase(c); tailSettled.insert(c); }
             childrenCpu.erase(parent);
             continue;
         }
@@ -202,11 +269,12 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
         const bool haveBase = base != childrenCpu.end() && base->second.startTime == st->startTime;
         if (haveBase && !reaped.empty()) {
             int64_t tail = static_cast<int64_t>(cur) - static_cast<int64_t>(base->second.childrenCpuNs);
+            internal::CpuTailRecord r;
             for (uint32_t c : reaped) {
                 const auto& e = awaitingTail[c];
                 tail -= static_cast<int64_t>(e.lastCpuNs + e.lastChildrenCpuNs);
+                tail -= ChainCpu(c, r, 0);
             }
-            internal::CpuTailRecord r;
             r.timestamp_ns = tsNs;
             r.parent_pid   = parent;
             r.pids         = reaped;
@@ -347,6 +415,8 @@ void SystemProfiler::Start() {
                 if (entry.discovered && !entry.pending_removal &&
                     !impl.awaitingTail.count(pid) && !impl.tailSettled.count(pid)) {
                     impl.discoveredParent[pid] = entry.parent_pid;
+                    if (!impl.discoveredMeta.count(pid))
+                        impl.discoveredMeta[pid] = {entry.start_time_ns, RootParentOf(entry, snapshot)};
                 }
                 if (entry.pending_removal) { impl.NoteExited(pid); continue; }
 
@@ -432,6 +502,7 @@ void SystemProfiler::Start() {
             for (const auto& [pid, parent] : impl.discoveredParent)
                 if (!snapshotPids.count(pid)) left.push_back(pid);
             for (uint32_t pid : left) impl.NoteExited(pid);
+            this->RefreshReapRule(impl.reap);
             impl.AttributeTails(tsNs, snapshotPids);
         }
     });

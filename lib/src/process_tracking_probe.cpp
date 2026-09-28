@@ -193,7 +193,53 @@ void ProcessTrackingProbe::SetIoBeforeTracking(uint32_t pid, const IoCounters& i
     }
 }
 
-void ProcessTrackingProbe::NoteAdoptedExit(uint32_t, uint64_t) {}
+void ProcessTrackingProbe::NoteAdoptedExit(uint32_t pid, uint64_t startTimeTicks) {
+    std::lock_guard<std::mutex> lk(adoptedMutex_);
+    adoptedIncoming_.emplace_back(pid, internal::BootTicksToSteadyNs(startTimeTicks));
+}
+
+void ProcessTrackingProbe::SetHostReaper(uint32_t hostPid) {
+    uint32_t none = 0;
+    if (hostReaper_.compare_exchange_strong(none, hostPid) && hostPid != 0)
+        std::cerr << "[cupti-profiler] host " << hostPid << " reaps adopted orphans: reap chains "
+                     "(CPU tails, reaped I/O) are resolved with its reaped set\n";
+}
+
+void ProcessTrackingProbe::RefreshReapRule(ReapRuleState& st) const {
+    st.host     = hostReaper_.load();
+    st.reaperOn = st.host != 0 && SnapshotDiscoveryStats().has_value();
+    std::lock_guard<std::mutex> lk(adoptedMutex_);
+    for (const auto& [p, ns] : adoptedIncoming_) st.adopted[p] = ns;
+    adoptedIncoming_.clear();
+}
+
+// Matched by PID and start time (both conversions of the same kernel
+// start tick, so within microseconds of each other; a later owner of the
+// number started at least one 10 ms tick later).
+ProcessTrackingProbe::ReapedBy ProcessTrackingProbe::WhoReaped(
+    const ReapRuleState& st, uint32_t pid, uint64_t startNs, uint32_t rootParent)
+{
+    if (auto it = st.adopted.find(pid); it != st.adopted.end()) {
+        if (startNs == 0 || it->second == 0) return ReapedBy::Host;
+        const uint64_t d = startNs > it->second ? startNs - it->second : it->second - startNs;
+        if (d < 5'000'000) return ReapedBy::Host;
+    }
+    if (st.reaperOn && rootParent == st.host) return ReapedBy::Parent;
+    return ReapedBy::Unknown;
+}
+
+uint32_t ProcessTrackingProbe::RootParentOf(const ProcessEntry& e,
+                                            const std::vector<ProcessEntry>& snapshot) {
+    const ProcessEntry* cur = &e;
+    for (int depth = 0; depth < 64; ++depth) {
+        if (!cur->discovered) return cur->parent_pid;
+        auto up = std::find_if(snapshot.begin(), snapshot.end(),
+                               [&](const ProcessEntry& x) { return x.pid == cur->parent_pid; });
+        if (up == snapshot.end()) return 0;
+        cur = &*up;
+    }
+    return 0;
+}
 
 void ProcessTrackingProbe::SetInitialProcesses(std::vector<ProcessEntry> entries) {
     std::vector<std::pair<ProcessEntry, int>> made;

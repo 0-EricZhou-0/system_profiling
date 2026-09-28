@@ -52,4 +52,14 @@ message CpuTail {
     uint32          parent_pid               = 2;  // the tracked parent that reaped
     repeated uint32 pids                     = 3;  // one = that child's own tail
     uint64          cpu_after_last_sample_ns = 4;
+    // Reap chains: tracked descendants of `pids` that exited within the
+    // same sample interval, which a child in `pids` reaped (reap-chain
+    // rule: the host's orphan reaper runs and did not reap them). Their
+    // CPU, already in their own samples, is taken out of this tail.
+    repeated uint32 chain_pids               = 5;
+    // Tracked descendants of `pids` that exited within the same interval
+    // but may have been reaped by a subreaper or init instead (the host's
+    // orphan reaper is off, or they are not under the host): not taken
+    // out, so their CPU may be counted twice. Never guessed.
+    repeated uint32 ambiguous_pids           = 6;
 }

@@ -464,6 +464,7 @@ int main(int argc, char** argv) {
         if (hdr.type == MSG_HOST_REAPER) {
             std::cerr << "[sidecar] MSG_HOST_REAPER: parent " << ::getppid()
                       << " reaps the adopted orphans reported to it\n";
+            if (sys) sys->SetHostReaper(static_cast<uint32_t>(::getppid()));
             if (dsk) dsk->SetHostReaper(static_cast<uint32_t>(::getppid()));
             SendStatus(ProfilerError::Ok);
             continue;

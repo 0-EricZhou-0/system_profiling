@@ -77,6 +77,8 @@ struct CpuTailRecord {
     uint32_t              parent_pid   = 0;
     std::vector<uint32_t> pids;
     uint64_t              cpu_ns       = 0;
+    std::vector<uint32_t> chainPids;       // reaped in the same interval, taken out
+    std::vector<uint32_t> ambiguousPids;   // reaped by whom is unknown, left in
 };
 
 struct SystemSampleBatch {

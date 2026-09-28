@@ -62,14 +62,8 @@ public:
     /// Join threads, flush remaining data, close file.
     void Stop();
 
-    /// The host (the launcher) with this PID is a child subreaper whose
-    /// orphan reaper (adopt_orphans()) reaps the orphans descendant
-    /// tracking reports. Lets a reap chain be resolved: see
-    /// IoReapAdjustment in proto/disk_metrics.proto. Latched; 0 = no.
-    /// Thread-safe.
-    void SetHostReaper(uint32_t hostPid);
-
-    void NoteAdoptedExit(uint32_t pid, uint64_t startTimeTicks) override;
+    // SetHostReaper / NoteAdoptedExit: see ProcessTrackingProbe
+    // (reap chains, IoReapAdjustment in proto/disk_metrics.proto).
 
 private:
     class Impl;

@@ -94,7 +94,7 @@ public:
 
     // Once this process is a child subreaper (adopt_orphans()), tell the
     // disk probe — in-process, or in the sidecar — so it can resolve
-    // reap chains (DiskProfiler::SetHostReaper). adopt_orphans() comes
+    // reap chains (ProcessTrackingProbe::SetHostReaper: CPU tails, reaped I/O). adopt_orphans() comes
     // before the workload is spawned, so checking at Start() and at
     // every AddTrackedProcess() catches it before any root's tree runs.
     bool hostReaperSent = false;
@@ -670,8 +670,9 @@ void ProfilerSuite::AddTrackedProcess(uint32_t pid, std::string alias, bool trac
 
 void ProfilerSuite::Impl::SyncHostReaper() {
     if (hostReaperSent || !started || !ChildSubreaperEnabled()) return;
+    if (SysLegacy())  systemProfiler.SetHostReaper(static_cast<uint32_t>(::getpid()));
     if (DiskLegacy()) diskProfiler.SetHostReaper(static_cast<uint32_t>(::getpid()));
-    if (sidecar && diskEnabled && !DiskLegacy()) {
+    if (sidecar && ((sysEnabled && !SysLegacy()) || (diskEnabled && !DiskLegacy()))) {
         if (auto e = sidecar->SendHostReaper(); e != ProfilerError::Ok) {
             std::cerr << "[ProfilerSuite] sidecar SendHostReaper: " << ToString(e) << "\n";
             return;

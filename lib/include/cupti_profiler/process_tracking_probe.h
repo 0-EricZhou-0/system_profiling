@@ -51,6 +51,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <optional>
@@ -197,11 +198,17 @@ public:
 
     /// Descendant tracking calls this for a discovered process that
     /// exited adopted by the host (the launcher, a subreaper), right
-    /// before the host's orphan reaper is asked to reap it: its I/O goes
-    /// to the host, not to any tracked process. `startTimeTicks` is
-    /// /proc/<pid>/stat field 22. Default: nothing (the disk probe uses
-    /// it, see DiskProfiler). Thread-safe.
-    virtual void NoteAdoptedExit(uint32_t pid, uint64_t startTimeTicks);
+    /// before the host's orphan reaper is asked to reap it: its CPU and
+    /// I/O go to the host, not to any tracked process. `startTimeTicks`
+    /// is /proc/<pid>/stat field 22. Thread-safe.
+    void NoteAdoptedExit(uint32_t pid, uint64_t startTimeTicks);
+
+    /// The host (the launcher) with this PID is a child subreaper whose
+    /// orphan reaper (adopt_orphans()) reaps the orphans descendant
+    /// tracking reports. Lets a reap chain be resolved: the disk probe's
+    /// IoReapAdjustment and the system probe's CpuTail. Latched; 0 = no.
+    /// Thread-safe.
+    void SetHostReaper(uint32_t hostPid);
 
     /// Replace the tracked process set in one shot with these roots
     /// (pid and alias are used; each is registered as by
@@ -236,6 +243,33 @@ public:
     void SetDiscoveryStats(const DiscoveryStats& stats);
     std::optional<DiscoveryStats> SnapshotDiscoveryStats() const;
 
+protected:
+    // Reap-chain rule shared by the System (CpuTail) and Disk
+    // (IoReapAdjustment) probes. For a tracked process C, reaped, whose
+    // tracked parent P also exited before anything read P again: did P
+    // reap C (C's CPU / I/O are then inside P's, and inside whatever reaps
+    // P), or did P exit first, leaving C to a subreaper or init?
+    //   * C in the host's reaped set: the host reaped it -> not in P;
+    //   * the host's reaper runs and C's tree hangs under the host (its
+    //     root's parent is the host): an orphan of P would have gone to
+    //     the host and been reaped by it, so P reaped C;
+    //   * else unknown: ambiguous, never guessed.
+    enum class ReapedBy { Parent, Host, Unknown };
+    struct ReapRuleState {
+        uint32_t host     = 0;       // HostReaper() at the tick
+        bool     reaperOn = false;   // host != 0 and descendant tracking runs
+        std::unordered_map<uint32_t, uint64_t> adopted;   // pid -> start (trace clock)
+    };
+    /// Once per tick, from the sample thread: the host reaper's state and
+    /// the adopted exits reported since the last call (added to `st`).
+    void RefreshReapRule(ReapRuleState& st) const;
+    static ReapedBy WhoReaped(const ReapRuleState& st, uint32_t pid, uint64_t startNs,
+                              uint32_t rootParent);
+    /// The parent of the listed root `e` descends from (for a root, its
+    /// own registered parent); 0 = unknown.
+    static uint32_t RootParentOf(const ProcessEntry& e, const std::vector<ProcessEntry>& snapshot);
+    uint32_t HostReaper() const { return hostReaper_.load(); }
+
 private:
     std::pair<ProcessEntry, int> MakeRoot(uint32_t pid, std::string alias);
     void InsertLocked(ProcessEntry e, int pidfd);
@@ -256,6 +290,10 @@ private:
     uint64_t                      nextSerial_   = 1;
     uint64_t                      lastCommNs_   = 0;
     std::optional<DiscoveryStats> discoveryStats_;
+
+    std::atomic<uint32_t> hostReaper_{0};
+    mutable std::mutex    adoptedMutex_;
+    mutable std::vector<std::pair<uint32_t, uint64_t>> adoptedIncoming_;
 };
 
 } // namespace cupti_profiler
