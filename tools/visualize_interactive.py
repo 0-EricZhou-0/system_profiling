@@ -454,6 +454,7 @@ _THEMES = {
         "label":          "#333333",
         "leader":         "#aaaaaa",
         "legend_border":  "#cccccc",
+        "after_stop":     "#d4d4d4",   # the time after the session's stop (fill_alpha 0.6)
     },
     "dark": {
         "bokeh_theme":    "dark_minimal",
@@ -474,6 +475,7 @@ _THEMES = {
         "label":          "#E0E0E0",
         "leader":         "#6E7780",
         "legend_border":  "#555555",
+        "after_stop":     "#3c444c",
     },
 }
 _THEME = "light"
@@ -1298,10 +1300,14 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
 
 def _mark_stop(figs: list, stop_s: float) -> None:
     """A dashed vertical line at the session's stop on every metric panel
-    (rate and cumulative), with a small "stop" note at its top; annotations,
-    so no axis range changes."""
+    (rate and cumulative), with a small "stop" note at its top, and the
+    time after it shaded grey out to the frame's right edge (a box with no
+    right bound, so it follows any pan or zoom); annotations, so no axis
+    range or legend changes."""
     t = _THEMES[_THEME]
     for fig in figs:
+        fig.add_layout(BoxAnnotation(left=stop_s, fill_color=t["after_stop"], fill_alpha=0.6,
+                                     line_alpha=0.0, level="underlay", name="after-stop"))
         fig.add_layout(Span(location=stop_s, dimension="height", line_color=t["link"],
                             line_dash="dashed", line_width=1.0, name="stop-line"))
         fig.add_layout(Label(x=stop_s, x_units="data", y=_FRAME_HEIGHT - 2, y_units="screen",

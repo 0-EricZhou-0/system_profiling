@@ -173,16 +173,15 @@ per-process memory panels (bytes, e.g. RSS), each process that exited
 ends in a dashed vertical line in its colour from 0 up to its last
 measured value.
 
-**Session stop.** Every metric panel, rate and cumulative, in both
-renderers, has a dashed vertical line marked `stop` at the session's stop:
-the last sample any probe (GPU, System, Disk) took, within one sampling
-interval of the stop call (the trace does not record the call's own
-time); regions and events do not move it. It is not in the legend and
-does not change the axes. In the PNG the time axis ends at the last
-sample unless a region or event ends later, so there the line is usually
-on the panel's right edge (the `stop` note marks it); the Bokeh page's
-axis has padding, so it shows inside. Not drawn on the event / region
-strips or the process timeline.
+**Session stop** (Bokeh page only; the PNG has no stop mark). Every
+metric panel, rate and cumulative, has a dashed vertical line marked
+`stop` at the session's stop — the last sample any probe (GPU, System,
+Disk) took, within one sampling interval of the stop call (the trace does
+not record the call's own time); regions and events do not move it — and
+the time after it shaded light grey (a subtle grey in the dark theme) out
+to the plot's right edge, however far you pan or zoom past it. Neither is
+in a legend or changes an axis. Not on the event / region strips or the
+process timeline.
 
 **Cumulative companions.** A layout panel with `aggregation:
 PANEL_AGGREGATION_INTEGRATE` gets a companion under it plotting ∫ y dt of

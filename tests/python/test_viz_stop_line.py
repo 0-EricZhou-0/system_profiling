@@ -1,7 +1,8 @@
-"""The session's stop (the last sample any probe took) as a dashed
-vertical line on every metric panel, rate and cumulative, in both
-renderers; not on the event / region strips or the process timeline; no
-legend entry; the axis ranges unchanged."""
+"""The session's stop (the last sample any probe took) on the Bokeh page:
+a dashed vertical line and the time after it shaded grey on every metric
+panel, rate and cumulative; not on the event / region strips or the
+process timeline; no legend entry; the ranges unchanged. The PNG has
+neither."""
 
 import pytest
 
@@ -18,48 +19,43 @@ def _meta(tmp_path):
                                  events=[("ready", 2.0)])   # "late" ends after the last sample
 
 
-def test_stop_line_static(tmp_path):
+def test_no_stop_marks_in_the_png(tmp_path):
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     import visualize_all
+    assert not hasattr(visualize_all, "_mark_stop")
     r = visualize_all.build_figure(_meta(tmp_path))
-    kinds = {k for _p, _s, k, _ax in r.panel_axes}
-    assert {"metric", "integrated"} <= kinds
-    for p, _s, _k, ax in r.panel_axes:
-        [ln] = [ln for ln in ax.get_lines() if getattr(ln, "_stop_line", False)]
-        assert ln.get_linestyle() == "--" and ln.get_xdata()[0] == pytest.approx(DUR, abs=0.02)
-        assert "stop" in [t.get_text().strip() for t in ax.texts]
-        leg = ax.get_legend()
-        assert leg is None or all("stop" not in t.get_text() for t in leg.get_texts())
-    for ax in (r.region_ax, r.event_ax, r.process_ax):
-        if ax is not None:
-            assert not [ln for ln in ax.get_lines() if getattr(ln, "_stop_line", False)]
-
-
-def test_stop_line_keeps_the_axes(tmp_path, monkeypatch):
-    matplotlib = pytest.importorskip("matplotlib")
-    matplotlib.use("Agg")
-    import visualize_all
-    with_line = visualize_all.build_figure(_meta(tmp_path / "a"))
-    monkeypatch.setattr(visualize_all, "_mark_stop", lambda axes, stop_s: None)
-    without = visualize_all.build_figure(_meta(tmp_path / "b"))
-    for (_p, _s, _k, a), (_p2, _s2, _k2, b) in zip(with_line.panel_axes, without.panel_axes):
-        assert a.get_xlim() == b.get_xlim() and a.get_ylim() == b.get_ylim()
+    axes = [ax for *_x, ax in r.panel_axes] + [r.region_ax, r.event_ax, r.process_ax]
+    for ax in axes:
+        if ax is None:
+            continue
+        assert not [t for t in ax.texts if t.get_text().strip() == "stop"]
+        assert not [ln for ln in ax.get_lines() if ln.get_linestyle() == "--"
+                    and len(set(ln.get_xdata())) == 1 and ln.get_xdata()[0] == pytest.approx(DUR, abs=0.02)]
+    assert r.panel_axes[0][3].get_xlim()[1] == pytest.approx(12.0, abs=0.02)   # the late region's end
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
-def test_stop_line_bokeh(tmp_path, monkeypatch, theme):
+def test_stop_line_and_shade_bokeh(tmp_path, monkeypatch, theme):
     pytest.importorskip("bokeh")
     import visualize_interactive as vi
     monkeypatch.setattr(vi, "_THEME", theme)
     doc = vi.build_static(_meta(tmp_path))
+    t = vi._THEMES[theme]
     assert {k for _p, k, _f in doc.panel_figs} == {"metric", "cumulative"}
     for _p, _k, f in doc.panel_figs:
         [span] = [a for a in f.center if a.name == "stop-line"]
         assert span.location == pytest.approx(DUR, abs=0.02) and span.dimension == "height"
-        assert span.line_dash == "dashed" or list(span.line_dash) == [6]
-        assert span.line_color == vi._THEMES[theme]["link"]
+        assert span.line_color == t["link"]
         assert [a.text for a in f.center if a.name == "stop-note"] == ["stop"]
+        [shade] = [a for a in f.renderers + f.center if getattr(a, "name", None) == "after-stop"]
+        assert type(shade).__name__ == "BoxAnnotation"
+        assert shade.left == pytest.approx(DUR, abs=0.02)
+        edge = lambda v: (getattr(v, "target", None), getattr(v, "symbol", None))
+        assert edge(shade.right) == ("frame", "right")         # to the frame's edge, as it pans
+        assert (edge(shade.top), edge(shade.bottom)) == (("frame", "top"), ("frame", "bottom"))
+        assert shade.fill_color == t["after_stop"]
         assert all("stop" not in it.label.value for lg in f.legend for it in lg.items)
     for f in list(doc.strips) + [doc.timeline]:
-        assert not [a for a in f.center if a.name in ("stop-line", "stop-note")]
+        assert not [a for a in f.renderers + f.center
+                    if getattr(a, "name", None) in ("stop-line", "stop-note", "after-stop")]
