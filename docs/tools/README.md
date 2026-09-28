@@ -265,7 +265,8 @@ What you get:
 - **Process timeline pinned** in the sticky band, under the event and
   region strips (same x-range as the panels), as in `visualize_all.py`;
   hover a bar for the process's every name, pid, parent, kind, start and
-  end. It keeps its full height (a cold vLLM start: 21 lanes and their
+  end (the tooltip at the pointer, so also on a zoomed-in bar whose
+  centre is off-screen; the region strip's the same). It keeps its full height (a cold vLLM start: 21 lanes and their
   label rows make the band tall; fold the timeline with its ▾ to give the
   space back). It has the panels' tools, toolbar and right-click menu
   (drag to box-zoom, ctrl + scroll, pan, reset, save, hover), and its

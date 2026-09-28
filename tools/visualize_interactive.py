@@ -1110,7 +1110,9 @@ def _build_region_strip(regions, t0_ns: int, x_range, t_end_s: float = 0.0) -> "
     g = fig.quad(left="left", right="right", top="top", bottom="bottom",
                  source=cds, fill_color="color", fill_alpha=0.6,
                  line_color="color", line_width=1.0)
-    fig.add_tools(HoverTool(renderers=[g],
+    # The tooltip at the pointer, not the bar's centre (off-screen when
+    # zoomed into a long region).
+    fig.add_tools(HoverTool(renderers=[g], point_policy="follow_mouse",
         tooltips=[("region", "@name"),
                   ("start", "@left{0.000}s"),
                   ("end",   "@right{0.000}s")]))
@@ -1258,7 +1260,8 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                 max_rows=n_rows, char_px=_TIMELINE_CHAR_PX, pad=10.0,
                 max_shift=process_timeline.LABEL_MAX_SHIFT * _FRAME_WIDTH, font="7pt",
                 in_color="white", out_color=theme["label"], leader_color=theme["leader"])
-    fig.add_tools(HoverTool(renderers=bars, tooltips=[
+    # At the pointer, as on the region strip (a bar's centre can be off-screen).
+    fig.add_tools(HoverTool(renderers=bars, point_policy="follow_mouse", tooltips=[
         ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),
         ("start", "@start{0.000}s"), ("end", "@end{0.000}s")]))
     # What the bars' styles mean: right of the lanes, like a panel's legend.

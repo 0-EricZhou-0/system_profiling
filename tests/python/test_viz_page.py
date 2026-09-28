@@ -196,3 +196,13 @@ def test_marks_take_the_theme_ink(tmp_path, monkeypatch, theme):
     if theme == "dark":
         dark = {"black", "#000000", "#333333", "#444444"}
         assert not (outline | segs | texts) & dark
+
+
+def test_bar_hover_follows_the_mouse(tmp_path):
+    """Timeline and region-strip tooltips at the pointer, not at the bar's
+    centre (off-screen when zoomed into a long bar)."""
+    doc = vi.build_static(_strip_meta(tmp_path))
+    _events, regions = doc.strips
+    for fig in (doc.timeline, regions):
+        [hv] = [t for t in fig.tools if type(t).__name__ == "HoverTool"]
+        assert hv.point_policy == "follow_mouse"
