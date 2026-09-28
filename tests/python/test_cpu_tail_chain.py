@@ -149,5 +149,10 @@ def test_chain_without_reaper_is_ambiguous(tmp_path, mode):
     ptail = [t for t in tails if p in t.pids]
     assert ptail and c in ptail[0].ambiguous_pids and not ptail[0].chain_pids, \
         [(list(t.pids), list(t.chain_pids), list(t.ambiguous_pids)) for t in tails]
-    # Not subtracted: C's CPU is in P's tail too (documented, flagged).
-    assert got - res["done"]["kernel_s"] > 0.8 * C_SECONDS
+    # Not subtracted: C's CPU is in P's tail too (documented, flagged), and
+    # the record says how much: the overcount is ambiguous_cpu_ns.
+    over = got - res["done"]["kernel_s"]
+    assert over > 0.8 * C_SECONDS
+    amb = ptail[0].ambiguous_cpu_ns / 1e9
+    assert abs(amb - over) <= 0.04 + 0.02 * over, (amb, over)
+    assert ptail[0].cpu_after_last_sample_ns / 1e9 >= amb

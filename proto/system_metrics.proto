@@ -64,4 +64,11 @@ message CpuTail {
     // orphan reaper is off, or they are not under the host): not taken
     // out, so their CPU may be counted twice. Never guessed.
     repeated uint32 ambiguous_pids           = 6;
+    // The CPU of `ambiguous_pids` (their clock at their last sample plus
+    // what they had reaped), already counted in their own samples. It is
+    // NOT subtracted: if the child in `pids` did reap them, this much of
+    // cpu_after_last_sample_ns is counted twice. The true tail is between
+    // max(0, cpu_after_last_sample_ns - ambiguous_cpu_ns) and
+    // cpu_after_last_sample_ns. 0 when nothing is ambiguous.
+    uint64          ambiguous_cpu_ns         = 7;
 }

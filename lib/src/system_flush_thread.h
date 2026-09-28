@@ -79,6 +79,7 @@ struct CpuTailRecord {
     uint64_t              cpu_ns       = 0;
     std::vector<uint32_t> chainPids;       // reaped in the same interval, taken out
     std::vector<uint32_t> ambiguousPids;   // reaped by whom is unknown, left in
+    uint64_t              ambiguousCpuNs = 0;   // their CPU already in their samples
 };
 
 struct SystemSampleBatch {

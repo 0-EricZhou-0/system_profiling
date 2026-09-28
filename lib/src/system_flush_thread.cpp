@@ -244,6 +244,7 @@ SystemMetricsTrace BuildSystemTrace(
         c->set_cpu_after_last_sample_ns(r.cpu_ns);
         for (uint32_t pid : r.chainPids) c->add_chain_pids(pid);
         for (uint32_t pid : r.ambiguousPids) c->add_ambiguous_pids(pid);
+        c->set_ambiguous_cpu_ns(r.ambiguousCpuNs);
     }
     return trace;
 }

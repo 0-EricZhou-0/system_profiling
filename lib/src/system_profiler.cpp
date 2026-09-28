@@ -118,7 +118,7 @@ public:
     void NoteExited(uint32_t pid);
     void AttributeTails(uint64_t tsNs,
                         const std::unordered_set<uint32_t>& trackedPids);
-    int64_t ChainCpu(uint32_t pid, internal::CpuTailRecord& r, int depth);
+    int64_t ChainCpu(uint32_t pid, internal::CpuTailRecord& r, int depth, bool ambiguous = false);
 
     // Per-flush write accounting
     internal::SystemPendingFlushStats flushStatsPending;
@@ -156,7 +156,11 @@ void SystemProfiler::Impl::NoteExited(uint32_t pid) {
 // rule (ProcessTrackingProbe::WhoReaped): the host reaped it -> not in
 // pid; unknown -> listed as ambiguous and not subtracted (its CPU may be
 // counted twice), never guessed. Settles every child it looks at.
-int64_t SystemProfiler::Impl::ChainCpu(uint32_t pid, internal::CpuTailRecord& r, int depth) {
+// `ambiguous`: pid itself may not have been reaped by its parent, so
+// nothing below it is taken out either; it is all listed as ambiguous
+// and its CPU added to ambiguousCpuNs (the most the tail can hold twice).
+int64_t SystemProfiler::Impl::ChainCpu(uint32_t pid, internal::CpuTailRecord& r, int depth,
+                                       bool ambiguous) {
     if (depth >= 64) return 0;
     std::vector<uint32_t> kidsOf;
     for (const auto& [k, e] : awaitingTail)
@@ -172,11 +176,17 @@ int64_t SystemProfiler::Impl::ChainCpu(uint32_t pid, internal::CpuTailRecord& r,
         const ExitedChild e = it->second;
         awaitingTail.erase(it);
         tailSettled.insert(k);
-        switch (SystemProfiler::WhoReaped(reap, k, e.startNs, e.rootParent)) {
+        const auto by = SystemProfiler::WhoReaped(reap, k, e.startNs, e.rootParent);
+        if (by == ReapedBy::Host) continue;
+        if (ambiguous || by == ReapedBy::Unknown) {
+            r.ambiguousPids.push_back(k);
+            r.ambiguousCpuNs += e.lastCpuNs + e.lastChildrenCpuNs;
+            ChainCpu(k, r, depth + 1, /*ambiguous=*/true);
+            continue;
+        }
+        switch (by) {
             case ReapedBy::Host:
-                break;
             case ReapedBy::Unknown:
-                r.ambiguousPids.push_back(k);
                 break;
             case ReapedBy::Parent:
                 r.chainPids.push_back(k);
