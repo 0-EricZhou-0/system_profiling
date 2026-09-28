@@ -53,6 +53,7 @@ import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
 import panel_legend  # noqa: E402
 import units  # noqa: E402
+import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
@@ -180,12 +181,9 @@ def _ingest_probes(
 
 
 # ---------------------------------------------------------------------------
-# Write-rate footer (mirrors visualize_all.py's table)
+# Write-rate footer: its rows (the table: tools/write_rate.py, shared with
+# visualize_all.py)
 # ---------------------------------------------------------------------------
-
-def _fmt_rate(bps: float) -> str:
-    return f"{units.fmt_bytes(bps, rate=True):>13}"
-
 
 def _est_bytes_per_sample(n_metrics: int, extra_tag: int = 0) -> int:
     # rough: 2 varint timestamps (~10 B) + N doubles (9 B) + ~3 B tag
@@ -214,9 +212,10 @@ def _build_write_rate_rows(
     events_regions: int,
     events_ns: int,
     xmax_s: float,
-) -> list[tuple[str, float, float, int]]:
-    """Same rows as visualize_all.py's footer: (label, est_bps, meas_bps, n_samples)."""
-    rows: list[tuple[str, float, float, int]] = []
+) -> list[tuple]:
+    """Same rows as visualize_all.py's footer: (label, sampling_hz,
+    est_bps, meas_bps, n_samples)."""
+    rows: list[tuple] = []
 
     # GPU
     info = probes_info.get("gpu")
@@ -226,7 +225,7 @@ def _build_write_rate_rows(
         est = sample_freqs.get("gpu", 0) * _est_bytes_per_sample(n_metrics)
         dur = _probe_duration_s(projector, proj, "gpu")
         meas = os.path.getsize(info["path"]) / dur if dur > 0 else 0.0
-        rows.append(("GPU", est, meas, info["n_samples"]))
+        rows.append(("GPU", sample_freqs.get("gpu", 0), est, meas, info["n_samples"]))
 
     # System
     info = probes_info.get("system")
@@ -242,7 +241,7 @@ def _build_write_rate_rows(
         est = sample_freqs.get("system", 0) * bytes_per_tick
         dur = _probe_duration_s(projector, proj, "system")
         meas = os.path.getsize(info["path"]) / dur if dur > 0 else 0.0
-        rows.append(("System", est, meas, info["n_samples"]))
+        rows.append(("System", sample_freqs.get("system", 0), est, meas, info["n_samples"]))
 
     # Disk
     info = probes_info.get("disk")
@@ -259,7 +258,7 @@ def _build_write_rate_rows(
         est = sample_freqs.get("disk", 0) * bytes_per_tick
         dur = _probe_duration_s(projector, proj, "disk")
         meas = os.path.getsize(info["path"]) / dur if dur > 0 else 0.0
-        rows.append(("Disk", est, meas, info["n_samples"]))
+        rows.append(("Disk", sample_freqs.get("disk", 0), est, meas, info["n_samples"]))
 
     # Events — no estimated rate (user-driven emission)
     info = probes_info.get("events")
@@ -267,25 +266,9 @@ def _build_write_rate_rows(
         n_samp = events_regions + events_ns
         dur = xmax_s
         meas = os.path.getsize(info["path"]) / dur if dur > 0 else 0.0
-        rows.append(("Events", 0.0, meas, n_samp))
+        rows.append(("Events", None, 0.0, meas, n_samp))
 
     return rows
-
-
-def _format_write_rate_footer(rows: list[tuple[str, float, float, int]]) -> str:
-    lines = ["Write rate — estimated vs measured (file_size / trace_duration):"]
-    total_est = total_meas = 0.0
-    total_samp = 0
-    for label, est, meas, n_samp in rows:
-        est_str = _fmt_rate(est) if est > 0 else "      —      "
-        lines.append(f"  {label:<7} est {est_str}   |   measured {_fmt_rate(meas)}   "
-                     f"|   samples {n_samp:>8}")
-        total_est += est
-        total_meas += meas
-        total_samp += n_samp
-    lines.append(f"  {'Total':<7} est {_fmt_rate(total_est)}   |   measured "
-                 f"{_fmt_rate(total_meas)}   |   samples {total_samp:>8}")
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1447,20 +1430,13 @@ def _loading_overlay_body(n_figures: int) -> str:
     return _LOADING_OVERLAY_BODY_TEMPLATE.replace("__N_FIGS__", str(n_figures))
 
 
-def _inject_write_rate_footer(html: str, text: str, theme: dict) -> str:
-    """Append the write-rate table as a raw <pre> block right before
-    the last </body>. Sidesteps Bokeh's widget layout (which serialises
-    Div/PreText into docs_json but doesn't materialise a DOM node under
-    this Bokeh version) and its Div HTML-escaping.
+def _inject_write_rate_footer(html: str, rows: list, theme: dict) -> str:
+    """Append the write-rate table (write_rate.html) as raw HTML right
+    before the last </body>. Sidesteps Bokeh's widget layout (which
+    serialises Div/PreText into docs_json but doesn't materialise a DOM
+    node under this Bokeh version) and its Div HTML-escaping.
     """
-    import html as _html
-    color = theme.get("axis_label", "#888888")
-    footer = (
-        f"<pre style=\"margin:12px 0 12px 12px;font-family:monospace;"
-        f"font-size:11px;line-height:1.35;color:{color};\">"
-        f"{_html.escape(text)}"
-        f"</pre>"
-    )
+    footer = write_rate.html(rows, theme.get("axis_label", "#888888"))
     i = html.rfind("</body>")
     if i < 0:
         return html
@@ -1723,8 +1699,8 @@ def _render_static(
 def _static_html(doc, title: str, bokeh_theme, theme: dict) -> str:
     html = file_html(doc.root, INLINE, title=title, theme=bokeh_theme)
     html = _inject_loading_overlay(html, doc.n_figures)
-    if doc.footer_text:
-        html = _inject_write_rate_footer(html, doc.footer_text, theme)
+    if doc.footer_rows:
+        html = _inject_write_rate_footer(html, doc.footer_rows, theme)
     if doc.x_range is not None:
         i = html.rfind("</body>")
         html = html[:i] + _hotkeys_script(doc.x_range.id, doc.t_end_s, doc.folds) + html[i:]
@@ -1988,16 +1964,15 @@ def _build_static_document(
         events_ns=len(events),
         xmax_s=(t_end_ns - t0_ns) / 1e9,
     )
-    # Footer text is stashed and injected as raw HTML in _inject_footer
-    # below (after file_html produces the Bokeh document). We tried both
-    # Div (which HTML-escapes) and PreText (which serializes to
-    # docs_json but doesn't materialise into the DOM under this
-    # Bokeh version's widget layout), so we sidestep the widget layer.
-    footer_text = _format_write_rate_footer(footer_rows) if footer_rows else None
+    # The rows are stashed and the table injected as raw HTML in
+    # _inject_write_rate_footer (after file_html produces the Bokeh
+    # document). We tried both Div (which HTML-escapes) and PreText (which
+    # serializes to docs_json but doesn't materialise into the DOM under
+    # this Bokeh version's widget layout), so we sidestep the widget layer.
 
     layout_root = column(layout_children, sizing_mode="stretch_width")
     return StaticDocument(root=layout_root, strips=strips, panel_figs=panel_figs,
-                          timeline=timeline_fig, footer_text=footer_text,
+                          timeline=timeline_fig, footer_rows=footer_rows or None,
                           n_figures=len(strips) + len(figs) + (timeline_fig is not None),
                           band=strip_col if band else None, timeline_block=timeline_block,
                           folds=folds, x_range=shared_x,

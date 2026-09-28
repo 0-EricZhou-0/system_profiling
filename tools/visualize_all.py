@@ -59,6 +59,7 @@ import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
 import panel_legend  # noqa: E402
 import units  # noqa: E402
+import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
@@ -76,7 +77,7 @@ PROCESS_LANE_HEIGHT = 0.16  # inches per lane
 PROCESS_BAR_FILL    = 0.78  # bar height, fraction of a lane
 PROCESS_LABEL_FONTSIZE = 6.5
 TIMELINE_LABEL_PAD_PT = 8.0  # between outside labels, and a label's margin inside its bar
-PANEL_HEIGHT_FOOTER = 0.7   # write-rate text footer
+PANEL_HEIGHT_FOOTER = 0.9   # write-rate table footer (title, header, probes, Total)
 
 SPACING_PANEL        = 0.55   # within a section
 SPACING_SECTION      = 0.90   # between sections (dashed sep at midpoint)
@@ -1035,24 +1036,7 @@ def _write_legend_file(out_path: Path, png_path: Path,
 # Footer
 # ---------------------------------------------------------------------------
 
-def _fmt_rate(bps: float) -> str:
-    return f"{units.fmt_bytes(bps, rate=True):>13}"
-
-
-def _build_footer_text(rows: list[tuple[str, float, float, int]]) -> str:
-    lines = ["Write rate — estimated vs measured (file_size / trace_duration):"]
-    total_est = total_meas = 0.0
-    total_samp = 0
-    for label, est, meas, n_samp in rows:
-        est_str = _fmt_rate(est) if est > 0 else "      —      "
-        lines.append(f"  {label:<7} est {est_str}   |   measured {_fmt_rate(meas)}   "
-                     f"|   samples {n_samp:>8}")
-        total_est += est
-        total_meas += meas
-        total_samp += n_samp
-    lines.append(f"  {'Total':<7} est {_fmt_rate(total_est)}   |   measured "
-                 f"{_fmt_rate(total_meas)}   |   samples {total_samp:>8}")
-    return "\n".join(lines)
+# The table itself: tools/write_rate.py (shared with the Bokeh page).
 
 
 # ---------------------------------------------------------------------------
@@ -1514,7 +1498,7 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
             est = probes["gpu"]["freq_hz"] * _est_bytes_per_sample(n_metrics)
             dur = _probe_duration_s("gpu")
             meas = os.path.getsize(probes["gpu"]["path"]) / dur if dur > 0 else 0.0
-            rows.append(("GPU", est, meas, probes["gpu"]["n_samples"]))
+            rows.append(("GPU", probes["gpu"]["freq_hz"], est, meas, probes["gpu"]["n_samples"]))
 
         # System row
         if probes["system"]["traces"]:
@@ -1529,7 +1513,8 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
             est = probes["system"]["freq_hz"] * bytes_per_tick
             dur = _probe_duration_s("system")
             meas = os.path.getsize(probes["system"]["path"]) / dur if dur > 0 else 0.0
-            rows.append(("System", est, meas, probes["system"]["n_samples"]))
+            rows.append(("System", probes["system"]["freq_hz"], est, meas,
+                         probes["system"]["n_samples"]))
 
         # Disk row
         if probes["disk"]["traces"]:
@@ -1545,16 +1530,16 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
             est = probes["disk"]["freq_hz"] * bytes_per_tick
             dur = _probe_duration_s("disk")
             meas = os.path.getsize(probes["disk"]["path"]) / dur if dur > 0 else 0.0
-            rows.append(("Disk", est, meas, probes["disk"]["n_samples"]))
+            rows.append(("Disk", probes["disk"]["freq_hz"], est, meas, probes["disk"]["n_samples"]))
 
         # Events row — emission rate is user-driven, only measured is meaningful.
         if probes["events"]["path"]:
             n_samp = len(probes["events"]["regions"]) + len(probes["events"]["events"])
             dur = xmax_s
             meas = os.path.getsize(probes["events"]["path"]) / dur if dur > 0 else 0.0
-            rows.append(("Events", 0.0, meas, n_samp))
+            rows.append(("Events", None, 0.0, meas, n_samp))
 
-        footer_text = _build_footer_text(rows) if rows else None
+        footer_text = write_rate.text(rows) if rows else None
         footer_ax.axis("off")
         if footer_text:
             footer_ax.text(0.01, 0.95, footer_text,

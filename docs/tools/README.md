@@ -202,6 +202,14 @@ with `/s`; an empty or all-zero panel B. The Peak line is drawn as before
 and labelled in the axis's unit. The write-rate footer uses the same rule,
 each value in its own unit (`tools/units.py`).
 
+**Write-rate footer.** Under the panels (PNG) or the page (Bokeh), a
+table: `Probe`, `Sampling` (the probe's configured rate, from the trace's
+session metadata), `Estimated` (bytes per sample × rate), `Measured`
+(file size ÷ the probe's time span), `Samples`, one row per probe and a
+`Total`; `—` where a cell does not apply (Events have no configured rate
+or estimate). Headers and probe names left-aligned, numbers
+right-aligned; the same cells in both renderers (`tools/write_rate.py`).
+
 **Statistic labels.** A metric that is a statistic over its entity's
 instances says which in its legend, from the FQN's rollup:
 `sm__cycles_active.avg…` reads "Active Cycles (avg)" (the mean over the
