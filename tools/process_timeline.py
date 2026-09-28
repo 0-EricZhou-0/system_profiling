@@ -133,8 +133,8 @@ def name_history(p: TimelineProcess) -> str:
 # Labels: every process gets one
 # ---------------------------------------------------------------------------
 
-LABEL_GAP = 0.3   # lanes between the last lane and the first label row
-LABEL_ROW = 0.9   # lanes per external-label row
+LABEL_GAP = 0.6   # lanes between the last lane and the first label row
+LABEL_ROW = 1.0   # lanes per external-label row
 
 
 @dataclass
@@ -152,7 +152,7 @@ LABEL_MAX_SHIFT = 0.08   # a label within this fraction of the axis width of its
 
 
 def place_labels(procs: list[TimelineProcess], lanes: dict, t0_ns: int, t_end_ns: int,
-                 width_units: float, text_width, pad_units: float = 4.0) -> tuple[list, int]:
+                 width_units: float, text_width, pad_units: float = 8.0) -> tuple[list, int]:
     """A label for every process: `comm (pid)` inside its bar where it
     fits (else `comm` alone); otherwise outside, in rows under the lanes,
     joined to the bar by a leader. The outside labels are spread with

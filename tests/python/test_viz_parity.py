@@ -56,14 +56,15 @@ def test_metric_line_styles_and_compact_legend(tmp_path):
     meta, layout = _trace(tmp_path)
     doc = visualize_interactive.build_static(meta, panel_layout=layout)
     [two] = [f for p, k, f in doc.panel_figs if p.title == "Two metrics"]
-    labels = [it.label.value for it in two.legend[0].items]
+    items = [it for lg in two.legend for it in lg.items]     # processes, then the style key
+    labels = [it.label.value for it in items]
     # 3 processes + 2 line styles, not 3 x 2 pairs
     assert len(labels) == 5, labels
     assert labels[-2:] == ["CPU (sum)", "Rss Bytes"]
     assert "(PID 11, child of 10)" in labels[1] and "child of" not in labels[0]
-    dashes = {it.label.value: it.renderers[-1].glyph.line_dash for it in two.legend[0].items[-2:]}
+    dashes = {it.label.value: it.renderers[-1].glyph.line_dash for it in items[-2:]}
     assert dashes["CPU (sum)"] != dashes["Rss Bytes"]
-    assert {it.renderers[-1].glyph.line_color for it in two.legend[0].items[-2:]} == {"black"}
+    assert {it.renderers[-1].glyph.line_color for it in items[-2:]} == {"black"}
     # every drawn series: its process's colour, its metric's style
     styles = {(r.glyph.line_color, tuple(r.glyph.line_dash) if isinstance(r.glyph.line_dash, list)
                else r.glyph.line_dash)

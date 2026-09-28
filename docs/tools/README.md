@@ -101,6 +101,14 @@ busiest processes getting distinct colours first; within a panel the
 listed entries never share a colour. Cumulative companion panels carry
 each series' run total in its legend entry (`+k more` carries theirs
 combined). Every series, listed or not, is in `<output>.legend.txt`.
+In a panel with several metrics per process (the per-process I/O
+panels), the legend's first row is the line-style key alone (`── Io
+Rchar (sum)  - - Io Wchar (sum)`), the processes on the rows under it;
+the processes' entries name the process only. On a cumulative panel
+each process entry carries its totals, each marked with its line
+style's glyph instead of the metric's name: `vllm (PID 4106078): ──
+0.2556 GiB · ╌╌ 0.0048 GiB` (── solid, ╌╌ dashed, ┈┈ dotted, ─·─
+dash-dot).
 
 **Process timeline.** Directly under the Region strip, on the same time
 axis: one bar per tracked process (processes only — threads are not
@@ -110,8 +118,9 @@ Every process is labelled with its latest name: `comm (pid)` inside its
 bar where that fits (else `comm` alone); otherwise `comm (pid)` in rows
 under the lanes, joined to its bar by a thin grey leader drawn beneath
 the bars. The outside labels never overlap one another or a bar: they
-are spread along the axis (`tools/label_spread.py`, the same routine the
-event and region strips use) in as many rows as it takes — up to 16 —
+are spread along the axis, at least 8 pt apart and the first row clear
+of the lowest lane by more than half a lane (`tools/label_spread.py`,
+the same routine the event and region strips use) in as many rows as it takes — up to 16 —
 for each to sit within 8% of the axis width of its bar; a burst of
 short-lived compilers (a cold vLLM start, ~90 processes in a few
 seconds) becomes a few rows of labels near the burst.

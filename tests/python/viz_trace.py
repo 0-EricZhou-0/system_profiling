@@ -8,6 +8,7 @@ import sys
 
 from google.protobuf import text_format
 
+import disk_metrics_pb2
 import events_pb2
 import gpu_metrics_pb2
 import metric_catalog_pb2
@@ -52,10 +53,16 @@ def proc(pid, ppid=0, comm="p", start_s=0.0, end_s=None, cpu=50.0,
                 rss=1e8 + cpu * 1e6 if rss is None else rss)
 
 
-def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_values=None):
+IO_FQNS = ["proc__io_rchar.sum.per_second", "proc__io_wchar.sum.per_second"]
+
+
+def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_values=None,
+                disk=False):
     """Write a trace of `procs` (see proc()) over duration_s seconds.
     regions: (name, start_s, end_s). gpu_fqns: GPU metrics to add, each
-    a constant: gpu_values[i], else 50. Returns the session_metadata.pb path."""
+    a constant: gpu_values[i], else 50. disk: also a Disk trace with each
+    process's rchar / wchar rates (cpu x 1 MB/s, cpu x 0.1 MB/s).
+    Returns the session_metadata.pb path."""
     os.makedirs(out_dir, exist_ok=True)
     catalog = text_format.Parse(open(CATALOG).read(), metric_catalog_pb2.MetricCatalog())
     n_ticks = int(duration_s * HZ) + 1
@@ -90,12 +97,27 @@ def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_va
                                    values=[p["cpu"], p["rss"]])
     _write_frames(os.path.join(out_dir, "system_metrics.pb"), [tr])
 
+    if disk:
+        dt = disk_metrics_pb2.DiskMetricsTrace()
+        dt.header.CopyFrom(tr.header)
+        dt.scope_metric_names.add(scope=metric_catalog_pb2.SCOPE_PROCESS, fqns=IO_FQNS)
+        for tp in tr.tracked_processes:
+            dt.tracked_processes.add().CopyFrom(tp)
+        for x in tr.process_samples:
+            p = next(q for q in procs if q["pid"] == x.pid)
+            dt.process_samples.add(timestamp_ns=x.timestamp_ns, pid=x.pid,
+                                   values=[p["cpu"] * 1e6, p["cpu"] * 1e5])
+        _write_frames(os.path.join(out_dir, "disk_metrics.pb"), [dt])
+
     meta = session_metadata_pb2.SessionMetadata(hostname="synthetic",
                                                 wall_clock_epoch_ns=1_700_000_000_000_000_000,
                                                 start_iso8601="2026-09-28T00:00:00Z")
     meta.catalog.CopyFrom(catalog)
     meta.probes.add(kind=session_metadata_pb2.PROBE_KIND_SYSTEM,
                     output_file="system_metrics.pb", sampling_frequency_hz=HZ)
+    if disk:
+        meta.probes.add(kind=session_metadata_pb2.PROBE_KIND_DISK,
+                        output_file="disk_metrics.pb", sampling_frequency_hz=HZ)
 
     if regions:
         ev = events_pb2.EventTrace()

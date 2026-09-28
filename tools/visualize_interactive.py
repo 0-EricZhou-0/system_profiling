@@ -497,21 +497,24 @@ _OTHER_LINE_WIDTH  = 0.56
 _METRIC_DASHES = ["solid", "dashed", "dotted", "dashdot"]
 
 
-def _legend_above(fig, items: list[tuple[str, list]]) -> None:
+def _legend_above(fig, items: list[tuple[str, list]], key: list | None = None) -> None:
     """Legend above the plot: items = [(label, renderers)]; an entry's
     swatch draws every renderer's glyph, the last on top. Click an entry
-    to hide its lines."""
-    items = [LegendItem(label=lab, renderers=list(rs)) for lab, rs in items]
-    if not items:
-        return
-    fig.add_layout(Legend(items=items, ncols=_legend_ncols([i.label.value for i in items]),
-                          location="top_left", click_policy="hide",
-                          label_text_font_size="8pt", padding=4, margin=2,
-                          spacing=3, border_line_color="#cccccc", border_line_alpha=1.0),
-                   "above")
+    to hide its lines. `key` (the line-style entries, same form) goes on
+    a row of its own, above the rest."""
+    def legend(entries, ncols):
+        return Legend(items=[LegendItem(label=lab, renderers=list(rs)) for lab, rs in entries],
+                      ncols=ncols, location="top_left", click_policy="hide",
+                      label_text_font_size="8pt", padding=4, margin=2,
+                      spacing=3, border_line_color="#cccccc", border_line_alpha=1.0)
+    if items:
+        fig.add_layout(legend(items, _legend_ncols([lab for lab, _rs in items])), "above")
+    if key:
+        # Added after, so Bokeh stacks it farther from the plot: on top.
+        fig.add_layout(legend(key, len(key)), "above")
 
 
-def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> list:
+def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> tuple[list, list]:
     """Draw every series of a panel_legend.Plan (sources: (fqn,
     scope_key) -> ColumnDataSource) and return its legend items: listed
     series in their colour and line style, the rest light grey. Every
@@ -527,15 +530,15 @@ def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> list:
                               color=color if listed else panel_legend.OTHER_COLOR,
                               line_dash=_METRIC_DASHES[st],
                               line_width=_SERIES_LINE_WIDTH if listed else _OTHER_LINE_WIDTH)
-    items = []
+    items, key = [], []
     for label, color, st, keys in p.entries:
         rs = [lines[k] for k in keys if k in lines]
         if color != panel_legend.OTHER_COLOR:
             # Last: a legend item draws all its renderers' swatches, in order.
             rs.append(fig.line(x=[-2.0, -1.0], y=[0.0, 0.0], color=color,
                                line_dash=_METRIC_DASHES[st], line_width=1.5))
-        items.append((label, rs))
-    return items
+        (key if color == panel_legend.METRIC_COLOR else items).append((label, rs))
+    return items, key
 
 
 def _attach_unified_hover(
@@ -650,7 +653,7 @@ def _build_panel(
         cds_by_key[key] = ColumnDataSource(data=dict(
             x=time_s, y=scale_fn(vals.astype(np.float64)),
         ))
-    legend_items = _draw_plan(fig, plan, cds_by_key)
+    legend_items, legend_key = _draw_plan(fig, plan, cds_by_key)
 
     # Peak reference line + y-range. When the panel has a known peak,
     # pin the view to [0, peak*headroom] with hard bounds so pan/zoom
@@ -688,7 +691,7 @@ def _build_panel(
         unit_suffix=ylabel,
     )
 
-    _legend_above(fig, legend_items)
+    _legend_above(fig, legend_items, legend_key)
     return fig, cds_by_key
 
 
@@ -831,7 +834,7 @@ def _build_cumulative_panel(
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
         cds_by_key[key] = ColumnDataSource(data=dict(x=time_s, y=scale_fn(cum)))
         cumulative_projection[key] = (ts_ns, cum)
-    legend_items = _draw_plan(fig, plan, cds_by_key)
+    legend_items, legend_key = _draw_plan(fig, plan, cds_by_key)
 
     # Cumulative curves are non-negative monotonic — clamp the floor
     # at 0 and let the upper auto-fit.
@@ -845,7 +848,7 @@ def _build_cumulative_panel(
         unit_suffix=ylabel,
     )
 
-    _legend_above(fig, legend_items)
+    _legend_above(fig, legend_items, legend_key)
     return fig, cds_by_key
 
 
@@ -1023,7 +1026,7 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     # lanes with a leader, spread so none overlaps another.
     text_px = lambda t: len(t) * _TIMELINE_CHAR_PX
     placed, n_rows = process_timeline.place_labels(procs, lanes, t0_ns, t_end_ns,
-                                                   _FRAME_WIDTH, text_px, pad_units=6.0)
+                                                   _FRAME_WIDTH, text_px, pad_units=10.0)
     height = process_timeline.height_in_lanes(n_lanes, n_rows)
     fig = figure(
         title="Processes (bars: lifetime, packed into the fewest lanes; lines: fork links)",

@@ -167,7 +167,7 @@ def test_every_process_labelled_without_overlap():
     lanes, n = pt.pack_lanes(procs)
     width = 1400.0                                      # points
     tw = lambda t: len(t) * 3.6                         # ~6.5 pt text
-    labels, rows = pt.place_labels(procs, lanes, 0, 60 * S, width, tw, pad_units=4.0)
+    labels, rows = pt.place_labels(procs, lanes, 0, 60 * S, width, tw)   # default spacing
     assert {lab.key for lab in labels} == {p.key for p in procs}
     out = [lab for lab in labels if lab.row >= 0]
     assert out and 1 <= rows <= pt.LABEL_MAX_ROWS
@@ -175,12 +175,14 @@ def test_every_process_labelled_without_overlap():
     for r in range(rows):
         iv = sorted((lab.x_s * per_s - tw(lab.text) / 2, lab.x_s * per_s + tw(lab.text) / 2)
                     for lab in out if lab.row == r)
-        assert all(a[1] + 4.0 <= b[0] + 1e-6 for a, b in zip(iv, iv[1:])), r
+        assert all(a[1] + 8.0 <= b[0] + 1e-6 for a, b in zip(iv, iv[1:])), r   # >= 8 pt apart
         assert iv[0][0] >= -1e-6 and iv[-1][1] <= width + 1e-6
     for lab in labels:                                   # inside labels fit their bars
         if lab.row < 0:
             p = next(q for q in procs if q.key == lab.key)
-            assert tw(lab.text) + 4.0 < (p.end_ns - p.start_ns) / 1e9 * per_s
+            assert tw(lab.text) + 8.0 < (p.end_ns - p.start_ns) / 1e9 * per_s
+    # the first label row clear of the lowest lane by more than half a lane
+    assert pt.label_row_y(n, 0) - pt.LABEL_ROW / 2 - n >= 0.5
 
 
 def _dense_trace(tmp_path, n=60):

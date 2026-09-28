@@ -74,6 +74,7 @@ PANEL_HEIGHT_REGION = 0.10  # region timeline strip
 PROCESS_LANE_HEIGHT = 0.16  # inches per lane
 PROCESS_BAR_FILL    = 0.78  # bar height, fraction of a lane
 PROCESS_LABEL_FONTSIZE = 6.5
+TIMELINE_LABEL_PAD_PT = 8.0  # between outside labels, and a label's margin inside its bar
 PANEL_HEIGHT_FOOTER = 0.7   # write-rate text footer
 
 SPACING_PANEL        = 0.55   # within a section
@@ -395,7 +396,22 @@ class _LegendPlan:
                        for k, (c, st, listed) in p.styles.items()}
         self.zorder = {k: 2 + i / 1000 for i, k in enumerate(p.order)}
         self.entries = [(lab, c, _METRIC_LINESTYLES[st]) for lab, c, st, _keys in p.entries]
-        self.ncol, self.nrows = _legend_grid([e[0] for e in self.entries], avail_width_pt)
+        # The line-style key (black entries) on a row of its own, first;
+        # the processes on the rows under it. matplotlib fills a legend
+        # column by column, so each column gets its key entry (or a blank)
+        # on top and its share of the rest under it.
+        key = [e for e in self.entries if e[1] == panel_legend.METRIC_COLOR]
+        rest = [e for e in self.entries if e[1] != panel_legend.METRIC_COLOR]
+        self.ncol, self.nrows = _legend_grid([e[0] for e in (rest or key)], avail_width_pt)
+        self.grid = self.entries
+        if key and rest:
+            self.ncol = max(self.ncol, len(key))
+            per_col = -(-len(rest) // self.ncol)
+            self.grid = []
+            for c in range(self.ncol):
+                column = rest[c * per_col:(c + 1) * per_col]
+                self.grid += [key[c] if c < len(key) else None] + column + [None] * (per_col - len(column))
+            self.nrows = per_col + 1
 
     @property
     def height_pt(self) -> float:
@@ -461,9 +477,10 @@ def _draw_legend(ax, plan: _LegendPlan) -> None:
     if not plan.entries:
         return
     from matplotlib.lines import Line2D
-    handles = [Line2D([], [], color=c, linestyle=ls,
-                      lw=1.0 if c == panel_legend.METRIC_COLOR else 1.5, label=lab)
-               for lab, c, ls in plan.entries]
+    handles = [Line2D([], [], color=e[1], linestyle=e[2],
+                      lw=1.0 if e[1] == panel_legend.METRIC_COLOR else 1.5, label=e[0])
+               if e else Line2D([], [], alpha=0.0, label="")          # a blank cell
+               for e in plan.grid]
     fs = LEGEND_FONTSIZE
     ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
               ncol=plan.ncol, fontsize=fs, frameon=True, framealpha=0.9,
@@ -838,7 +855,7 @@ class _Timeline:
         self.links = process_timeline.fork_links(self.procs, self.lanes)
         self.labels, self.n_label_rows = process_timeline.place_labels(
             self.procs, self.lanes, t0_ns, t_end_ns, width_pt,
-            lambda t: _text_width_pt(t, PROCESS_LABEL_FONTSIZE), pad_units=4.0)
+            lambda t: _text_width_pt(t, PROCESS_LABEL_FONTSIZE), pad_units=TIMELINE_LABEL_PAD_PT)
 
     @property
     def height_lanes(self) -> float:

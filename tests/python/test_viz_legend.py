@@ -116,3 +116,54 @@ def test_smaller_series_drawn_over_larger(tmp_path):
     z = {ln._series_key[0]: ln.get_zorder() for ln in ax.get_lines()
          if getattr(ln, "_series_key", None)}
     assert z[avg] > z[mx], z
+
+
+def _io_trace(tmp_path):
+    procs = [viz_trace.proc(700, comm="root", discovered=False, cpu=50),
+             viz_trace.proc(701, ppid=700, comm="worker", cpu=20)]
+    return viz_trace.write_trace(str(tmp_path / "t"), procs, disk=True)
+
+
+KEY = ["Io Rchar (sum)", "Io Wchar (sum)"]
+
+
+def test_style_key_on_its_own_first_row_and_process_only_totals(tmp_path):
+    """A per-process panel with several metrics: the line-style key alone
+    on the legend's first row, the processes under it; a cumulative
+    panel's process entries name the process and its totals (marked by
+    their line style), not the metric."""
+    meta = _io_trace(tmp_path)
+    r = visualize_all.build_figure(meta)
+    r.fig.canvas.draw()
+    rend = r.fig.canvas.get_renderer()
+    io = [(k, ax) for p, _s, k, ax in r.panel_axes if p.series_glob == "proc__io_?char.*"]
+    assert {k for k, _ax in io} == {"metric", "integrated"}
+    for kind, ax in io:
+        texts = [t for t in ax.get_legend().get_texts() if t.get_text()]
+        key = [t for t in texts if t.get_text() in KEY]
+        procs = [t for t in texts if t.get_text() not in KEY]
+        assert [t.get_text() for t in key] == KEY and len(procs) == 2
+        ky = {round(t.get_window_extent(rend).y0) for t in key}
+        assert len(ky) == 1                                   # one row
+        assert min(ky) > max(t.get_window_extent(rend).y1 for t in procs)   # above the processes
+        for t in procs:
+            assert "PID" in t.get_text() and "Rchar" not in t.get_text() \
+                and "Wchar" not in t.get_text(), t.get_text()
+        if kind == "integrated":
+            assert all("──" in t.get_text() for t in procs)   # totals, marked by style
+
+
+def test_style_key_own_legend_bokeh(tmp_path):
+    pytest.importorskip("bokeh")
+    import visualize_interactive
+    doc = visualize_interactive.build_static(_io_trace(tmp_path))
+    io = [(k, f) for p, k, f in doc.panel_figs if p.series_glob == "proc__io_?char.*"]
+    assert {k for k, _f in io} == {"metric", "cumulative"}
+    for kind, f in io:
+        legends = [r for r in f.above if type(r).__name__ == "Legend"]
+        assert len(legends) == 2
+        procs, key = legends                       # the key added last: stacked on top
+        assert [it.label.value for it in key.items] == KEY and key.ncols == len(KEY)
+        labels = [it.label.value for it in procs.items]
+        assert len(labels) == 2 and all("PID" in l and "Rchar" not in l and "Wchar" not in l
+                                        for l in labels), labels

@@ -67,7 +67,7 @@ def test_legend_swatches_are_legible(tmp_path):
     legend handles."""
     doc = _doc(tmp_path, 3)
     for _p, _k, fig in doc.panel_figs:
-        for it in fig.legend[0].items:
+        for it in [it for lg in fig.legend for it in lg.items]:
             sw = it.renderers[-1].glyph
             assert sw.line_width == 1.5, it.label.value
             # a process's / series' colour, or black for a line-style entry

@@ -76,6 +76,11 @@ COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
 # Panels with a single metric per process keep solid lines.
 N_METRIC_STYLES = 4
 METRIC_COLOR = "black"   # the line-style entries' colour
+# In text (a cumulative panel's per-process totals), the line style a
+# value belongs to: solid, dashed, dotted, dash-dot. The metric's name is
+# in the line-style key of the legend, not repeated per process.
+# Doubled, so a solid one reads as a line sample, not a minus sign.
+STYLE_GLYPHS = ["\u2500\u2500", "\u254c\u254c", "\u2508\u2508", "\u2500\u00b7\u2500"]
 
 
 def series_label(series, projector, base: str | None = None) -> str:
@@ -282,9 +287,9 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
         for k in shown:
             label = process_label(projector, k)
             if cumulative:
-                parts = [f"{label_bases[(s.fqn, k)]} {fmt_total(amount[(s.fqn, k)])}"
+                parts = [f"{STYLE_GLYPHS[styles_idx[(s.fqn, k)]]} {fmt_total(amount[(s.fqn, k)])}"
                          for s in procs[k] if amount[(s.fqn, k)] > 0]
-                label += ": " + (", ".join(parts) if parts else "0")
+                label += ": " + (" \u00b7 ".join(parts) if parts else "0")
             entries.append((label, pcolor[k], 0, [(s.fqn, k) for s in procs[k]]))
         if hidden:
             label = more_label(len(hidden))
@@ -293,8 +298,9 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
                 for k in hidden:
                     for s in procs[k]:
                         sums[s.fqn] = sums.get(s.fqn, 0.0) + amount[(s.fqn, k)]
-                parts = [f"{fqn_base[f]} {fmt_total(v)}" for f, v in sums.items() if v > 0]
-                label += ": " + (", ".join(parts) if parts else "0")
+                style_of = {s.fqn: styles_idx[(s.fqn, s.scope_key)] for s in live}
+                parts = [f"{STYLE_GLYPHS[style_of[f]]} {fmt_total(v)}" for f, v in sums.items() if v > 0]
+                label += ": " + (" \u00b7 ".join(parts) if parts else "0")
             entries.append((label, OTHER_COLOR, 0,
                             [(s.fqn, k) for k in hidden for s in procs[k]]))
         for fqn, st in dict.fromkeys((s.fqn, styles_idx[(s.fqn, s.scope_key)]) for s in live):
