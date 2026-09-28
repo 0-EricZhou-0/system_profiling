@@ -59,3 +59,16 @@ def test_smaller_series_drawn_over_larger(tmp_path):
     items = {it.label.value: it.renderers[0] for it in fig.legend[0].items}
     idx = {lab: fig.renderers.index(r) for lab, r in items.items()}
     assert idx["Active Cycles (avg)"] > idx["Active Cycles (max)"], idx   # drawn later = on top
+
+
+def test_legend_swatches_are_legible(tmp_path):
+    """Series lines are thin (0.84 px); each legend entry draws its own
+    1.5 px swatch in its colour (its last renderer), like the PNG's
+    legend handles."""
+    doc = _doc(tmp_path, 3)
+    for _p, _k, fig in doc.panel_figs:
+        for it in fig.legend[0].items:
+            sw = it.renderers[-1].glyph
+            assert sw.line_width == 1.5, it.label.value
+            # a process's / series' colour, or black for a line-style entry
+            assert sw.line_color in (it.renderers[0].glyph.line_color, "black"), it.label.value

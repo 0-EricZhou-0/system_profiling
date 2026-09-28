@@ -514,8 +514,9 @@ def _legend_above(fig, items: list[tuple[str, list]]) -> None:
 def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> list:
     """Draw every series of a panel_legend.Plan (sources: (fqn,
     scope_key) -> ColumnDataSource) and return its legend items: listed
-    series in their colour and line style, the rest light grey. A
-    process (with several metrics) or line-style entry gets a swatch of its own (a one-point
+    series in their colour and line style, the rest light grey. Every
+    entry but "+k more" gets a swatch of its own, 1.5 px wide as the PNG's
+    legend handles (the series lines are thinner) (a one-point
     line at negative time, outside the x range's bounds) so it shows the
     process's colour, or the style in black; clicking it hides all its
     lines."""
@@ -529,8 +530,7 @@ def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> list:
     items = []
     for label, color, st, keys in p.entries:
         rs = [lines[k] for k in keys if k in lines]
-        if color == panel_legend.METRIC_COLOR or (len(keys) > 1
-                                                  and color != panel_legend.OTHER_COLOR):
+        if color != panel_legend.OTHER_COLOR:
             # Last: a legend item draws all its renderers' swatches, in order.
             rs.append(fig.line(x=[-2.0, -1.0], y=[0.0, 0.0], color=color,
                                line_dash=_METRIC_DASHES[st], line_width=1.5))
