@@ -167,3 +167,24 @@ def test_style_key_own_legend_bokeh(tmp_path):
         labels = [it.label.value for it in procs.items]
         assert len(labels) == 2 and all("PID" in l and "rchar" not in l and "wchar" not in l
                                         for l in labels), labels
+
+
+def test_exited_process_ends_in_a_dashed_line(tmp_path):
+    """Per-process gauge (RSS): an exited process's end, dashed, from 0
+    up to its last value; a process still alive at the end has none."""
+    procs = [viz_trace.proc(800, comm="root", discovered=False, rss=4e8),
+             viz_trace.proc(801, ppid=800, comm="gone", start_s=1.0, end_s=6.0, rss=3e8)]
+    meta = viz_trace.write_trace(str(tmp_path / "t"), procs)
+    r = visualize_all.build_figure(meta)
+    [ax] = [ax for p, _s, k, ax in r.panel_axes if p.series_glob == "proc__rss_bytes"]
+    ends = [ln for ln in ax.get_lines() if hasattr(ln, "_end_line")]
+    assert [ln._end_line[1] for ln in ends] == [801]
+    x, y = ends[0].get_xdata(), ends[0].get_ydata()
+    assert x[0] == x[1] and 5.8 <= x[0] <= 6.0 and y[0] == 0 and y[1] > 0
+    assert ends[0].get_linestyle() == "--"
+    pytest.importorskip("bokeh")
+    import visualize_interactive
+    doc = visualize_interactive.build_static(meta)
+    [f] = [f for p, k, f in doc.panel_figs if p.series_glob == "proc__rss_bytes"]
+    [seg] = [rr for rr in f.renderers if rr.name == "end-lines"]
+    assert len(seg.data_source.data["x0"]) == 1 and seg.glyph.line_dash == "dashed"

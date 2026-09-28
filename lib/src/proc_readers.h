@@ -82,6 +82,10 @@ std::optional<ProcStat> ReadProcStat(const std::string& procRoot, uint32_t pid);
 ///              dumpable, and no CAP_SYS_PTRACE (or hidepid).
 ///   Other      anything else.
 enum class ReadFailure { Gone, Unreadable, Other };
+
+/// Is the process exiting (or gone)? /proc/<pid>/stat missing, state Z/X,
+/// or PF_EXITING set — the exit evidence ClassifyReadFailure uses.
+bool IsExiting(uint32_t pid);
 ReadFailure ClassifyReadFailure(uint32_t pid, int err);
 
 /// The stderr warning (one line, no newline) for an Unreadable / Other

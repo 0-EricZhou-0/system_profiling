@@ -124,6 +124,10 @@ message TrackedProcessV2 {
     //   Disk trace, /proc/<pid>/io: no ProcessSample on those ticks.
     //   System trace, /proc/<pid>/statm: its memory values are NaN in
     //   those ProcessSamples (its CPU is still sampled).
+    // (Separately, not counted here: a sample read while the process was
+    // exiting — /proc/<pid>/statm reads RSS 0 once the kernel has torn
+    // its memory down — has NaN memory values too: that 0 is the exit,
+    // not the process's memory.)
     // A process that is exiting is not counted: its /proc/<pid>/io is
     // unreadable (EACCES) from the kernel's teardown of its memory until
     // it is reaped, which is its exit, not a permission problem.

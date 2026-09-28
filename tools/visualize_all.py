@@ -385,6 +385,7 @@ class _LegendPlan:
     """
 
     def __init__(self, p: panel_legend.Plan, avail_width_pt: float):
+        self.source = p
         self.styles = {k: (c, _METRIC_LINESTYLES[st], listed)
                        for k, (c, st, listed) in p.styles.items()}
         self.zorder = {k: 2 + i / 1000 for i, k in enumerate(p.order)}
@@ -555,6 +556,13 @@ def _render_metric_panel(
     for key, ts_ns, vals in plotted:
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
         _plot_styled(ax, time_s, scale_fn(vals), key, plan)
+    # Per-process gauges: each exited process's end, dashed, 0 -> last value.
+    for key, t_ns, v, color in panel_legend.end_lines(series_list, projection, projector,
+                                                      plan.source, unit):
+        x = (t_ns - t0_ns) / 1e9
+        line, = ax.plot([x, x], [0.0, scale_fn(v)], color=color, linestyle="--",
+                        linewidth=SERIES_LINEWIDTH, zorder=plan.zorder.get(key, 1))
+        line._end_line = key
 
     peak_scaled = None
     data_max = units.largest(v for _k, _t, v in plotted)

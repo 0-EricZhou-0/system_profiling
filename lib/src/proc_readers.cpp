@@ -92,12 +92,15 @@ std::optional<PIDStatmSnapshot> ReadPIDStatm(uint32_t pid, int* err) {
     return s;
 }
 
-ReadFailure ClassifyReadFailure(uint32_t pid, int err) {
-    if (err == ENOENT || err == ESRCH) return ReadFailure::Gone;
+bool IsExiting(uint32_t pid) {
     constexpr uint64_t kPfExiting = 0x4;
     auto st = ReadProcStat("/proc", pid);
-    if (!st || st->state == 'Z' || st->state == 'X' || (st->flags & kPfExiting))
-        return ReadFailure::Gone;
+    return !st || st->state == 'Z' || st->state == 'X' || (st->flags & kPfExiting);
+}
+
+ReadFailure ClassifyReadFailure(uint32_t pid, int err) {
+    if (err == ENOENT || err == ESRCH) return ReadFailure::Gone;
+    if (IsExiting(pid)) return ReadFailure::Gone;
     if (err == EACCES || err == EPERM) return ReadFailure::Unreadable;
     return ReadFailure::Other;
 }

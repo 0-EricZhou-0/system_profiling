@@ -648,6 +648,13 @@ def _build_panel(
             x=time_s, y=scale_fn(vals.astype(np.float64)),
         ))
     legend_items, legend_key = _draw_plan(fig, plan, cds_by_key)
+    # Per-process gauges: each exited process's end, dashed, 0 -> last value.
+    ends = panel_legend.end_lines(series_list, projection, projector, plan, unit)
+    if ends:
+        x = [(t - t0_ns) / 1e9 for _k, t, _v, _c in ends]
+        fig.segment(x0=x, x1=x, y0=[0.0] * len(ends), y1=[scale_fn(v) for _k, _t, v, _c in ends],
+                    line_color=[c for _k, _t, _v, c in ends], line_dash="dashed",
+                    line_width=_SERIES_LINE_WIDTH, name="end-lines")
 
     # Peak reference line + y-range. When the panel has a known peak,
     # pin the view to [0, peak*headroom] with hard bounds so pan/zoom

@@ -484,6 +484,14 @@ void SystemProfiler::Start() {
                                                                      r.statmErr, kind));
                     memUnreadable = true;
                 }
+                // A process whose memory the kernel is tearing down reads
+                // RSS 0 in /proc/<pid>/statm (its mm is gone) while its
+                // pidfd still says alive. That 0 is its exit, not its
+                // memory: with the exit evidence, the memory values of
+                // this sample are NaN (missing); its CPU is kept. A live
+                // process that frees its memory reads its real value.
+                if (r.statm && r.statm->RSSPages == 0 && internal::IsExiting(pid))
+                    memUnreadable = true;
                 auto& prev = impl.prevPID[pid];
                 const internal::PIDStatmSnapshot statm = r.statm.value_or(internal::PIDStatmSnapshot{});
 

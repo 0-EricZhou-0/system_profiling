@@ -186,6 +186,29 @@ def metric_color_map(panels) -> dict:
     return out
 
 
+def end_lines(series_list, projection: dict, projector, p: "Plan", unit: int) -> list:
+    """For a per-process gauge panel (bytes, not bytes/s: RSS, VMS, ...):
+    each process that exited ends in a dashed vertical line from 0 up to
+    its last measured value, in its colour, so its end reads as an end
+    (its last samples during the exit carry no value: the probe records
+    them as missing). Returns [(key, t_ns, value, color)] for the series
+    of processes the trace saw exit."""
+    if unit != _mc.UNIT_BYTES:
+        return []
+    exited = {r.pid for r in projector.process_table.values() if r.end_time_ns}
+    out = []
+    for s in series_list:
+        k = (s.fqn, s.scope_key)
+        if s.scope != _mc.SCOPE_PROCESS or int(s.scope_key) not in exited or k not in p.styles:
+            continue
+        ts, vals = projection[k]
+        ok = np.flatnonzero(np.isfinite(vals.astype(np.float64)))
+        if ok.size:
+            color, _st, listed = p.styles[k]
+            out.append((k, int(ts[ok[-1]]), float(vals[ok[-1]]), color if listed else OTHER_COLOR))
+    return out
+
+
 def aggregate(series_list, projection: dict) -> tuple[list, dict]:
     """For PANEL_AGGREGATION_INTEGRATE_SUM: each metric's series summed
     over their instances on the union of their sample times (a series is

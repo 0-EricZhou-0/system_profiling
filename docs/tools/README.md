@@ -165,6 +165,16 @@ band over the full-colour `.max` one (max ≥ avg, so max shows from avg up
 to max). Series lines are 0.63 pt (the grey "+k more" 0.42 pt; the Bokeh
 page 0.84 / 0.56 px).
 
+**A process's end on memory panels.** While the kernel tears an exiting
+process's memory down, `/proc/<pid>/statm` reads RSS 0 though its pidfd
+still says alive. The System probe checks the exit evidence at that
+reading (`/proc/<pid>/stat` gone, zombie, or `PF_EXITING`) and records
+the sample's memory as missing (NaN) instead of 0 — its CPU is kept; a
+process that frees its memory while alive keeps its real drop. On the
+per-process memory panels (bytes, e.g. RSS), each process that exited
+ends in a dashed vertical line in its colour from 0 up to its last
+measured value.
+
 **Cumulative companions.** A layout panel with `aggregation:
 PANEL_AGGREGATION_INTEGRATE` gets a companion under it plotting ∫ y dt of
 each of its series (trapezoid rule, full-resolution data), run totals in
