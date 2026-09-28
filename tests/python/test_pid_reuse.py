@@ -46,6 +46,9 @@ with running_suite(outdir, mode, hz=100, flush_ms=1000) as suite:
     a = subprocess.Popen([PY, "-c", BURN])
     suite.add_tracked_process(a.pid, "A")
     time.sleep(2.5)                            # A burned 2 s, now sleeps
+    # A may be gone (and seen gone by the probe) any time after kill():
+    # a_kill bounds its end time from below, a_dead (reaped) from above.
+    res["a_kill"] = time.monotonic_ns()
     a.kill(); a.wait()
     res["a"] = a.pid
     res["a_dead"] = time.monotonic_ns()
@@ -135,7 +138,7 @@ def test_reused_pid_readded_is_a_new_entry(tmp_path, mode):
     assert [r.label for r in regs] == ["A", "B"], [(r.label, r.removed, r.start_time_ns)
                                                    for r in regs]
     a, b = regs
-    assert a.removed and 0 < a.end_time_ns - res["a_dead"] <= 50 * MS, a
+    assert a.removed and res["a_kill"] < a.end_time_ns <= res["a_dead"] + 50 * MS, a
     assert res["b_spawn"] - 10 * MS <= b.start_time_ns <= res["readd"] + 10 * MS, \
         (b.start_time_ns - res["b_spawn"]) / MS
     # Between A's death and B's registration, the number is nobody's.
