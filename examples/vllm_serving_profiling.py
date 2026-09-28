@@ -43,9 +43,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 VISUALIZER = os.path.normpath(os.path.join(HERE, "..", "tools", "visualize_all.py"))
 PANELS = os.path.normpath(os.path.join(HERE, "..", "configs", "vllm_serving_panels.pbtxt"))
 
-# GPU PM sampling metrics, when --gpu is given (device-wide counters).
+# GPU PM sampling metrics, when --gpu is given (device-wide counters). SM
+# activity twice: the mean over the SMs (.avg) and the busiest SM (.max),
+# which tells a few busy SMs from all SMs half busy.
 GPU_METRICS = [
     "sm__cycles_active.avg.pct_of_peak_sustained_elapsed",
+    "sm__cycles_active.max.pct_of_peak_sustained_elapsed",
     "sm__warps_active.avg.per_cycle_active",
     "dram__read_throughput.avg.pct_of_peak_sustained_elapsed",
     "dram__write_throughput.avg.pct_of_peak_sustained_elapsed",

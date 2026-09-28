@@ -175,7 +175,11 @@ test-only oracle polling the run's cgroup every 10 ms and the launcher's
 
 CUPTI PM Sampling runs in the launcher's own CUDA context, but the counters it
 samples are the **device's**: SM activity, warps and DRAM throughput include
-every context on the GPU, vLLM's among them. Measured in this example's runs:
+every context on the GPU, vLLM's among them. SM activity is collected twice,
+as the mean over the SMs (`sm__cycles_active.avg`, "(avg)" in the legend) and
+as the busiest SM (`.max`, "(max)"): a max far above the mean means a few SMs
+busy and the rest idle. Measured in this
+example's runs:
 
 | window | SM active (% of peak, mean) — run in the figure (500 Hz) | earlier run (1000 Hz) | earlier run (1000 Hz) |
 |---|---|---|---|
