@@ -73,7 +73,7 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("max_samples",           &ProfilerConfig::maxSamples,
             "Counter-data image capacity, in samples, for one decode pass "
             "(~16 KB of host RAM each). 0 (default) = sized for the decode "
-            "interval: ceil(rate x decode_interval x 1.25) + 64.")
+            "interval: ceil(rate x decode_interval x 4) + 64.")
         .def_readwrite("metrics",               &ProfilerConfig::metrics,
             "List of CUPTI metric names (e.g. 'sm__cycles_active.avg').")
         .def_readwrite("flush_interval_ms",     &ProfilerConfig::flushIntervalMs,

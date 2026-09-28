@@ -50,7 +50,8 @@ message GPUProfilerConfig {
     // Capacity, in samples, of the counter-data image one decode pass
     // decodes into (two images, double-buffered; ~16 KB of host RAM per
     // sample slot with 4 metrics). 0 = sized for the decode interval:
-    // ceil(sampling_frequency_hz x decode_interval_ms / 1000 x 1.25) + 64.
+    // ceil(sampling_frequency_hz x decode_interval_ms / 1000 x 4) + 64
+    // (a pass may start up to three intervals late without loss).
     // Smaller than one pass loses samples: CUPTI 13.3 returns invalid
     // samples once the image fills (counted in GpuDecodeStats).
     uint64 max_samples = 5;

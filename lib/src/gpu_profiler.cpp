@@ -106,10 +106,17 @@ double NvLinkLinkBytesPerSec(unsigned int gen) {
 // time (GpuDecodeStats.hw_buffer_overflows).
 constexpr uint64_t kHwBufferBytesPerSampleBound = 16 * 1024;
 
-// Counter-data image slots for one decode pass, with a 25% + 64 margin
-// for a late pass.
+// Counter-data image slots: four decode intervals (+ 64), so a decode
+// pass that starts up to three intervals late (a starved or stalled
+// host) still fits; beyond that the pass loses samples (a full image).
+// Cost: each pass re-initializes one image at ~0.07 ms per MB (measured,
+// H100 host, 13-16 GB/s), ~16 KB per slot with 4 metrics: 7.6 / 34 /
+// 66 MB, i.e. 0.05 / 0.23 / 0.5% of a core at 100 / 500 / 1000 Hz with the
+// 1 s interval, ~66 MB/s of memory traffic at 1 kHz (the 817 MB image
+// re-initialized ~16 times a second before 2026-09-28 was ~13 GB/s).
+constexpr uint64_t kImageIntervals = 4;
 uint64_t AutoMaxSamples(uint64_t hz, uint64_t decodeIntervalMs) {
-    return (hz * decodeIntervalMs * 5 + 3999) / 4000 + 64;
+    return (hz * decodeIntervalMs * kImageIntervals + 999) / 1000 + 64;
 }
 
 } // namespace

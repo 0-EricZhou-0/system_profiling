@@ -73,4 +73,8 @@ message GpuDecodeStats {
     // one per run), and after a re-enable the whole gap (its samples are
     // in samples_lost).
     uint64 stretched_samples   = 10;
+    // Decode passes that started so late that the samples waiting filled
+    // more than 3/4 of a counter-data image: the decode thread is falling
+    // behind (warned about before an image overflows).
+    uint64 late_passes         = 11;
 }

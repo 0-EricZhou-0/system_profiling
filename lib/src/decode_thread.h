@@ -28,6 +28,7 @@ struct DecodeStats {
     std::atomic<uint64_t> hwBufferOverflows{0};
     std::atomic<uint64_t> samplerRestarts{0};
     std::atomic<uint64_t> stretchedSamples{0};
+    std::atomic<uint64_t> latePasses{0};
 };
 
 /// What the decode thread needs to know about its device.

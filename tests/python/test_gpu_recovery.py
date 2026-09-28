@@ -49,3 +49,12 @@ def test_full_image_recovers_by_itself(tmp_path):
     ts = [s.timestamp_ns for f in frames for s in f.samples]
     assert all(b > a for a, b in zip(ts, ts[1:])), "out-of-order samples reached the trace"
     assert sum(1 for l in w if "filled up" in l) == 1, w
+
+
+def test_falling_behind_is_warned_before_loss(tmp_path):
+    """A pass 2.5 s late (3.5 s of samples waiting, 86% of the 1 kHz
+    image) loses nothing but is reported."""
+    frames, st, last, t_stop, w = _run(tmp_path, 2500, 6.0)
+    assert st.late_passes >= 1, st
+    assert (st.counter_data_full, st.samples_lost, st.hw_buffer_overflows) == (0, 0, 0), st
+    assert sum(1 for l in w if "falling behind" in l) == 1, w

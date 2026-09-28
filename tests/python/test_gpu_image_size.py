@@ -1,5 +1,6 @@
 """gpu.max_samples = 0 (default) sizes the counter-data image for one
-decode pass: ceil(rate x decode_interval x 1.25) + 64 samples. An
+decode pass that may start up to three intervals late:
+ceil(rate x decode_interval x 4) + 64 samples. An
 explicit value is honored. hw_buffer_size must hold two decode intervals
 of samples. Needs a GPU with PM sampling.
 """
@@ -20,7 +21,7 @@ def _image(out):
 
 
 @pytest.mark.parametrize("hz,interval_ms,expected", [
-    (100, 1000, 189), (500, 1000, 689), (1000, 1000, 1314), (1000, 200, 314)])
+    (100, 1000, 464), (500, 1000, 2064), (1000, 1000, 4064), (1000, 200, 864)])
 def test_auto_size(tmp_path, hz, interval_ms, expected):
     cfg = gpu_config(tmp_path, sampling_frequency_hz=hz, decode_interval_ms=interval_ms)
     rc, out, err = run_child(cfg, "suite.stop()")
@@ -40,7 +41,7 @@ def test_complete_at_500hz_with_auto_image(tmp_path):
     cfg = gpu_config(tmp_path, sampling_frequency_hz=500)
     rc, out, err = run_child(cfg, "time.sleep(3.5); suite.stop()")
     assert rc == 0, err
-    assert _image(out)[:2] == (689, "auto")
+    assert _image(out)[:2] == (2064, "auto")
     frames = gpu_frames(tmp_path)
     ts = sample_times(frames)
     diffs = [b - a for a, b in zip(ts, ts[1:])]

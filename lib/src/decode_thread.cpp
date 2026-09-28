@@ -109,6 +109,27 @@ public:
         return CUPTI_SUCCESS;
     }
 
+    // A pass is about to start `sinceLastNs` after the previous one.
+    // When the samples waiting by now fill more than 3/4 of an image,
+    // the decode thread is falling behind: say so before an image
+    // overflows (one line, at most one per 30 s; counted).
+    void CheckBehind(uint64_t sinceLastNs) {
+        const uint64_t period = device_.samplingIntervalNs;
+        if (period == 0 || device_.maxSamples == 0) return;
+        const uint64_t pending = sinceLastNs / period;
+        if (pending * 4 <= device_.maxSamples * 3) return;
+        stats_.latePasses.fetch_add(1, std::memory_order_relaxed);
+        const auto now = std::chrono::steady_clock::now();
+        if (lateWarnings_ != 0 && now - lastLateWarning_ < std::chrono::seconds(30)) return;
+        ++lateWarnings_;
+        lastLateWarning_ = now;
+        std::fprintf(stderr,
+            "[cupti-profiler] warning: GPU %u: decode pass %.1f s after the previous one "
+            "(%llu samples waiting, %.0f%% of the counter-data image): the decode thread is falling "
+            "behind; a longer delay loses samples\n", device_.gpuIndex, sinceLastNs / 1e9,
+            static_cast<unsigned long long>(pending), 100.0 * pending / device_.maxSamples);
+    }
+
     // Stop sampling (the decode thread owns the sampler: a restart must
     // not race Stop()).
     CUptiResult StopSampling() {
@@ -279,6 +300,8 @@ private:
     int active_ = 0;              // decode thread only
     uint64_t lastEndNs_ = 0;      // worker only
     uint64_t fullWarnings_ = 0;
+    uint64_t lateWarnings_ = 0;
+    std::chrono::steady_clock::time_point lastLateWarning_{};
     std::chrono::steady_clock::time_point lastFullWarning_{};
     bool warnedLost_ = false;
     std::thread worker_;
@@ -305,9 +328,14 @@ void DecodeThreadFunc(std::array<std::vector<uint8_t>, 2>& counterDataImages,
     // wait short.
     const auto interval = std::chrono::milliseconds(device.decodeIntervalMs);
     auto next = std::chrono::steady_clock::now() + interval;
+    auto lastPass = std::chrono::steady_clock::now();
     result = CUPTI_SUCCESS;
     while (!stop.WaitUntil(next)) {
         PassDecodeStall();   // test-only; see <cupti_profiler/testing.h>
+        const auto passStart = std::chrono::steady_clock::now();
+        decoder.CheckBehind(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(passStart - lastPass).count()));
+        lastPass = passStart;
         result = decoder.Pass();
         if (result != CUPTI_SUCCESS) break;
         next += interval;
@@ -328,15 +356,16 @@ void ReportDecodeSummary(uint32_t gpuIndex, const DecodeStats& stats) {
     const auto lost     = stats.samplesLost.load();
     const auto overflow = stats.hwBufferOverflows.load();
     const auto restarts = stats.samplerRestarts.load();
-    if (full == 0 && invalid == 0 && lost == 0 && overflow == 0) return;
+    const auto late     = stats.latePasses.load();
+    if (full == 0 && invalid == 0 && lost == 0 && overflow == 0 && late == 0) return;
     std::fprintf(stderr,
         "[cupti-profiler] warning: GPU %u decode summary: %llu samples kept, %llu missing, "
         "%llu invalid dropped; counter-data image full %llu time(s), hardware buffer "
-        "overflow %llu time(s), sampler re-enabled %llu time(s)\n", gpuIndex,
+        "overflow %llu time(s), sampler re-enabled %llu time(s), late decode passes %llu\n", gpuIndex,
         static_cast<unsigned long long>(stats.samples.load()),
         static_cast<unsigned long long>(lost), static_cast<unsigned long long>(invalid),
         static_cast<unsigned long long>(full), static_cast<unsigned long long>(overflow),
-        static_cast<unsigned long long>(restarts));
+        static_cast<unsigned long long>(restarts), static_cast<unsigned long long>(late));
 }
 
 } // namespace internal

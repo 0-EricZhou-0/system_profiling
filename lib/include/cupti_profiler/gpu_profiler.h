@@ -46,7 +46,8 @@ struct CUPTI_PROFILER_API ProfilerConfig {
     // Counter-data image capacity, in samples, for ONE decode pass (the
     // image is re-initialized after every pass; ~16 KB of host RAM per
     // slot with 4 metrics on H100). 0 = sized for the decode interval:
-    // ceil(samplingFrequencyHz x decodeIntervalMs / 1000 x 1.25) + 64.
+    // ceil(samplingFrequencyHz x decodeIntervalMs / 1000 x 4) + 64: room
+    // for a pass that starts up to three intervals late.
     // Smaller than one pass loses samples (CUPTI 13.3 returns invalid
     // samples once the image fills); counted in GpuDecodeStats.
     uint64_t maxSamples = 0;

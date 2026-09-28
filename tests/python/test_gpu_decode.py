@@ -53,4 +53,5 @@ def test_undersized_image_is_detected_and_reported(tmp_path):
     w = warnings(err)
     assert any("counter-data image (max_samples) filled up" in l for l in w), w
     assert any("decode summary" in l for l in w), w
-    assert len(w) <= 4, f"warnings must not repeat per pass: {w}"
+    for kind in ("filled up", "falling behind", "missing between", "decode summary"):
+        assert sum(kind in l for l in w) <= 1, f"warnings must not repeat per pass: {w}"

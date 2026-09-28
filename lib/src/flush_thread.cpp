@@ -88,6 +88,7 @@ GPUMetricsTrace BuildTrace(const std::string& hostname,
             ds->set_hw_buffer_overflows(st.hwBufferOverflows.load());
             ds->set_sampler_restarts(st.samplerRestarts.load());
             ds->set_stretched_samples(st.stretchedSamples.load());
+            ds->set_late_passes(st.latePasses.load());
         }
     }
 

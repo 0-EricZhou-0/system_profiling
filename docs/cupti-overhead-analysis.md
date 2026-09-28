@@ -92,7 +92,7 @@ CLI flags:
   -o, --output <file>       Output protobuf file      (default: gpu_metrics.pb)
 
 Library defaults (configurable, see docs/system-guide.md):
-  Max samples:              0 = sized for one decode pass (rate x interval x 1.25 + 64)
+  Max samples:              0 = sized for one decode pass (rate x interval x 4 + 64: a pass may start 3 intervals late)
   HW buffer size:           512 MB
   Decode interval:          1000 ms (a hardcoded 5 ms until 2026-09-28)
   Trigger mode:             GPU_TIME_INTERVAL (requires Ampere+)
