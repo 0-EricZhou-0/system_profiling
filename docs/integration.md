@@ -116,7 +116,7 @@ source, build a wheel once and distribute it:
 cd third_party/cupti-profiler
 pip install build
 python -m build --wheel
-# → dist/cupti_profiler-0.1.0-cp311-cp311-linux_x86_64.whl
+# → dist/cupti_profiler-0.2.0-cp311-cp311-linux_x86_64.whl
 
 # On the consumer machine (matching Python ABI + CUDA driver):
 pip install cupti_profiler-…whl
