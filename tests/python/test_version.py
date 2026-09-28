@@ -22,3 +22,15 @@ def test_docs_wheel_names_follow_the_version():
     wheels = re.findall(r"cupti_profiler-(\d[\w.]*?)-cp", text)
     assert wheels, "docs/integration.md names no wheel"
     assert set(wheels) == {_version()}, wheels
+
+
+def test_viz_extra_has_both_renderers():
+    """tools/visualize_all.py needs matplotlib, tools/visualize_interactive.py
+    bokeh (tested with 3.9.2): both in the viz extra, bokeh with a floor."""
+    with open(os.path.join(_REPO, "pyproject.toml"), "rb") as f:
+        viz = tomllib.load(f)["project"]["optional-dependencies"]["viz"]
+    names = {re.split(r"[<>=!~ ]", d, maxsplit=1)[0] for d in viz}
+    assert {"numpy", "matplotlib", "bokeh"} <= names, viz
+    [bk] = [d for d in viz if d.startswith("bokeh")]
+    floor = tuple(int(x) for x in bk.split(">=")[1].split("."))
+    assert (3, 0) <= floor <= (3, 9, 2), bk

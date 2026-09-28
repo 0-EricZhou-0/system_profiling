@@ -6,5 +6,6 @@ dependencies:
   - pip
   - pip:
     - matplotlib
+    - bokeh>=3.9
     - numpy
     - protobuf
