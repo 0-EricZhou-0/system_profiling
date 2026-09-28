@@ -136,12 +136,13 @@ def test_timeline_under_region_bokeh(tmp_path):
     pytest.importorskip("bokeh")
     import visualize_interactive
     doc = visualize_interactive.build_static(_trace(tmp_path))
-    kids = doc.root.children
     tl = doc.timeline
     assert tl is not None
-    i = kids.index(tl)
-    assert doc.strips[-1] in kids[i - 1].children       # right after the strips (region last)
-    assert kids[i + 1] is doc.panel_figs[0][2]         # then the first panel
+    band = doc.band.children                            # the sticky band: pinned
+    assert tl in doc.timeline_block.children
+    assert band.index(doc.timeline_block) == band.index(doc.strips[-1]) + 1   # right under Region
+    kids = doc.root.children
+    assert doc.panel_figs[0][2] in kids[kids.index(doc.band) + 1].children    # then the first panel
     assert tl.x_range is doc.panel_figs[0][2].x_range
     hover = [t for t in tl.tools if type(t).__name__ == "HoverTool"]
     names = []

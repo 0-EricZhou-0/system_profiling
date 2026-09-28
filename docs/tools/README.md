@@ -233,9 +233,27 @@ Flag reference (selected; full list via `--help`):
 
 What you get:
 
-- **Process timeline** under the strips (it scrolls with the panels),
-  as in `visualize_all.py`; hover a bar for the process's every name,
-  pid, parent, kind, start and end.
+- **Process timeline pinned** in the sticky band, under the event and
+  region strips (same x-range as the panels), as in `visualize_all.py`;
+  hover a bar for the process's every name, pid, parent, kind, start and
+  end. Taller than 35% of the window (a cold vLLM start: 21 lanes and
+  their label rows), it scrolls inside the band, so the band stays under
+  about half the window and the panels keep the rest.
+- **Foldable panels**: each panel, and the timeline, has a header with
+  its title and a ▾/▸ control; collapsed, only the header row is left.
+  *Collapse all* / *Expand all* sit at the top of the sticky band. Works
+  in the saved HTML without a server (not remembered across reloads).
+- **Keys** (ignored while typing in a text field; the toolbar's tools
+  are unchanged):
+
+  | key | does |
+  |---|---|
+  | `r` or `0` | reset zoom to the whole trace |
+  | `=` or `+` | zoom in 2x around the centre (every panel: they share one x-range) |
+  | `-` | zoom out 2x |
+  | `←` / `→` | pan 10% of the visible span (`Shift`: 50%) |
+  | `c` | collapse / expand all panels |
+  | `?` | show / hide this key list |
 - **Sticky event + region strips** pinned at the top of the page; the
   metric panels below scroll past behind them. The two strips share
   one continuous opaque band with a dashed separator at the bottom.

@@ -60,9 +60,10 @@ from bokeh.application import Application  # noqa: E402
 from bokeh.application.handlers.function import FunctionHandler  # noqa: E402
 from bokeh.embed import file_html  # noqa: E402
 from bokeh.themes import built_in_themes  # noqa: E402
-from bokeh.layouts import column  # noqa: E402
+from bokeh.layouts import column, row  # noqa: E402
 from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
-                          CustomJS, HoverTool, Label, Legend, LegendItem, PanTool,
+                          Button, CustomJS, HoverTool, InlineStyleSheet, Label, Legend,
+                          LegendItem, PanTool,
                           Range1d, ResetTool, SaveTool, Span, WheelZoomTool)
 from bokeh.palettes import Category10  # noqa: E402
 from bokeh.plotting import figure  # noqa: E402
@@ -1297,6 +1298,127 @@ def _inject_loading_overlay(html: str, n_figures: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Foldable panels, pinned timeline, hotkeys (static page)
+# ---------------------------------------------------------------------------
+
+# The pinned process timeline scrolls inside the sticky band beyond this
+# share of the window height: with the event and region strips (~140 px)
+# it keeps the band under about half of a laptop-height window, so at
+# least half is left for the panels scrolling under it.
+_TIMELINE_MAX_VH = 35
+
+_FOLD_CSS = InlineStyleSheet(css=".bk-btn { text-align: left; font-weight: bold; "
+                                 "border: none; background: transparent; padding: 2px 4px; }")
+
+
+def _fold(fig, title: str):
+    """Header button of a foldable panel: '▾ title' expanded, '▸ title'
+    collapsed (the figure hidden, the header kept). The button carries the
+    panel's title; the figure's own is dropped so it is not shown twice."""
+    fig.title.text = ""
+    btn = Button(label="\u25be " + title, sizing_mode="stretch_width", height=24,
+                 stylesheets=[_FOLD_CSS], name="fold")
+    btn.js_on_click(CustomJS(args=dict(fig=fig, btn=btn, title=title), code="""
+        fig.visible = !fig.visible;
+        btn.label = (fig.visible ? "\u25be " : "\u25b8 ") + title;
+    """))
+    return btn, column([btn, fig], spacing=0, sizing_mode="stretch_width")
+
+
+_FOLD_ALL_JS = """
+    for (let i = 0; i < figs.length; i++) {
+        figs[i].visible = !collapse;
+        btns[i].label = (collapse ? "\u25b8 " : "\u25be ") + titles[i];
+    }
+"""
+
+
+def _fold_all_buttons(folds: list):
+    """'Collapse all' / 'Expand all' for folds = [(fig, button, title)]."""
+    args = dict(figs=[f for f, _b, _t in folds], btns=[b for _f, b, _t in folds],
+                titles=[t for _f, _b, t in folds])
+    out = []
+    for label, collapse in (("Collapse all", True), ("Expand all", False)):
+        b = Button(label=label, width=110, height=26, name="fold-all")
+        b.js_on_click(CustomJS(args=dict(args, collapse=collapse), code=_FOLD_ALL_JS))
+        out.append(b)
+    return out
+
+
+_KEYS = [("r / 0", "reset zoom"), ("= / +", "zoom in (2x, around the centre)"),
+         ("-", "zoom out"), ("\u2190 / \u2192", "pan 10% of the view (Shift: 50%)"),
+         ("c", "collapse / expand all panels"), ("?", "this help")]
+
+
+def _hotkeys_script(xr_id: str, t_end_s: float, folds: list) -> str:
+    """Keyboard shortcuts on the shared x-range of every panel and the
+    fold state, plus a help overlay ('?'). Plain JS on the document,
+    ignored while typing in an input / textarea."""
+    import json
+    rows = "".join(f"<tr><td><b>{k}</b></td><td>{v}</td></tr>" for k, v in _KEYS)
+    fold_ids = json.dumps([[f.id, b.id, t] for f, b, t in folds])
+    return f"""
+<div id="cupti-keys-help" style="display:none;position:fixed;right:16px;bottom:16px;z-index:1000;
+     background:#fff;border:1px solid #bbb;border-radius:6px;padding:8px 12px;
+     font:12px sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.2)">
+  <div style="font-weight:bold;margin-bottom:4px">Keys</div><table>{rows}</table></div>
+<script>
+(function () {{
+  const XR = {json.dumps(xr_id)}, T_END = {t_end_s!r}, FOLDS = {fold_ids};
+  function model(id) {{
+    const docs = (window.Bokeh && Bokeh.documents) || [];
+    for (const d of docs) {{ const m = d.get_model_by_id(id); if (m) return m; }}
+    return null;
+  }}
+  function setRange(xr, a, b) {{
+    const hi = T_END * 1.4, w = b - a;
+    if (a < 0) {{ a = 0; b = w; }}
+    if (b > hi) {{ b = hi; a = Math.max(0, hi - w); }}
+    xr.start = a; xr.end = b;
+  }}
+  function foldAll() {{
+    const any = FOLDS.some(([f]) => model(f) && model(f).visible);
+    for (const [f, b, t] of FOLDS) {{
+      const fig = model(f), btn = model(b);
+      if (!fig || !btn) continue;
+      fig.visible = !any;
+      btn.label = (any ? "\u25b8 " : "\u25be ") + t;
+    }}
+  }}
+  window.cuptiHotkey = function (key, shift) {{
+    const xr = model(XR);
+    if (!xr) return false;
+    const a = xr.start, b = xr.end, w = b - a, c = (a + b) / 2;
+    switch (key) {{
+      case "r": case "0": setRange(xr, 0, T_END); break;
+      case "=": case "+": setRange(xr, c - w / 4, c + w / 4); break;
+      case "-": case "_": setRange(xr, c - w, c + w); break;
+      case "ArrowLeft":  setRange(xr, a - w * (shift ? 0.5 : 0.1), b - w * (shift ? 0.5 : 0.1)); break;
+      case "ArrowRight": setRange(xr, a + w * (shift ? 0.5 : 0.1), b + w * (shift ? 0.5 : 0.1)); break;
+      case "c": foldAll(); break;
+      case "?": {{ const h = document.getElementById("cupti-keys-help");
+                  h.style.display = h.style.display === "none" ? "block" : "none"; break; }}
+      default: return false;
+    }}
+    return true;
+  }};
+  // The shared x-range as [start, end] (for checking the keys).
+  window.cuptiHotkey.range = function () {{
+    const xr = model(XR);
+    return xr ? [xr.start, xr.end] : null;
+  }};
+  document.addEventListener("keydown", function (e) {{
+    const t = e.target;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if (window.cuptiHotkey(e.key, e.shiftKey)) e.preventDefault();
+  }});
+}})();
+</script>
+"""
+
+
+# ---------------------------------------------------------------------------
 # Static rendering path
 # ---------------------------------------------------------------------------
 
@@ -1331,13 +1453,27 @@ def _render_static(
     # Theme object via built_in_themes. None falls through to stock.
     bokeh_theme = (built_in_themes[theme["bokeh_theme"]]
                    if theme["bokeh_theme"] else None)
+    html = _static_html(doc, title, bokeh_theme, theme)
+    out_path.write_text(html)
+    _log(f"wrote {out_path}  ({out_path.stat().st_size // 1024} KiB; "
+         f"{doc.n_figures} panels)")
+
+
+def _static_html(doc, title: str, bokeh_theme, theme: dict) -> str:
     html = file_html(doc.root, INLINE, title=title, theme=bokeh_theme)
     html = _inject_loading_overlay(html, doc.n_figures)
     if doc.footer_text:
         html = _inject_write_rate_footer(html, doc.footer_text, theme)
-    out_path.write_text(html)
-    _log(f"wrote {out_path}  ({out_path.stat().st_size // 1024} KiB; "
-         f"{doc.n_figures} panels)")
+    if doc.x_range is not None:
+        i = html.rfind("</body>")
+        html = html[:i] + _hotkeys_script(doc.x_range.id, doc.t_end_s, doc.folds) + html[i:]
+    return html
+
+
+def static_page(metadata, **kw) -> str:
+    """build_static() rendered to the page's HTML (not written)."""
+    doc = build_static(metadata, **kw)
+    return _static_html(doc, "Profile", None, _THEMES[_THEME])
 
 
 def build_static(metadata, *, catalog=None, panel_layout=None,
@@ -1518,10 +1654,36 @@ def _build_static_document(
     # no transparent gap between them during scroll, and make THAT
     # the sticky element. The dashed bottom border separates the
     # sticky band from the scrolling metric panels.
+    # Every panel (and the timeline) foldable under a header that keeps
+    # its title; collapse / expand all at the top.
+    folds: list = []                                   # (fig, button, title)
+    folded_panels: list = []
+    for panel, kind, fig in panel_figs:
+        title = _panel_title(panel, [s for p2, s in resolved if p2 is panel][0]) \
+            + ("  (cumulative)" if kind == "cumulative" else "")
+        btn, wrapped = _fold(fig, title)
+        folds.append((fig, btn, title))
+        folded_panels.append(wrapped)
+    timeline_block = None
+    if timeline_fig is not None:
+        tl_title = timeline_fig.title.text
+        tl_btn, timeline_block = _fold(timeline_fig, tl_title)
+        folds.insert(0, (timeline_fig, tl_btn, tl_title))
+        # Pinned with the strips; beyond _TIMELINE_MAX_VH of the window it
+        # scrolls inside the band.
+        # The figure keeps its full height (Bokeh would otherwise shrink it
+        # to fit the cap); the block scrolls over it.
+        timeline_fig.height_policy = "fixed"
+        timeline_block.height_policy = "fit"
+        timeline_block.styles = {"max-height": f"{_TIMELINE_MAX_VH}vh", "overflow-y": "auto"}
+
     theme = _THEMES[_THEME]
     layout_children: list = []
-    if strips:
-        strip_col = column(strips, spacing=0, sizing_mode="stretch_width")
+    # The fold-all buttons ride in the sticky band too, always at hand.
+    band = ([row(_fold_all_buttons(folds))] if folds else []) + strips \
+        + ([timeline_block] if timeline_block is not None else [])
+    if band:
+        strip_col = column(band, spacing=0, sizing_mode="stretch_width")
         strip_col.styles = {
             "position":      "sticky",
             "top":           "0",
@@ -1530,9 +1692,7 @@ def _build_static_document(
             "border-bottom": f"1px dashed {theme['strip_border']}",
         }
         layout_children.append(strip_col)
-    if timeline_fig is not None:
-        layout_children.append(timeline_fig)
-    layout_children.extend(figs)
+    layout_children.extend(folded_panels)
 
     # Write-rate footer (mirrors visualize_all.py's static-PNG table).
     # Kept at the very bottom of the scrolling column so it doesn't
@@ -1556,7 +1716,10 @@ def _build_static_document(
     layout_root = column(layout_children, sizing_mode="stretch_width")
     return StaticDocument(root=layout_root, strips=strips, panel_figs=panel_figs,
                           timeline=timeline_fig, footer_text=footer_text,
-                          n_figures=len(strips) + len(figs) + (timeline_fig is not None))
+                          n_figures=len(strips) + len(figs) + (timeline_fig is not None),
+                          band=strip_col if band else None, timeline_block=timeline_block,
+                          folds=folds, x_range=shared_x,
+                          t_end_s=(t_end_ns - t0_ns) / 1e9)
 
 
 # ---------------------------------------------------------------------------
