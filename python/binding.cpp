@@ -75,7 +75,11 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("metrics",               &ProfilerConfig::metrics,
             "List of CUPTI metric names (e.g. 'sm__cycles_active.avg').")
         .def_readwrite("flush_interval_ms",     &ProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms; 0 = single write at Stop().")
+            "Periodic flush interval in ms; 0 = single write at Stop(). "
+            "Must not be less than decode_interval_ms.")
+        .def_readwrite("decode_interval_ms",    &ProfilerConfig::decodeIntervalMs,
+            "How often the host collects the buffered samples, in ms "
+            "(default 1000; 0 = 1000).")
         .def_readwrite("output_file",           &ProfilerConfig::outputFile,
             "Path to gpu_metrics.pb output file. Empty = no output.");
 
@@ -263,7 +267,9 @@ PYBIND11_MODULE(_native, m) {
             "sidecar cannot be found or spawned (SidecarNotFound, "
             "SidecarSpawnFailed), dies or rejects its config (SidecarExited, "
             "SidecarBadHandshake), or cannot apply sidecar_cpus "
-            "(SidecarAffinityFailed). Legacy mode never raises.",
+            "(SidecarAffinityFailed). Also raises for an inconsistent GPU "
+            "config (InvalidConfig, reason on stderr: e.g. flush_interval_ms "
+            "below decode_interval_ms), in either mode.",
             py::call_guard<py::gil_scoped_release>())
         .def("start",
             [](ProfilerSuite& self) {

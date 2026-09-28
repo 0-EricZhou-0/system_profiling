@@ -32,6 +32,8 @@ struct CUPTI_PROFILER_API SamplerRange {
     std::vector<double> metricValues;
 };
 
+inline constexpr uint64_t kDefaultDecodeIntervalMs = 1000;
+
 /// Configuration for GpuProfiler.
 struct CUPTI_PROFILER_API ProfilerConfig {
     // One CUPTI PM-sampling session is opened per index. Same metric
@@ -43,6 +45,11 @@ struct CUPTI_PROFILER_API ProfilerConfig {
     size_t hwBufferSize = 512 * 1024 * 1024;    // 512 MB
     uint64_t maxSamples = 50000;
     std::vector<std::string> metrics;
+
+    // How often the host collects the samples the GPU buffered: one
+    // decode pass (cuptiPmSamplingDecodeData until the hardware buffer
+    // is drained, then metric evaluation) per interval. 0 = 1000 ms.
+    uint64_t decodeIntervalMs = kDefaultDecodeIntervalMs;
 
     // Periodic flush. 0 = disabled (single write at end).
     uint64_t flushIntervalMs = 10000;
@@ -72,6 +79,9 @@ public:
     /// Initialize the profiler. Must be called before Start().
     /// The caller must have active CUDA contexts on every index in
     /// config.deviceIndices (or on device 0 if the list is empty).
+    /// Throws std::invalid_argument, before touching the GPU, for an
+    /// inconsistent config: flushIntervalMs (when > 0) below
+    /// decodeIntervalMs.
     void Configure(const ProfilerConfig& config);
 
     /// Start PM sampling, background decode threads (one per device),

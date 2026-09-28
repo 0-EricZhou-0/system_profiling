@@ -21,6 +21,8 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <unistd.h>
 
@@ -121,11 +123,11 @@ public:
         double                       peakNvlinkBwBytesPerSec = 0.0;
         uint32_t                     maxWarpsPerSm = 0;
         std::thread                  decodeThread;
-        std::atomic<bool>            stopDecode{false};
+        internal::StopSignal         stopDecode;
         CUptiResult                  decodeResult = CUPTI_SUCCESS;
         internal::DecodeStats        decodeStats;
     };
-    // unique_ptr because DeviceState holds an std::atomic which is
+    // unique_ptr because DeviceState holds a StopSignal and atomics, which are
     // non-movable — std::vector resize would otherwise invalidate.
     std::vector<std::unique_ptr<DeviceState>> devices;
 
@@ -159,8 +161,19 @@ GpuProfiler::~GpuProfiler() {
 GpuProfiler::GpuProfiler(GpuProfiler&&) noexcept = default;
 GpuProfiler& GpuProfiler::operator=(GpuProfiler&&) noexcept = default;
 
-void GpuProfiler::Configure(const ProfilerConfig& config) {
-    m_impl->config = config;
+void GpuProfiler::Configure(const ProfilerConfig& requested) {
+    ProfilerConfig resolved = requested;
+    if (resolved.decodeIntervalMs == 0) resolved.decodeIntervalMs = kDefaultDecodeIntervalMs;
+    if (resolved.flushIntervalMs > 0 && resolved.flushIntervalMs < resolved.decodeIntervalMs) {
+        throw std::invalid_argument(
+            "GPU flush_interval_ms (" + std::to_string(resolved.flushIntervalMs) +
+            ") is less than decode_interval_ms (" + std::to_string(resolved.decodeIntervalMs) +
+            "): a flush could only write what the last decode pass collected. "
+            "Raise flush_interval_ms or lower decode_interval_ms");
+    }
+    m_impl->config = std::move(resolved);
+    // metricsCstr below points into this copy's strings.
+    const ProfilerConfig& config = m_impl->config;
 
     // Capture host context for the TraceHeader.
     char hostbuf[256] = {0};
@@ -181,7 +194,8 @@ void GpuProfiler::Configure(const ProfilerConfig& config) {
     std::vector<int> indices = config.deviceIndices;
     if (indices.empty()) indices.push_back(0);
 
-    std::cout << "Sampling frequency: " << config.samplingFrequencyHz << " Hz\n";
+    std::cout << "Sampling frequency: " << config.samplingFrequencyHz << " Hz, decode every "
+              << config.decodeIntervalMs << " ms\n";
     std::cout << "Metrics: " << config.metrics.size() << "\n";
     for (const auto& m : config.metrics) std::cout << "  " << m << "\n";
     std::cout << "Devices: " << indices.size() << "\n";
@@ -324,11 +338,12 @@ void GpuProfiler::Start() {
 
     // Launch one decode thread per device.
     for (auto& d : m_impl->devices) {
-        d->stopDecode   = false;
+        d->stopDecode.Reset();
         d->decodeResult = CUPTI_SUCCESS;
         internal::DecodeTarget device;
         device.gpuIndex           = static_cast<uint32_t>(d->deviceIndex);
         device.samplingIntervalNs = static_cast<uint64_t>(1e9 / m_impl->config.samplingFrequencyHz);
+        device.decodeIntervalMs   = m_impl->config.decodeIntervalMs;
         d->decodeThread = std::thread(internal::DecodeThreadFunc,
                                        std::ref(d->counterDataImage),
                                        std::ref(m_impl->metricsCstr),
@@ -393,7 +408,7 @@ void GpuProfiler::Stop() {
 
     // Join decode threads.
     for (auto& d : m_impl->devices) {
-        d->stopDecode = true;
+        d->stopDecode.Set();
         if (d->decodeThread.joinable()) d->decodeThread.join();
     }
 

@@ -62,7 +62,9 @@ public:
     /// rather than as a silent no-sample run: SidecarNotFound,
     /// SidecarSpawnFailed, SidecarExited, SidecarBadHandshake (the
     /// sidecar rejected the config) or SidecarAffinityFailed
-    /// (sidecar_cpus unusable). Under Legacy, always returns Ok.
+    /// (sidecar_cpus unusable). Returns InvalidConfig, with the reason
+    /// on stderr, for an inconsistent GPU config (flush_interval_ms
+    /// below decode_interval_ms); nothing is configured then.
     /// Returns ProfilerError::NotConfigured if LoadConfig has not
     /// been called yet.
     ProfilerError Configure();

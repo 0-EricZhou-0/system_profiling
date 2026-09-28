@@ -40,6 +40,10 @@ message GPUProfilerConfig {
     repeated string metrics = 6;
     uint64 flush_interval_ms = 7;
     string output_file = 8;
+    // How often the host collects the samples the GPU buffered (one
+    // decode pass per interval). 0 = 1000 ms. flush_interval_ms must not
+    // be less than this (Configure() fails with InvalidConfig).
+    uint64 decode_interval_ms = 9;
 }
 
 message SystemProfilerConfig {

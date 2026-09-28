@@ -36,6 +36,8 @@ enum class ProfilerError {
     ProbeStartFailed     = 101,  // a System/Disk probe did not start (e.g. its
                                  // output file cannot be opened); in SIDECAR
                                  // mode, reported by the sidecar
+    InvalidConfig        = 102,  // inconsistent settings (the reason is
+                                 // printed on stderr); nothing was started
 
     // Sidecar-specific problems (SIDECAR mode only)
     SidecarNotFound      = 200,  // couldn't locate the sidecar binary

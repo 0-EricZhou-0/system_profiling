@@ -24,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <unistd.h>
 #include <vector>
 
@@ -219,6 +220,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         m_impl->gpuConfig.hwBufferSize = g.hw_buffer_size() > 0 ? g.hw_buffer_size() : 512 * 1024 * 1024;
         m_impl->gpuConfig.maxSamples = g.max_samples() > 0 ? g.max_samples() : 50000;
         m_impl->gpuConfig.flushIntervalMs = g.flush_interval_ms();
+        m_impl->gpuConfig.decodeIntervalMs = g.decode_interval_ms();   // 0 = default
         m_impl->gpuConfig.outputFile = g.output_file();
         for (const auto& m : g.metrics()) {
             m_impl->gpuConfig.metrics.push_back(m);
@@ -342,7 +344,14 @@ ProfilerError ProfilerSuite::Configure() {
         m_impl->catalog->MergeOverridesFromPbtxt(m_impl->metricCatalogPath);
     }
 
-    if (m_impl->gpuEnabled)   m_impl->gpuProfiler.Configure(m_impl->gpuConfig);
+    if (m_impl->gpuEnabled) {
+        try {
+            m_impl->gpuProfiler.Configure(m_impl->gpuConfig);
+        } catch (const std::invalid_argument& e) {
+            std::cerr << "[cupti-profiler] error: " << e.what() << "\n";
+            return ProfilerError::InvalidConfig;
+        }
+    }
     // Sidecar spawn + handshake, done BEFORE the sys/disk probes
     // configure so a cap failure surfaces here rather than after
     // the probes have already started allocating thread state.

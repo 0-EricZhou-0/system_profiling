@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <cstdio>
-#include <thread>
 
 namespace cupti_profiler {
 namespace internal {
@@ -129,14 +128,20 @@ void DecodeThreadFunc(std::vector<uint8_t>& counterDataImage,
                       CuptiProfilerHost& host,
                       DecodeTarget device,
                       DecodeStats& stats,
-                      std::atomic<bool>& stop,
+                      StopSignal& stop,
                       CUptiResult& result)
 {
     Decoder decoder(counterDataImage, metricsList, target, host, device, stats);
-    while (!stop) {
+    // A pass every decode interval, on a fixed schedule; Stop() cuts the
+    // wait short.
+    const auto interval = std::chrono::milliseconds(device.decodeIntervalMs);
+    auto next = std::chrono::steady_clock::now() + interval;
+    while (!stop.WaitUntil(next)) {
         result = decoder.Pass();
         if (result != CUPTI_SUCCESS) return;
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        next += interval;
+        const auto now = std::chrono::steady_clock::now();
+        if (next < now) next = now + interval;   // overran: don't burst
     }
     // Final drain (sampling has been stopped).
     result = decoder.Pass();

@@ -7,6 +7,7 @@ const char* ToString(ProfilerError err) {
         case ProfilerError::Ok:                   return "Ok";
         case ProfilerError::NotConfigured:        return "NotConfigured";
         case ProfilerError::ProbeStartFailed:     return "ProbeStartFailed";
+        case ProfilerError::InvalidConfig:        return "InvalidConfig";
         case ProfilerError::SidecarNotFound:      return "SidecarNotFound";
         case ProfilerError::SidecarSpawnFailed:   return "SidecarSpawnFailed";
         case ProfilerError::SidecarBadHandshake:  return "SidecarBadHandshake";

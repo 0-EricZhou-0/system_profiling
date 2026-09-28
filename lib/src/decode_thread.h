@@ -3,6 +3,7 @@
 
 #include "cupti_pm_sampling.h"
 #include "profiler_host_internal.h"
+#include "stop_signal.h"
 
 #include <atomic>
 #include <cstdint>
@@ -29,6 +30,7 @@ struct DecodeStats {
 struct DecodeTarget {
     uint32_t gpuIndex = 0;
     uint64_t samplingIntervalNs = 0;
+    uint64_t decodeIntervalMs = 1000;   // one pass per interval
 };
 
 void DecodeThreadFunc(std::vector<uint8_t>& counterDataImage,
@@ -37,7 +39,7 @@ void DecodeThreadFunc(std::vector<uint8_t>& counterDataImage,
                       CuptiProfilerHost& host,
                       DecodeTarget device,
                       DecodeStats& stats,
-                      std::atomic<bool>& stop,
+                      StopSignal& stop,
                       CUptiResult& result);
 
 /// One stderr line summing up any decode trouble of a finished run
