@@ -158,14 +158,25 @@ class ResolvedSeries:
         return _suffix.pretty_counter(d.counter, d.entity) or self.fqn
 
 
+def statistic_suffix(d: MetricDescriptor) -> str:
+    """The legend suffix naming a metric's statistic over its entity's
+    instances, from the FQN's rollup: " (avg)" / " (max)" / " (min)" /
+    " (sum)" (sm__cycles_active.avg is the mean over SMs, .max the
+    busiest SM; proc__cycles_active.sum sums a process's threads);
+    "" for a metric without one."""
+    r = (d.rollup or "").lower()
+    return f" ({_suffix.ROLLUP_LABELS[r]})" if r in _suffix.ROLLUP_LABELS else ""
+
+
 def disambiguate_short_labels(
     series_list: list[ResolvedSeries],
 ) -> dict[tuple[str, object], str]:
-    """For one panel's series list, return the minimum-length labels
-    that keep every entry distinct.
+    """For one panel's series list, return the legend labels: the short
+    label plus the statistic (`statistic_suffix`), widened where needed
+    to keep every entry distinct.
 
-    Starts from `ResolvedSeries.label_short`. For each group of series
-    that collapse to the same short label, widens *only that group*
+    Starts from `ResolvedSeries.label_short` + statistic. For each group
+    of series that collapse to the same label, widens *only that group*
     by the first axis among {entity, rollup, submetric} that actually
     differs across the colliding series. The scope-key suffix
     ('[GPU 0: H100]', '[PID 1234]') is appended later by the
@@ -174,12 +185,13 @@ def disambiguate_short_labels(
     The result is keyed by `(fqn, scope_key)` — that tuple is the
     visualizer's canonical series identity."""
     labels: dict[tuple[str, object], str] = {
-        (s.fqn, s.scope_key): s.label_short for s in series_list
+        (s.fqn, s.scope_key): s.label_short + statistic_suffix(s.descriptor)
+        for s in series_list
     }
     # Group series by their initial label.
     groups: dict[str, list[ResolvedSeries]] = {}
     for s in series_list:
-        groups.setdefault(s.label_short, []).append(s)
+        groups.setdefault(labels[(s.fqn, s.scope_key)], []).append(s)
 
     for label, members in groups.items():
         if len(members) < 2:
@@ -199,14 +211,15 @@ def disambiguate_short_labels(
             continue
         for s in members:
             d = s.descriptor
+            stat = statistic_suffix(d)
             if len(entities) > 1:
                 labels[(s.fqn, s.scope_key)] = (
-                    f"{_suffix.pretty_entity(d.entity)} {label}"
+                    f"{_suffix.pretty_entity(d.entity)} {s.label_short}{stat}"
                 )
             elif len(rollups) > 1 and d.rollup:
-                labels[(s.fqn, s.scope_key)] = f"{label} ({d.rollup})"
+                labels[(s.fqn, s.scope_key)] = f"{s.label_short} ({d.rollup})"
             elif len(submetrics) > 1 and d.submetric:
-                labels[(s.fqn, s.scope_key)] = f"{label} [{d.submetric}]"
+                labels[(s.fqn, s.scope_key)] = f"{s.label_short} [{d.submetric}]{stat}"
     return labels
 
 

@@ -87,7 +87,9 @@ YLABEL_FONTSIZE    = 11
 # unconditionally so every panel with a peak uses the same headroom
 # fraction (panel-level `y_max` overrides are ignored for these).
 YLIM_HEADROOM      = 1.10
-# Bold "Max: …" label rendered at the peak height. X is in axes
+# Bold "Peak: …" label rendered at the peak height: the panel's ceiling
+# (catalog / layout peak, e.g. 100 % or the GPU's peak bandwidth), not
+# the data's maximum. X is in axes
 # fraction (just inside the y-axis); Y is in data coordinates.
 MAX_LABEL_X_AXES_FRAC = 0.005
 
@@ -700,16 +702,16 @@ def _render_metric_panel(
     peak_scaled = None
     if peak_hint is not None and peak_hint > 0:
         peak_scaled = scale_fn(peak_hint)
-        # Dotted black horizontal reference line at the peak.
+        # Dotted black horizontal reference line at the peak (ceiling).
         ax.axhline(peak_scaled, color="black", linestyle=":",
                    linewidth=1.4, alpha=0.7)
-        # Bold black "Max: …" label near the y-axis at peak height
+        # Bold black "Peak: …" label near the y-axis at peak height
         # (data y, axes-fraction x). Plain numeric formatter so very
         # large peaks (e.g. ncpus_x_100 = 12800, peak DRAM in MiB/s)
         # don't end up as `1.28e+04`.
         unit_str = f" {ylabel}" if ylabel else ""
         ax.text(MAX_LABEL_X_AXES_FRAC, peak_scaled,
-                f"Max: {_fmt_plain(peak_scaled)}{unit_str}",
+                f"Peak: {_fmt_plain(peak_scaled)}{unit_str}",
                 transform=ax.get_yaxis_transform(),
                 va="bottom", ha="left",
                 fontsize=8, color="black", fontweight="bold",
@@ -792,7 +794,7 @@ def _fmt_dur(s: float) -> str:
 
 def _fmt_plain(v: float) -> str:
     """Plain (non-scientific) numeric formatter — used for the bold
-    `Max: …` labels and any other axis-anchored numeric text. Avoids
+    `Peak: …` labels and any other axis-anchored numeric text. Avoids
     `1.2e+04` style output regardless of magnitude."""
     if v == int(v):
         return f"{int(v):,}"

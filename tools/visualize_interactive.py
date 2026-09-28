@@ -60,8 +60,8 @@ from bokeh.embed import file_html  # noqa: E402
 from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column  # noqa: E402
 from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
-                          CustomJS, HoverTool, Legend, LegendItem, PanTool, Range1d,
-                          ResetTool, SaveTool, Span, WheelZoomTool)
+                          CustomJS, HoverTool, Label, Legend, LegendItem, PanTool,
+                          Range1d, ResetTool, SaveTool, Span, WheelZoomTool)
 from bokeh.palettes import Category10  # noqa: E402
 from bokeh.plotting import figure  # noqa: E402
 from bokeh.resources import INLINE  # noqa: E402
@@ -669,6 +669,13 @@ def _build_panel(
         fig.add_layout(Span(location=scaled_peak, dimension="width",
                             line_color="red", line_dash="dashed",
                             line_alpha=0.6, line_width=1.5))
+        # The line is the panel's ceiling (catalog / layout peak), not
+        # the data's maximum: say so, as visualize_all.py does.
+        unit_str = f" {ylabel}" if ylabel else ""
+        fig.add_layout(Label(x=4, x_units="screen", y=scaled_peak, y_units="data",
+                             text=f"Peak: {_fmt_total(scaled_peak)}{unit_str}",
+                             text_font_size="8pt", text_font_style="bold",
+                             text_baseline="bottom"))
     else:
         fig.y_range.bounds = (0.0, None)
 

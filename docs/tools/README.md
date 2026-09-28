@@ -102,6 +102,20 @@ listed entries never share a colour. Cumulative companion panels carry
 each series' run total in its legend entry (`+k more` carries theirs
 combined). Every series, listed or not, is in `<output>.legend.txt`.
 
+**Statistic labels.** A metric that is a statistic over its entity's
+instances says which in its legend, from the FQN's rollup:
+`sm__cycles_active.avg…` reads "Active Cycles (avg)" (the mean over the
+SMs), `.max` "(max)" (the busiest SM), `.sum` "(sum)" (e.g. a
+process's CPU summed over its threads). Metrics without a rollup
+(`mem__used_bytes`) carry none.
+
+**Peak line.** A panel with a known ceiling — from the layout
+(`peak_constant`, `peak_from_gpu_info`, …) or the catalog's `peak` —
+draws a dotted line at it labelled **`Peak: <value> <unit>`** (100 %,
+the GPU's peak DRAM / PCIe / NVLink bandwidth, installed RAM, …) and
+caps the y-axis 10% above it. It is the hardware or configured
+ceiling, not the largest value in the data.
+
 Panels in the default layout (auto-skipped when no series matches):
 SM Util → Active Warps/Cycle → DRAM Bandwidth → PCIe Bandwidth →
 NVLink Bandwidth → CPU Utilization → System Memory → Per-PID CPU →
@@ -172,7 +186,9 @@ What you get:
   fixed height, so a long legend adds height instead of squeezing it.
 - **Y-axis clamps** with dashed reference lines at the theoretical
   peak (100% SM Util, `max_warps_per_sm` for Active Warps, peak DRAM /
-  PCIe / NVLink BW, installed RAM total).
+  PCIe / NVLink BW, installed RAM total), labelled `Peak: …` as in
+  `visualize_all.py`; legend labels name the statistic ("(avg)", …) the
+  same way.
 - **X-axis clamp**: pan/zoom is bounded to
   `[0, t_end + 0.4 × current_window_length]`, recomputed live as you
   zoom. The trace stays at ≥60% of the viewport even when you scroll
