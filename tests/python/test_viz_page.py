@@ -251,3 +251,16 @@ def test_hover_has_duration(tmp_path):
             ends = d["end"] if "end" in d else d["right"]
             starts = d["start"] if "start" in d else d["left"]
             assert all(abs(u - (e - s)) < 1e-9 for u, s, e in zip(d["dur"], starts, ends))
+
+
+def test_never_opens_a_browser():
+    """Static mode writes the page and serves it; it never launches a
+    browser (no webbrowser use, no --no-browser flag)."""
+    import inspect
+    import subprocess
+    import sys
+    src = inspect.getsource(vi)
+    assert "webbrowser" not in src and "open_browser" not in src
+    p = subprocess.run([sys.executable, vi.__file__, "none.pb", "--no-browser"],
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 2 and "unrecognized arguments: --no-browser" in p.stderr

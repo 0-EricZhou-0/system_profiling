@@ -237,7 +237,8 @@ Bokeh-based interactive renderer, same input contract as
 with BokehJS bundled inline) plus a built-in HTTP server.
 
 ```bash
-# Build + serve on http://localhost:8000
+# Build + serve on http://localhost:8000 (it never opens a browser:
+# point yours at the URL it logs)
 python tools/visualize_interactive.py profiling_output/session_metadata.pb
 
 # Custom port + custom output file path:

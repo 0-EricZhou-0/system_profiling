@@ -3,12 +3,13 @@
 
 Static mode (default):
     python tools/visualize_interactive.py profiling_output/session_metadata.pb
-    # → opens http://localhost:8000 with the rendered page.
+    # → writes the page and serves it on http://<host>:8000 (it never
+    #   opens a browser: point yours at the URL it logs).
 
 Live mode (--live):
     python tools/visualize_interactive.py --live \\
         profiling_output/session_metadata.pb
-    # → opens a Bokeh server that tails the .pb files as the suite
+    # → starts a Bokeh server that tails the .pb files as the suite
     #   writes them, streaming new samples into the running document.
 
 Catalog + panel layout are loaded the same way as visualize_all.py:
@@ -26,9 +27,7 @@ import http.server
 import os
 import socketserver
 import sys
-import threading
 import time
-import webbrowser
 from pathlib import Path
 
 import numpy as np
@@ -1983,7 +1982,8 @@ def _build_static_document(
 # Minimal HTTP server (static mode)
 # ---------------------------------------------------------------------------
 
-def _serve(html_path: Path, host: str, port: int, open_browser: bool) -> None:
+def _serve(html_path: Path, host: str, port: int) -> None:
+    """Serve the page on host:port until Ctrl-C. Never opens a browser."""
     serve_dir = html_path.parent
     fname = html_path.name
 
@@ -2001,8 +2001,6 @@ def _serve(html_path: Path, host: str, port: int, open_browser: bool) -> None:
     httpd = _ReusableTCPServer((host, port), _Handler)
     url = f"http://{host if host != '0.0.0.0' else 'localhost'}:{port}/{fname}"
     _log(f"serving at {url} (Ctrl-C to quit)")
-    if open_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -2039,8 +2037,6 @@ def main() -> int:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--no-serve", action="store_true",
                         help="Render HTML and exit (don't start a server).")
-    parser.add_argument("--no-browser", action="store_true",
-                        help="Don't auto-open a browser tab.")
     parser.add_argument("--live", action="store_true",
                         help="Stream new samples as the suite writes them.")
     parser.add_argument("--poll-interval-ms", type=int, default=1000,
@@ -2135,7 +2131,7 @@ def main() -> int:
                    display_hz=args.display_hz)
 
     if not args.no_serve:
-        _serve(out_path, args.host, args.port, not args.no_browser)
+        _serve(out_path, args.host, args.port)
     return 0
 
 
