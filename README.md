@@ -55,7 +55,7 @@ Named regions + events   ┘
 A run of [`examples/full_system_profiling.py`](examples/full_system_profiling.py)
 (GEMM ramp + `vecAdd` workload) rendered with `visualize_all.py`:
 
-![Full-system profile](docs/images/full_system_profile.v0.1.0.png)
+![Full-system profile](docs/images/full_system_profile.v0.2.0.png)
 
 A live vLLM server (`Qwen/Qwen3.5-0.8B`, startup then six request batches),
 traced process by process from a launcher with
@@ -65,7 +65,7 @@ multiprocessing helper and the startup workers are each their own series,
 found by descendant tracking; the GPU panels are device-wide counters.
 How to run it and read it: [docs/examples/vllm_serving.md](docs/examples/vllm_serving.md).
 
-![vLLM serving profile](docs/images/vllm_serving.png)
+![vLLM serving profile](docs/images/vllm_serving.v0.2.0.png)
 
 ## Repository layout
 

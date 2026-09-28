@@ -9,7 +9,7 @@ fork), a multiprocessing helper, and during startup a stream of short-lived
 workers (compile workers, `ldconfig`, `ninja`, ...). This example traces
 every one of them, from spawn to shutdown, from a small launcher.
 
-![vLLM serving profile](../images/vllm_serving.png)
+![vLLM serving profile](../images/vllm_serving.v0.2.0.png)
 
 ## What it does
 
@@ -23,7 +23,7 @@ every one of them, from spawn to shutdown, from a small launcher.
    again. Without it those chains are flagged ambiguous in the trace
    (`CpuTail.ambiguous_pids` / `ambiguous_cpu_ns`, `IoReapAdjustment`
    `ambiguous`) and their CPU counted twice: a cold start measured 58% over
-   the kernel's total, against −0.32% with it (see [cold compile caches](#the-run-in-the-figure)). What it changes for the
+   the kernel's total, against −0.35% with it (see [cold compile caches](#the-run-in-the-figure)). What it changes for the
    launcher: [adopt_orphans()](../system-guide.md#what-changes-when-adopt_orphans-is-enabled).
 2. Builds a `ProfilerSuite` with the **System and Disk probes in SIDECAR
    mode** (the samplers run in the `cupti-profiler-sidecar` child, not in
@@ -87,11 +87,16 @@ Every machine- or user-specific value is an argument:
 ## Reading the figure
 
 Top to bottom: events (spawn, ready, shutdown) and the load batches as
-regions; GPU (with `--gpu`); whole-host CPU; **per-process CPU and resident
+regions; the **process timeline** (one bar per process from its start to its
+exit, packed into the fewest lanes, a line from each parent to each child at
+the fork); GPU (with `--gpu`); whole-host CPU; **per-process CPU and resident
 memory**; per-device disk bandwidth; **per-process I/O** at the syscall layer
 (`rchar` solid, `wchar` dashed) and the storage layer (`read_bytes` solid,
 `write_bytes` dashed, `cancelled_write_bytes` dotted), each with its
-cumulative companion.
+cumulative companion, whose legend carries each process's run totals.
+Legends sit above their panel and name each metric's statistic ("(avg)",
+"(max)", "(sum)"); the dotted `Peak:` line is the panel's ceiling (100%, or
+all of a resource), not the data's maximum.
 
 Each process keeps one colour in every panel. Its label is its alias from the
 process table: the root is `vllm`; processes found by descendant tracking are
@@ -107,48 +112,53 @@ defaults otherwise (System and Disk 100 Hz, GPU 1000 Hz, 100 ms scan, every
 probe flushing every 5 s, the launcher a child subreaper),
 `-- --max-model-len 4096 --gpu-memory-utilization 0.80`, warm compile caches,
 launcher not pinned, on an otherwise idle node (the whole-host CPU panel
-stays under 5%). The server was ready 76 s after spawn and served 3228
+stays under 5%). The server was ready 73 s after spawn and served 3149
 requests in the 90 s of load, none failed. What the example printed at the
 end, the trace's process table (times from the start of the trace; CPU =
 head + samples + exit tail):
 
 | pid | parent | kind | comm (history) | start s | end s | CPU s |
 |---|---|---|---|---|---|---|
-| 4106078 | 4106058 | root | `vllm` | 0.0 | 172.6 | 66.95 |
-| 4106199 | 4106078 | discovered | `python3.12` | 12.7 | 14.7 | 2.00 |
-| 4106201 | 4106078 | discovered | `python3.12` | 12.7 | 14.6 | 2.08 |
-| 4106206 | 4106078 | discovered | `ldconfig.real` | 12.9 | 12.9 | 0.01 |
-| 4106305 | 4106078 | discovered | `python3.12` → `VLLM::EngineCor` | 21.4 | 171.5 | 130.62 |
-| 4106304 | 4106078 | discovered | `python3.12` | 21.4 | 172.1 | 0.03 |
-| 4106401 | 4106305 | discovered | `python3.12` | 29.1 | 31.2 | 2.24 |
-| 4106403 | 4106305 | discovered | `python3.12` | 29.2 | 31.1 | 2.19 |
-| 4106686 | 4106305 | discovered | `ninja` | 56.2 | 56.3 | 0.03 |
+| 22992 | 22972 | root | `vllm` | 0.0 | 169.3 | 63.63 |
+| 23136 | 22992 | discovered | `python3.12` | 12.2 | 14.1 | 2.07 |
+| 23138 | 22992 | discovered | `python3.12` | 12.3 | 14.2 | 2.11 |
+| 23288 | 22992 | discovered | `python3.12` → `VLLM::EngineCor` | 20.7 | 168.7 | 129.98 |
+| 23279 | 22992 | discovered | `python3.12` | 20.7 | 168.9 | 0.04 |
+| 23298 | 23288 | discovered | `uname` | 21.9 | 21.9 | 0.00 |
+| 23434 | 23288 | discovered | `python3.12` | 28.2 | 30.1 | 1.94 |
+| 23436 | 23288 | discovered | `python3.12` | 28.3 | 30.2 | 2.05 |
+| 23740 | 23288 | discovered | `ninja` | 54.0 | 54.1 | 0.02 |
 
-The **root** (4106078, `vllm`) is the API server; kind `root` because the
-launcher listed it. **EngineCore** (4106305) was found as `python3.12` 21.4 s
+The **root** (22992, `vllm`) is the API server; kind `root` because the
+launcher listed it. **EngineCore** (23288) was found as `python3.12` 20.7 s
 in, before it renamed itself, and its alias followed the rename. The
-**multiprocessing helper** (4106304) lives for the whole run at ~0 CPU. The
+**multiprocessing helper** (23279) lives for the whole run at ~0 CPU. The
 rest are **startup transients**: two pairs of short-lived Python workers
-(~2.1 s of CPU each; one pair under the API server, one under EngineCore),
-an `ldconfig` and a small `ninja` build. Processes that lived less than one
-scan interval can be missing: in this run the oracle below saw 5 such.
+(~2 s of CPU each; one pair under the API server, one under EngineCore),
+a `uname` and a small `ninja` build. The process timeline shows them in five
+lanes (the most alive at once), each fork linked to its parent. Processes
+that lived less than one scan interval can be missing: in this run the
+oracle below saw 6 such.
 
 The panels line up with vLLM's own log (times from the start of the trace):
-EngineCore starts at 21.4 s and loads the weights at ~33 s (the step in its
-cumulative `rchar`; vLLM: "Loading weights took 0.46 seconds"); its profiling
-warmup and two CUDA graph captures (finished at 50 s and 53 s) are the GPU
+EngineCore starts at 20.7 s and loads the weights at ~31 s (the step in its
+cumulative `rchar`; vLLM: "Loading weights took 0.33 seconds"); its profiling
+warmup and two CUDA graph captures (finished at ~47 s and ~51 s) are the GPU
 activity during startup and its bursts of several cores; its init finishes at
-57 s, and the API server, busy at ~100% of a core through most of startup,
-answers `/v1/models` at 76 s. Under load both run near one core each;
+~55 s, and the API server, busy at ~100% of a core through most of startup,
+answers `/v1/models` at 73 s. Under load both run near one core each;
 resident memory reaches ~3.1 GiB (EngineCore) and ~2.3 GiB (API server).
 
-**Cold compile caches.** With empty caches the same example takes 158 s to
-be ready and runs ~90 short-lived compiler processes (`ninja`, `nvcc`, `sh`,
+**Cold compile caches.** With empty caches the same example takes 156 s to
+be ready and descendant tracking finds 85 processes, most of them short-lived compilers (`ninja`, `nvcc`, `sh`,
 `cicc`, `cc1plus`, `ptxas`, ...), many of them `sh -c` shells that reap their
 compiler and exit within one sample interval. Because the launcher adopts
 orphans, those reap chains resolve: the trace's CPU for the whole tree was
-**318.1 s against the kernel's 319.1 s (−0.32%)**; the difference is what
-the ~65 processes shorter than a scan used. Without `adopt_orphans()` (the
+**317.3 s against the kernel's 318.5 s (−0.35%)**; the difference is what
+the 76 processes shorter than a scan (each seen alive ≤ 61 ms) used; every
+one of the 69 processes alive ≥ 100 ms is in the trace. Its process timeline
+packs the 86 traced processes into 21 lanes (18 of them orphans: discovered
+processes whose recorded parent is not in the trace). Without `adopt_orphans()` (the
 same run from a harness) the chains are flagged ambiguous and the trace
 reads **58% above** the kernel (`CpuTail.ambiguous_cpu_ns` carries the
 excess). In such a run's figure the per-process legends list the ten most
@@ -158,18 +168,18 @@ active processes and a `+k more` entry for the rest, drawn in grey.
 
 Six runs at earlier defaults (System and Disk 100 Hz, GPU 1000 Hz with the
 old collection loop; two without `--gpu`, then two pairs alternating), one at
-the 2026-09-25 defaults (System and Disk 50 Hz, GPU 500 Hz), and two at the
-current ones (one before the launcher adopted orphans; the run in the
-figure), each with a
+the 2026-09-25 defaults (System and Disk 50 Hz, GPU 500 Hz), and four at the
+current ones (one before the launcher adopted orphans; two collecting SM
+activity's `.max` too, one of them the run in the figure), each with a
 test-only oracle polling the run's cgroup every 10 ms and the launcher's
 `getrusage(RUSAGE_CHILDREN)`:
 
 | | result |
 |---|---|
-| Completeness: every process the oracle saw alive ≥ 100 ms is in the trace (both probes) | **9/9 runs** (7–8 such processes per run, 0 missed); the 3–9 missed per run were each seen alive ≤ 80.5 ms (the figure's run: 7 such, 5 missed) |
-| Per-process CPU of the whole tree (Σ head + samples + tails) vs `getrusage(RUSAGE_CHILDREN)` once vLLM was reaped | trace **15–74 ms below** out of 196–221 s (0.008–0.035%); the figure's run: **34 ms below**, of 206 s (0.017%). What the trace cannot hold: the root's CPU after its last sample (a root has no exit tail: its parent, the launcher, is not tracked), and the CPU of the missed sub-100 ms processes |
-| Descendant tracking scan (the trace's `DiscoveryStats`) | p50 0.72–1.25 ms, p99 1.7–2.8 ms, 6–10 processes discovered, all seen exiting (the figure's run: p50 1.0 ms, p99 1.8 ms, 8) |
-| The sidecar's own CPU (exact, from `getrusage` across `stop()`) | At 100 Hz: **8.6–14.6% of one core** over the run, unpinned (8.6% on a quiet node without `--gpu`; 13.2–14.6% while the node was 40–70% busy or the launcher ran the GPU probe beside it). The figure's run, at the 100 Hz default with `--gpu` on a quiet node: **10.9%** (12.2% under load). What each rate costs, measured: [Sampling frequency guidance](../system-guide.md#sampling-frequency-guidance). Pin it with `sidecar_cpus` to keep it off the server's cores |
+| Completeness: every process the oracle saw alive ≥ 100 ms is in the trace (both probes) | **11/11 runs** (7–8 such processes per run, 0 missed); the 3–9 missed per run were each seen alive ≤ 80.5 ms (the figure's run: 7 such, 6 missed, each seen by one 10 ms poll only) |
+| Per-process CPU of the whole tree (Σ head + samples + tails) vs `getrusage(RUSAGE_CHILDREN)` once vLLM was reaped | trace **13–74 ms below** out of 196–221 s (0.006–0.035%); the figure's run: **46 ms below**, of 201.9 s (0.023%). What the trace cannot hold: the root's CPU after its last sample (a root has no exit tail: its parent, the launcher, is not tracked), and the CPU of the missed sub-100 ms processes |
+| Descendant tracking scan (the trace's `DiscoveryStats`) | p50 0.72–1.51 ms, p99 1.7–2.8 ms, 6–10 processes discovered, all seen exiting (the figure's run: p50 1.3 ms, p99 1.9 ms, 8) |
+| The sidecar's own CPU (exact, from `getrusage` across `stop()`) | At 100 Hz: **8.6–14.6% of one core** over the run, unpinned (8.6% on a quiet node without `--gpu`; 13.2–14.6% while the node was 40–70% busy or the launcher ran the GPU probe beside it). The figure's run, at the 100 Hz default with `--gpu` on a quiet node: **10.8%** (12.3% under load). What each rate costs, measured: [Sampling frequency guidance](../system-guide.md#sampling-frequency-guidance). Pin it with `sidecar_cpus` to keep it off the server's cores |
 
 ## GPU: device-wide counters from the launcher
 
@@ -178,14 +188,14 @@ samples are the **device's**: SM activity, warps and DRAM throughput include
 every context on the GPU, vLLM's among them. SM activity is collected twice,
 as the mean over the SMs (`sm__cycles_active.avg`, "(avg)" in the legend) and
 as the busiest SM (`.max`, "(max)"): a max far above the mean means a few SMs
-busy and the rest idle. Measured in this
-example's runs:
+busy and the rest idle. Measured in the run in the figure (1000 Hz, window
+means):
 
-| window | SM active (% of peak, mean) — run in the figure (500 Hz) | earlier run (1000 Hz) | earlier run (1000 Hz) |
-|---|---|---|---|
-| startup (spawn → ready) | 0.9 | 0.9 | 0.9 |
-| load, concurrency 4 / 16 / 64 / 64 / 16 / 4 | 23.9 / 22.0 / 29.2 / 28.7 / 23.0 / 23.0 | 23.6 / 22.2 / 31.0 / 32.2 / 18.7 / 17.5 | 24.8 / 23.8 / 32.0 / 33.1 / 25.0 / 24.8 |
-| idle, after the load | 0.0 | 0.0 | 0.0 |
+| window | SM active (% of peak), mean over the SMs (`.avg`) | busiest SM (`.max`) |
+|---|---|---|
+| startup (spawn → ready) | 1.1 | 1.2 |
+| load, concurrency 4 / 16 / 64 / 64 / 16 / 4 | 27.9 / 28.8 / 39.7 / 39.6 / 29.7 / 27.8 | 40.9 / 38.1 / 45.7 / 45.4 / 39.2 / 41.1 |
+| idle, after the load | 0.0 | 0.0 |
 
 SM activity follows vLLM's load, so **from a launcher the GPU panels are
 meaningful, device-wide**. It did not conflict with vLLM: every run started
