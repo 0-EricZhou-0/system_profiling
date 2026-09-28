@@ -538,17 +538,36 @@ def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> tuple[list, list]:
     legend handles (the series lines are thinner) (a one-point
     line at negative time, outside the x range's bounds) so it shows the
     process's colour, or the style in black; clicking it hides all its
-    lines."""
+    lines.
+
+    The grey (unlisted) series are drawn as one multi-line per line style,
+    under the listed ones: the legend entries that stand for them ("+k
+    more", a line-style key) then hold one renderer each instead of one
+    per series (BokehJS looks every legend renderer's view up on each
+    paint by a scan of all views: with ~770 grey lines on a cold vLLM
+    page that was ~1/3 of a pan step)."""
     lines = {}
+    grey: dict = {}                                    # style -> [keys]
     for key in p.order:
         color, st, listed = p.styles[key]
-        lines[key] = fig.line("x", "y", source=sources[key],
-                              color=color if listed else panel_legend.OTHER_COLOR,
-                              line_dash=_METRIC_DASHES[st],
-                              line_width=_SERIES_LINE_WIDTH if listed else _OTHER_LINE_WIDTH)
+        if not listed:
+            grey.setdefault(st, []).append(key)
+    for st, keys in grey.items():
+        src = ColumnDataSource(dict(xs=[sources[k].data["x"] for k in keys],
+                                    ys=[sources[k].data["y"] for k in keys]))
+        r = fig.multi_line("xs", "ys", source=src, color=panel_legend.OTHER_COLOR,
+                           line_dash=_METRIC_DASHES[st], line_width=_OTHER_LINE_WIDTH,
+                           name="grey-lines")
+        for k in keys:
+            lines[k] = r
+    for key in p.order:
+        color, st, listed = p.styles[key]
+        if listed:
+            lines[key] = fig.line("x", "y", source=sources[key], color=color,
+                                  line_dash=_METRIC_DASHES[st], line_width=_SERIES_LINE_WIDTH)
     items, key = [], []
     for label, color, st, keys in p.entries:
-        rs = [lines[k] for k in keys if k in lines]
+        rs = list(dict.fromkeys(lines[k] for k in keys if k in lines))
         if color != panel_legend.OTHER_COLOR:
             # Last: a legend item draws all its renderers' swatches, in order.
             ink = _THEMES[_THEME]["ink"] if color == panel_legend.METRIC_COLOR else color

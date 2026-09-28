@@ -58,7 +58,11 @@ def test_legend_capped_with_more_entry(tmp_path):
     listed = {int(lab.split("PID ")[1].split(",")[0].rstrip(")]")) for lab in labels[:-1]}
     assert listed == {500 + i for i in range(n - N, n)}
     [legend] = cpu.legend
-    assert len(legend.items[-1].renderers) == n - N
+    # "+k more": one multi-line holding all k grey series (not k renderers:
+    # BokehJS scans every view for each legend renderer on each paint)
+    [grey] = legend.items[-1].renderers
+    assert type(grey.glyph).__name__ == "MultiLine" and len(grey.data_source.data["xs"]) == n - N
+    assert [r for r in cpu.renderers if r.name == "grey-lines"] == [grey]
     colors = [it.renderers[0].glyph.line_color for it in legend.items[:-1]]
     assert len(set(colors)) == N, colors
 

@@ -357,7 +357,8 @@ What you get:
 - **Click-to-hide legend entries**; a panel's legend sits **to the
   right** of its plot, one entry per compact row, capped as in
   `visualize_all.py` (ten entries plus `+k more`, which hides or shows
-  all the grey lines at once); a line-style key (several metrics per
+  all the grey lines at once; they are drawn as one multi-line per line
+  style, which keeps panning fast with many processes); a line-style key (several metrics per
   process or device) stays on one row above the plot. The plot frame has
   a fixed size, so a legend never squeezes it. (The PNG keeps its
   legends above the panels.)

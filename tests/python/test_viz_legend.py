@@ -215,3 +215,21 @@ def test_cumulative_legends_name_only_both_renderers(tmp_path):
         assert labels, title
         for label in labels:
             assert not _TOTAL.search(label), (title, label)
+
+
+def test_bokeh_style_key_holds_one_grey_renderer(tmp_path):
+    """Per-process panel with several metrics and a "+k more": each
+    line-style key entry holds the listed series' lines plus one grey
+    multi-line, not one renderer per grey series."""
+    pytest.importorskip("bokeh")
+    import visualize_interactive
+    procs = [viz_trace.proc(700 + i, ppid=700 if i else 0, comm=f"p{i}", discovered=bool(i),
+                            cpu=5 + i) for i in range(N + 6)]
+    doc = visualize_interactive.build_static(viz_trace.write_trace(str(tmp_path / "t"), procs,
+                                                                   disk=True))
+    [f] = [f for p, k, f in doc.panel_figs if p.series_glob == "proc__io_?char.*" and k == "metric"]
+    [key] = [lg for lg in f.above if type(lg).__name__ == "Legend"]
+    for it in key.items:
+        greys = [r for r in it.renderers if r.name == "grey-lines"]
+        assert len(greys) == 1 and len(greys[0].data_source.data["xs"]) == 6, it.label.value
+        assert len(it.renderers) == N + 2          # N listed lines, the grey multi-line, the swatch
