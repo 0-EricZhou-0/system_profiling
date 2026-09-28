@@ -88,9 +88,9 @@ panels {
     title: "Disk Bandwidth"
     series_glob: "disk__*_bytes.*"
     unit_override: UNIT_BYTES_PER_SEC
-    # Companion panel: cumulative bytes read / written, summed over the
-    # devices (read solid, write dashed).
-    aggregation: PANEL_AGGREGATION_INTEGRATE_SUM
+    # Companion panel: cumulative bytes read / written per device (one
+    # colour per device, read solid, write dashed).
+    aggregation: PANEL_AGGREGATION_INTEGRATE
 }
 panels {
     title: "Disk Queue Depth"

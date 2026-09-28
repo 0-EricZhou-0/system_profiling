@@ -109,12 +109,23 @@ def process_label(projector, key) -> str:
     return f"{name}(PID {key}{found})"
 
 
+# Entities drawn in one colour each, their metrics told apart by line
+# style (a process: its rchar and wchar; a disk device: its read and
+# write bytes), never summed across entities.
+ENTITY_SCOPES = (_mc.SCOPE_PROCESS, _mc.SCOPE_DEVICE)
+
+
 def metric_styles(series_list) -> dict:
     """(fqn, scope_key) -> line style index (see N_METRIC_STYLES)."""
-    fqns = list(dict.fromkeys(s.fqn for s in series_list if s.scope == _mc.SCOPE_PROCESS))
+    fqns = list(dict.fromkeys(s.fqn for s in series_list if s.scope in ENTITY_SCOPES))
     return {(s.fqn, s.scope_key): (fqns.index(s.fqn) % N_METRIC_STYLES
-                                   if len(fqns) > 1 and s.scope == _mc.SCOPE_PROCESS else 0)
+                                   if len(fqns) > 1 and s.scope in ENTITY_SCOPES else 0)
             for s in series_list}
+
+
+def device_key(s) -> tuple:
+    """metric_color_map's key of a disk device's colour."""
+    return ("device", s.scope_key)
 
 
 def pid_color_map(panels, projection) -> dict:
@@ -171,12 +182,15 @@ def metric_base(s) -> tuple:
 def metric_color_map(panels) -> dict:
     """Base metric -> hue, for the series that are not per-process, in
     layout order across the whole figure, so a metric keeps its hue and
-    the cycle continues from panel to panel (as v0.0.1's figure did).
+    the cycle continues from panel to panel (as v0.0.1's figure did). A
+    disk device has one colour for all its metrics (key device_key).
     `panels`: (panel, series_list, kind) in layout order."""
     out: dict = {}
     for _p, series_list, _k in panels:
         for s in series_list:
-            if s.scope != _mc.SCOPE_PROCESS:
+            if s.scope == _mc.SCOPE_DEVICE:
+                out.setdefault(device_key(s), COLORS[len(out) % len(COLORS)])
+            elif s.scope != _mc.SCOPE_PROCESS:
                 out.setdefault(metric_base(s), COLORS[len(out) % len(COLORS)])
     return out
 
@@ -202,33 +216,6 @@ def end_lines(series_list, projection: dict, projector, p: "Plan", unit: int) ->
             color, _st, listed = p.styles[k]
             out.append((k, int(ts[ok[-1]]), float(vals[ok[-1]]), color if listed else OTHER_COLOR))
     return out
-
-
-def aggregate(series_list, projection: dict) -> tuple[list, dict]:
-    """For PANEL_AGGREGATION_INTEGRATE_SUM: each metric's series summed
-    over their instances on the union of their sample times (a series is
-    0 outside its own span). Returns (series, projection) for the sums,
-    one per metric, keyed (fqn, "all N <instances>")."""
-    by_fqn: dict = {}
-    for s in series_list:
-        if projection[(s.fqn, s.scope_key)][0].size:
-            by_fqn.setdefault(s.fqn, []).append(s)
-    out, proj = [], {}
-    for fqn, ss in by_fqn.items():
-        arrays = [projection[(s.fqn, s.scope_key)] for s in ss]
-        ts = np.unique(np.concatenate([t for t, _v in arrays]))
-        x = ts.astype(np.float64)
-        total = np.zeros(ts.size)
-        for t, v in arrays:
-            total += np.interp(x, t.astype(np.float64), np.nan_to_num(v.astype(np.float64)),
-                               left=0.0, right=0.0)
-        what = {_mc.SCOPE_DEVICE: "devices", _mc.SCOPE_GPU: "GPUs",
-                _mc.SCOPE_PROCESS: "processes"}.get(ss[0].scope, "series")
-        key = f"all {len(ss)} {what}"
-        out.append(metric_layout.ResolvedSeries(fqn=fqn, scope=ss[0].scope, scope_key=key,
-                                                descriptor=ss[0].descriptor))
-        proj[(fqn, key)] = (ts, total)
-    return out, proj
 
 
 def _distinct_colors(keys_by_rank: list, colors: dict) -> dict:
@@ -270,7 +257,7 @@ class Plan:
 
 def plan(series_list, projector, projection: dict, pid_colors: dict,
          totals: dict | None = None,
-         metric_colors: dict | None = None, aggregated: bool = False) -> Plan:
+         metric_colors: dict | None = None) -> Plan:
     """Colours, line styles and legend entries of one panel. A metric
     panel ranks its entries by activity; a cumulative companion, given
     `totals` ((fqn, scope_key) -> run total, full resolution), by those.
@@ -287,32 +274,22 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
         amount = {(s.fqn, s.scope_key): activity(*projection[(s.fqn, s.scope_key)])
                   for s in live}
 
-    if aggregated:
-        # Sums over instances (aggregate()): one hue, a line style per
-        # metric, each entry with its total.
-        fqns = list(dict.fromkeys(s.fqn for s in live))
-        styles, entries = {}, []
-        for s in live:
-            k = (s.fqn, s.scope_key)
-            st = fqns.index(s.fqn) % N_METRIC_STYLES
-            styles[k] = (COLORS[0], st, True)
-            label = series_label(s, projector, base=label_bases[k])
-            entries.append((label, COLORS[0], st, [k]))
-        return Plan(styles, entries, amount)
-
     colors = {}
     color_idx = 0
-    groups: dict = {}                     # base metric -> its series, not per-process
+    groups: dict = {}                     # base metric (a device) -> its series, not per-process
     for s in live:
         if s.scope == _mc.SCOPE_PROCESS and int(s.scope_key) in pid_colors:
             colors[(s.fqn, s.scope_key)] = pid_colors[int(s.scope_key)]
         elif s.scope == _mc.SCOPE_PROCESS:
             colors[(s.fqn, s.scope_key)] = COLORS[color_idx % len(COLORS)]
             color_idx += 1
+        elif s.scope == _mc.SCOPE_DEVICE:
+            groups.setdefault(device_key(s), []).append(s)
         else:
             groups.setdefault(metric_base(s), []).append(s)
-    # One hue per base metric (the figure-wide one), distinct within the
-    # panel (the most active group keeps its hue); its statistics shaded.
+    # One hue per base metric or device (the figure-wide one), distinct
+    # within the panel (the most active group keeps its hue); a metric's
+    # statistics shaded.
     hues, used = {}, set()
     for b in sorted(groups, key=lambda b: -sum(amount[(s.fqn, s.scope_key)] for s in groups[b])):
         h = (metric_colors or {}).get(b) or COLORS[len(hues) % len(COLORS)]
@@ -328,8 +305,8 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
 
     entries = []
     if styled:
-        # One entry per process (its colour) and one per metric (its line
-        # style), not every process x metric pair.
+        # One entry per process or device (its colour) and one per metric
+        # (its line style), not every entity x metric pair.
         fqn_base = {s.fqn: label_bases[(s.fqn, s.scope_key)] for s in live}
         procs: dict = {}
         for s in live:
@@ -343,8 +320,9 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
             for s in procs[k]:
                 colors[(s.fqn, k)] = c
         for k in shown:
-            entries.append((process_label(projector, k), pcolor[k], 0,
-                            [(s.fqn, k) for s in procs[k]]))
+            name = (process_label(projector, k) if procs[k][0].scope == _mc.SCOPE_PROCESS
+                    else str(k))
+            entries.append((name, pcolor[k], 0, [(s.fqn, k) for s in procs[k]]))
         if hidden:
             entries.append((more_label(len(hidden)), OTHER_COLOR, 0,
                             [(s.fqn, k) for k in hidden for s in procs[k]]))

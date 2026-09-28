@@ -22,11 +22,6 @@ enum PanelAggregation {
     // (BYTES_PER_SEC → BYTES, etc.). Non-rate panels are skipped with
     // a warning.
     PANEL_AGGREGATION_INTEGRATE   = 1;
-    // ∫ Σ y dt — the series of each metric summed over their instances
-    // (devices, GPUs, processes) on a common time grid, then integrated:
-    // one line per metric (e.g. disk read and write, all devices), each
-    // in the panel's hue with its own line style.
-    PANEL_AGGREGATION_INTEGRATE_SUM = 2;
 }
 
 message Panel {

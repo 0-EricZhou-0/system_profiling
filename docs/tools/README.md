@@ -116,9 +116,10 @@ listed entries never share a colour. Legend entries name the series or
 process only, on cumulative companions too (the values are on the
 axis). Every series, listed or not, is in `<output>.legend.txt`.
 In a panel with several metrics per process (the per-process I/O
-panels), the legend's first row is the line-style key alone (`── IO
-rchar (sum)  - - IO wchar (sum)`), the processes on the rows under it;
-the processes' entries name the process only.
+panels) or per disk device (disk bandwidth: read and write), the
+legend's first row is the line-style key alone (`── IO rchar (sum)  - -
+IO wchar (sum)`), the processes (devices) on the rows under it, each
+entry naming the process (device) only.
 
 **Process timeline.** Directly under the Region strip, on the same time
 axis: one bar per tracked process (processes only — threads are not
@@ -173,13 +174,11 @@ measured value.
 
 **Cumulative companions.** A layout panel with `aggregation:
 PANEL_AGGREGATION_INTEGRATE` gets a companion under it plotting ∫ y dt of
-each of its series (trapezoid rule, full-resolution data).
-`PANEL_AGGREGATION_INTEGRATE_SUM` first sums each metric over its
-instances (all devices, GPUs or processes, on the union of their
-sample times) and integrates the sums: one line per metric in one hue,
-told apart by line style — the disk bandwidth panel's companion in both
-shipped layouts is read (solid) and write (dashed) summed over every
-traced device, titled `(cumulative, all N devices)`.
+each of its series (trapezoid rule, full-resolution data), one line per
+series as in the panel above: nothing is summed across processes or
+devices. The disk bandwidth panel and its companion, in both shipped
+layouts, draw each device in one colour (the same in every disk panel),
+read solid and write dashed.
 
 **Byte units.** Every bytes and bytes/s axis — rates, gauges and
 cumulative panels, in both renderers — takes its unit from the largest

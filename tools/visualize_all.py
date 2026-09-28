@@ -452,13 +452,12 @@ def _plan_legend(panel, series_list: list[metric_layout.ResolvedSeries], kind: s
                  metric_colors: dict | None = None) -> _LegendPlan:
     """Colours and legend entries of one panel (panel_legend.plan); a
     cumulative companion's are ranked by run total."""
-    if kind in ("integrated", "integrated_sum"):
+    if kind == "integrated":
         cums, _scale_fn, _ylabel = _integrated_axis(panel, series_list, projection)
         p = panel_legend.plan(series_list, projector, projection, pid_color_map,
                               totals={k: float(c[-1]) if c.size else 0.0
                                       for k, (_t, c) in cums.items()},
-                              metric_colors=metric_colors,
-                              aggregated=kind == "integrated_sum")
+                              metric_colors=metric_colors)
     else:
         p = panel_legend.plan(series_list, projector, projection, pid_color_map,
                               metric_colors=metric_colors)
@@ -610,13 +609,6 @@ def _render_metric_panel(
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
 
-def _cumulative_suffix(series_list, kind: str) -> str:
-    """'(cumulative)', or '(cumulative, all 6 devices)' for sums."""
-    if kind == "integrated_sum" and series_list:
-        return f"(cumulative, {series_list[0].scope_key})"
-    return "(cumulative)"
-
-
 def _render_integrated_panel(
     ax,
     panel,
@@ -628,10 +620,8 @@ def _render_integrated_panel(
     sample_freq_hz: float = 0.0,
     display_hz: float = 0.0,
     plan: _LegendPlan | None = None,
-    kind: str = "integrated",
 ) -> None:
-    """Companion to _render_metric_panel — plots ∫ y dt of each series
-    (kind "integrated_sum": of each metric summed over its instances).
+    """Companion to _render_metric_panel — plots ∫ y dt of each series.
 
     Uses the panel's source unit (descriptor.unit, possibly overridden
     by panel.unit_override) and looks up the integrated unit in
@@ -643,7 +633,7 @@ def _render_integrated_panel(
     if plan is None:
         plan = _plan_legend(panel, series_list, "integrated", projector, projection,
                             pid_color_map, _axes_width_pt(ax))
-    title = _panel_title(panel, series_list) + "  " + _cumulative_suffix(series_list, kind)
+    title = _panel_title(panel, series_list) + "  (cumulative)"
     ax.set_title(title, fontsize=10, loc="left", pad=plan.height_pt or None)
     ax.grid(True, alpha=0.3)
 
@@ -1022,10 +1012,9 @@ def _write_legend_file(out_path: Path, png_path: Path,
     lines.append("")
     for panel, series_list, kind in resolved:
         title = panel.title or _panel_title(panel, series_list)
-        if kind in ("integrated", "integrated_sum"):
-            lines.append(f"## {title}  {_cumulative_suffix(series_list, kind)}")
-            lines.append("  (companion panel — ∫ y dt of the entries above"
-                         + (", summed over their instances)" if kind == "integrated_sum" else ")"))
+        if kind == "integrated":
+            lines.append(f"## {title}  (cumulative)")
+            lines.append("  (companion panel — ∫ y dt of the entries above)")
             lines.append("")
             continue
         lines.append(f"## {title}")
@@ -1311,8 +1300,7 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
             _log(f"  skip panel {panel.title!r}  (no matching series)")
             continue
         resolved.append((panel, series, "metric"))
-        if panel.aggregation in (panels_pb.PANEL_AGGREGATION_INTEGRATE,
-                                 panels_pb.PANEL_AGGREGATION_INTEGRATE_SUM):
+        if panel.aggregation == panels_pb.PANEL_AGGREGATION_INTEGRATE:
             src_unit = (panel.unit_override
                         if panel.unit_override != mc_pb.UNIT_UNSPECIFIED
                         else series[0].descriptor.unit)
@@ -1320,12 +1308,6 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
                 _log(f"  panel {panel.title!r}: aggregation INTEGRATE set "
                      f"but source unit {src_unit} has no integrated unit "
                      "mapping — skipping companion panel")
-            elif panel.aggregation == panels_pb.PANEL_AGGREGATION_INTEGRATE_SUM:
-                # Summed over instances first: series of their own.
-                sums, sum_proj = panel_legend.aggregate(series, proj)
-                proj.update(sum_proj)
-                if sums:
-                    resolved.append((panel, sums, "integrated_sum"))
             else:
                 resolved.append((panel, series, "integrated"))
     if not resolved:
@@ -1447,12 +1429,12 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
         for ax, (panel, series_list, kind), plan in zip(
                 metric_axes_by_group[group_key], groups[group_key],
                 plans_by_group[group_key]):
-            if kind in ("integrated", "integrated_sum"):
+            if kind == "integrated":
                 _render_integrated_panel(
                     ax, panel, series_list, projector, proj,
                     t0_ns=t0_ns, pid_color_map=pid_color_map,
                     sample_freq_hz=sample_freq_for[group_key],
-                    display_hz=display_hz, plan=plan, kind=kind)
+                    display_hz=display_hz, plan=plan)
                 continue
             _render_metric_panel(
                 ax, panel, series_list, projector, proj,
