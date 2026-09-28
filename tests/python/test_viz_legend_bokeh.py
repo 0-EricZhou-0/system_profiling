@@ -47,3 +47,15 @@ def test_legend_capped_with_more_entry(tmp_path):
     assert len(legend.items[-1].renderers) == n - N
     colors = [it.renderers[0].glyph.line_color for it in legend.items[:-1]]
     assert len(set(colors)) == N, colors
+
+
+def test_smaller_series_drawn_over_larger(tmp_path):
+    avg, mx = ("sm__cycles_active.avg.pct_of_peak_sustained_elapsed",
+               "sm__cycles_active.max.pct_of_peak_sustained_elapsed")
+    meta = viz_trace.write_trace(str(tmp_path / "t"), [viz_trace.proc(10, discovered=False)],
+                                 gpu_fqns=[avg, mx], gpu_values=[40.0, 90.0])
+    doc = visualize_interactive.build_static(meta)
+    [fig] = [f for p, _k, f in doc.panel_figs if p.series_glob.startswith("sm__")]
+    items = {it.label.value: it.renderers[0] for it in fig.legend[0].items}
+    idx = {lab: fig.renderers.index(r) for lab, r in items.items()}
+    assert idx["Active Cycles (avg)"] > idx["Active Cycles (max)"], idx   # drawn later = on top

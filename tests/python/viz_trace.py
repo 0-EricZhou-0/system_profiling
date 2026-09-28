@@ -52,10 +52,10 @@ def proc(pid, ppid=0, comm="p", start_s=0.0, end_s=None, cpu=50.0,
                 rss=1e8 + cpu * 1e6 if rss is None else rss)
 
 
-def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=()):
+def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_values=None):
     """Write a trace of `procs` (see proc()) over duration_s seconds.
     regions: (name, start_s, end_s). gpu_fqns: GPU metrics to add, each
-    a constant 50. Returns the session_metadata.pb path."""
+    a constant: gpu_values[i], else 50. Returns the session_metadata.pb path."""
     os.makedirs(out_dir, exist_ok=True)
     catalog = text_format.Parse(open(CATALOG).read(), metric_catalog_pb2.MetricCatalog())
     n_ticks = int(duration_s * HZ) + 1
@@ -114,7 +114,8 @@ def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=()):
         g.scope_metric_names.add(scope=metric_catalog_pb2.SCOPE_GPU, fqns=list(gpu_fqns))
         g.tracked_gpus.add(device_index=0, device_name="GPU", chip_name="X")
         for ts in ticks:
-            g.samples.add(timestamp_ns=ts, gpu_index=0, values=[50.0] * len(gpu_fqns))
+            g.samples.add(timestamp_ns=ts, gpu_index=0,
+                          values=list(gpu_values or [50.0] * len(gpu_fqns)))
         _write_frames(os.path.join(out_dir, "gpu_metrics.pb"), [g])
         meta.probes.add(kind=session_metadata_pb2.PROBE_KIND_GPU,
                         output_file="gpu_metrics.pb", sampling_frequency_hz=HZ)

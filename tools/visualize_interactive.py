@@ -515,7 +515,8 @@ def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> list:
     process's colour, or the style in black; clicking it hides all its
     lines."""
     lines = {}
-    for key, (color, st, listed) in p.styles.items():
+    for key in p.order:
+        color, st, listed = p.styles[key]
         lines[key] = fig.line("x", "y", source=sources[key],
                               color=color if listed else panel_legend.OTHER_COLOR,
                               line_dash=_METRIC_DASHES[st],

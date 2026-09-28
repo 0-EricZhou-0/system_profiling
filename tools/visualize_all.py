@@ -388,6 +388,7 @@ class _LegendPlan:
     def __init__(self, p: panel_legend.Plan, avail_width_pt: float):
         self.styles = {k: (c, _METRIC_LINESTYLES[st], listed)
                        for k, (c, st, listed) in p.styles.items()}
+        self.zorder = {k: 2 + i / 1000 for i, k in enumerate(p.order)}
         self.entries = [(lab, c, _METRIC_LINESTYLES[st]) for lab, c, st, _keys in p.entries]
         self.ncol, self.nrows = _legend_grid([e[0] for e in self.entries], avail_width_pt)
 
@@ -470,7 +471,8 @@ def _axes_width_pt(ax) -> float:
 def _plot_styled(ax, time_s, y, key, plan: _LegendPlan) -> None:
     color, ls, listed = plan.styles[key]
     if listed:
-        line, = ax.plot(time_s, y, color=color, linewidth=0.9, linestyle=ls, zorder=2)
+        line, = ax.plot(time_s, y, color=color, linewidth=0.9, linestyle=ls,
+                        zorder=plan.zorder[key])
     else:
         line, = ax.plot(time_s, y, color=panel_legend.OTHER_COLOR, linewidth=0.6,
                         linestyle=ls, zorder=1)

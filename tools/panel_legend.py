@@ -165,11 +165,19 @@ class Plan:
     entries: [(label, color, style index, keys)] in legend order, keys =
              the series the entry stands for; line-style entries have
              METRIC_COLOR.
+    order:   the series keys in drawing order: the unlisted (grey) ones
+             first, then the listed ones from the most active to the
+             least, so a smaller series is drawn over a larger one (the
+             mean over the SMs over the busiest SM) instead of hidden
+             under it.
     """
 
-    def __init__(self, styles: dict, entries: list):
+    def __init__(self, styles: dict, entries: list, amounts: dict):
         self.styles = styles
         self.entries = entries
+        keys = list(styles)
+        self.order = sorted(keys, key=lambda k: (styles[k][2], -amounts.get(k, 0.0),
+                                                 keys.index(k)))
 
 
 def plan(series_list, projector, projection: dict, pid_colors: dict,
@@ -256,4 +264,4 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
                 label += f": {fmt_total(sum(amount[k] for k in hidden))}"
             entries.append((label, OTHER_COLOR, 0, list(hidden)))
         styles = {k: (colors[k], styles_idx[k], k in listed) for k in keys}
-    return Plan(styles, entries)
+    return Plan(styles, entries, amount)

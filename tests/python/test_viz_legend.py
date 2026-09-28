@@ -99,3 +99,16 @@ def test_cap_unit():
     assert shown == ["b", "c"] and hidden == ["a"]
     shown, hidden = panel_legend.cap([("a", 1), ("b", 5)], limit=2)
     assert shown == ["a", "b"] and hidden == []
+
+
+def test_smaller_series_drawn_over_larger(tmp_path):
+    """The mean over the SMs is drawn over the busiest SM (max >= avg
+    everywhere), not hidden under it."""
+    avg, mx = ("sm__cycles_active.avg.pct_of_peak_sustained_elapsed",
+               "sm__cycles_active.max.pct_of_peak_sustained_elapsed")
+    r = _render(tmp_path, [viz_trace.proc(10, discovered=False)],
+                gpu_fqns=[avg, mx], gpu_values=[40.0, 90.0])
+    [ax] = [ax for p, _s, _k, ax in r.panel_axes if p.series_glob.startswith("sm__")]
+    z = {ln._series_key[0]: ln.get_zorder() for ln in ax.get_lines()
+         if getattr(ln, "_series_key", None)}
+    assert z[avg] > z[mx], z
