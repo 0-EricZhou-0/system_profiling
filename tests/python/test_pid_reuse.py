@@ -62,6 +62,10 @@ with running_suite(outdir, mode, hz=100, flush_ms=1000) as suite:
         b.kill(); b.wait()
     res["b"] = b.pid
     if readd:
+        # B may be sampled (as B) as soon as the add reaches the probe,
+        # before this call returns (SIDECAR: the sidecar acks, then
+        # samples): readd_call bounds "nobody's number" from above.
+        res["readd_call"] = time.monotonic_ns()
         suite.add_tracked_process(b.pid, "B")
         res["readd"] = time.monotonic_ns()
     time.sleep(2.5)            # B's entry may wait up to one flush (1 s)
@@ -141,8 +145,8 @@ def test_reused_pid_readded_is_a_new_entry(tmp_path, mode):
     assert a.removed and res["a_kill"] < a.end_time_ns <= res["a_dead"] + 50 * MS, a
     assert res["b_spawn"] - 10 * MS <= b.start_time_ns <= res["readd"] + 10 * MS, \
         (b.start_time_ns - res["b_spawn"]) / MS
-    # Between A's death and B's registration, the number is nobody's.
-    gap = [t for t in sample_times(frames, res["a"]) if res["a_dead"] < t <= res["readd"]]
+    # Between A's death and the call that registers B, the number is nobody's.
+    gap = [t for t in sample_times(frames, res["a"]) if res["a_dead"] < t <= res["readd_call"]]
     assert not gap, f"{len(gap)} samples between A's death and B's registration"
     # One number, two processes, never listed in the same flush.
     for f in frames:
