@@ -5,6 +5,7 @@
 #include "profiler_host_internal.h"
 #include "stop_signal.h"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -34,7 +35,9 @@ struct DecodeTarget {
     uint64_t decodeIntervalMs = 1000;   // one pass per interval
 };
 
-void DecodeThreadFunc(std::vector<uint8_t>& counterDataImage,
+/// One pass per decodeIntervalMs into the two images (see
+/// decode_thread.cpp); samples are evaluated on a worker thread.
+void DecodeThreadFunc(std::array<std::vector<uint8_t>, 2>& counterDataImages,
                       const std::vector<const char*>& metricsList,
                       CuptiPmSampling& target,
                       CuptiProfilerHost& host,

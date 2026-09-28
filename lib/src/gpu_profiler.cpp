@@ -16,6 +16,7 @@
 #include <cupti_profiler_target.h>
 #include <nvml.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <fstream>
@@ -129,7 +130,7 @@ public:
         internal::CuptiPmSampling    target;
         internal::CuptiProfilerHost  host;
         std::vector<uint8_t>         configImage;
-        std::vector<uint8_t>         counterDataImage;
+        std::array<std::vector<uint8_t>, 2> counterDataImages;   // double-buffered
         std::string                  deviceName;
         std::string                  chipName;
         double                       peakDramBwGbps = 0.0;
@@ -276,10 +277,12 @@ void GpuProfiler::Configure(const ProfilerConfig& requested) {
         uint64_t intervalNs = static_cast<uint64_t>(1e9 / config.samplingFrequencyHz);
         CUPTI_API_CALL(d.target.SetConfig(d.configImage, config.hwBufferSize, intervalNs));
         CUPTI_API_CALL(d.target.CreateCounterDataImage(
-            config.maxSamples, m_impl->metricsCstr, d.counterDataImage));
+            config.maxSamples, m_impl->metricsCstr, d.counterDataImages[0]));
+        CUPTI_API_CALL(d.target.CreateCounterDataImage(
+            config.maxSamples, m_impl->metricsCstr, d.counterDataImages[1]));
         std::cout << "  Counter-data image: " << config.maxSamples << " samples ("
                   << (autoSize ? "auto" : "set") << "), " << std::fixed << std::setprecision(1)
-                  << d.counterDataImage.size() / 1e6 << " MB\n";
+                  << d.counterDataImages[0].size() / 1e6 << " MB (x2, double-buffered)\n";
 
         cudaDeviceProp prop;
         RUNTIME_API_CALL(cudaGetDeviceProperties(&prop, idx));
@@ -385,7 +388,7 @@ void GpuProfiler::Start() {
         device.samplingIntervalNs = static_cast<uint64_t>(1e9 / m_impl->config.samplingFrequencyHz);
         device.decodeIntervalMs   = m_impl->config.decodeIntervalMs;
         d->decodeThread = std::thread(internal::DecodeThreadFunc,
-                                       std::ref(d->counterDataImage),
+                                       std::ref(d->counterDataImages),
                                        std::ref(m_impl->metricsCstr),
                                        std::ref(d->target),
                                        std::ref(d->host),

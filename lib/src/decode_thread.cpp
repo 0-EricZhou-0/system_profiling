@@ -1,7 +1,13 @@
 #include "decode_thread.h"
 
+#include <pthread.h>
+
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
+#include <mutex>
+#include <thread>
 
 namespace cupti_profiler {
 namespace internal {
@@ -12,8 +18,18 @@ namespace {
 // says so; every step consumes hardware-buffer records.
 constexpr int kMaxDecodeStepsPerPass = 1 << 16;
 
-// Drains the hardware buffer into the counter-data image, evaluates
-// every completed sample and re-initializes the image.
+// Drains the hardware buffer into a counter-data image, and has a worker
+// thread evaluate every completed sample and re-initialize the image.
+//
+// Two images: the decode thread decodes into one while the worker
+// evaluates and re-initializes the other, so a pass (or a drain step
+// after a full image) never waits for evaluation. The CUPTI 13.3 docs do
+// not say whether calls on one sampler object (DecodeData, GetSampleInfo,
+// CounterDataImageInitialize) or its host object (EvaluateToGpuValues)
+// may run concurrently, so every CUPTI call of a device is serialized
+// (cupti_, held per call: a decode waits for at most one evaluation).
+// Both images have the same size: a GetCounterDataSize query with another
+// max_samples makes later image initializations fail.
 //
 // What CUPTI 13.3 does (measured on H100, sidecar-impl phase 7):
 //   * A decode that stops at END_OF_RECORDS (or OTHER) got everything
@@ -21,24 +37,37 @@ constexpr int kMaxDecodeStepsPerPass = 1 << 16;
 //     (each one starts where the previous one ended) across passes;
 //     a sample still being written stays in the buffer.
 //   * A decode that stops at COUNTER_DATA_FULL left records behind.
-//     Decoding again (after re-initializing the image) catches the
-//     buffer up, but the samples of those next decodes come back with
-//     both timestamps 0 and the real samples in between are gone. No
-//     choice of image avoids it; the image must be large enough for a
-//     whole pass (max_samples). Those samples are dropped and counted.
+//     Decoding again catches the buffer up, but the samples of those next
+//     decodes come back with both timestamps 0 and the real samples in
+//     between are gone, whatever image is used. The image must be large
+//     enough for a whole pass (max_samples). Those samples are dropped
+//     and counted.
 //   * A hardware-buffer overflow makes this and every later decode
 //     fail with CUPTI_ERROR_OUT_OF_MEMORY and return nothing.
 class Decoder {
 public:
-    Decoder(std::vector<uint8_t>& image, const std::vector<const char*>& metrics,
+    Decoder(std::array<std::vector<uint8_t>, 2>& images, const std::vector<const char*>& metrics,
             CuptiPmSampling& target, CuptiProfilerHost& host,
             DecodeTarget device, DecodeStats& stats)
-        : image_(image), metrics_(metrics), target_(target), host_(host),
-          device_(device), stats_(stats) {}
+        : images_(images), metrics_(metrics), target_(target), host_(host),
+          device_(device), stats_(stats) {
+        worker_ = std::thread(&Decoder::Work, this);
+    }
 
+    // One pass: decode until the hardware buffer is drained, handing
+    // each decoded image to the worker.
     CUptiResult Pass() {
         for (int step = 0; step < kMaxDecodeStepsPerPass; ++step) {
-            const auto o = target_.DecodeData(image_);
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait(lk, [&] { return !busy_[active_] || workerResult_ != CUPTI_SUCCESS; });
+                if (workerResult_ != CUPTI_SUCCESS) return workerResult_;
+            }
+            CuptiPmSampling::DecodeOutcome o;
+            {
+                std::lock_guard<std::mutex> g(cupti_);
+                o = target_.DecodeData(images_[active_]);
+            }
             stats_.decodeCalls.fetch_add(1, std::memory_order_relaxed);
             const bool oom = o.result == CUPTI_ERROR_OUT_OF_MEMORY;
             if (oom || o.overflow) {
@@ -50,21 +79,17 @@ public:
                         "CUPTI returns no samples from now on. Raise hw_buffer_size, or lower "
                         "decode_interval_ms or the sampling rate\n", device_.gpuIndex);
                 }
-                if (oom) return CUPTI_SUCCESS;
+                if (oom) return CUPTI_SUCCESS;   // nothing decoded; image unchanged
             }
             if (o.result != CUPTI_SUCCESS) return o.result;
 
-            CUpti_PmSampling_GetCounterDataInfo_Params info = {CUpti_PmSampling_GetCounterDataInfo_Params_STRUCT_SIZE};
-            info.pCounterDataImage = image_.data();
-            info.counterDataImageSize = image_.size();
-            if (auto r = cuptiPmSamplingGetCounterDataInfo(&info); r != CUPTI_SUCCESS) return r;
-            for (size_t i = 0; i < info.numCompletedSamples; ++i) {
-                SamplerRange sr;
-                if (auto r = host_.EvaluateCounterData(target_.GetPmSamplerObject(), i, metrics_, image_, sr);
-                    r != CUPTI_SUCCESS) return r;
-                Keep(std::move(sr));
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                busy_[active_] = true;
+                queue_.push_back(active_);
             }
-            if (auto r = target_.ResetCounterDataImage(image_); r != CUPTI_SUCCESS) return r;
+            cv_.notify_all();
+            active_ ^= 1;
 
             if (o.stopReason != CUPTI_PM_SAMPLING_DECODE_STOP_REASON_COUNTER_DATA_FULL)
                 return CUPTI_SUCCESS;
@@ -80,9 +105,67 @@ public:
         return CUPTI_SUCCESS;
     }
 
+    // After the last pass: the worker evaluates what is queued, then ends.
+    CUptiResult Finish() {
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            quit_ = true;
+        }
+        cv_.notify_all();
+        if (worker_.joinable()) worker_.join();
+        return workerResult_;
+    }
+
+    ~Decoder() { Finish(); }
+
 private:
+    void Work() {
+        char name[16];
+        std::snprintf(name, sizeof(name), "cupti-eval%u", device_.gpuIndex);
+        ::pthread_setname_np(::pthread_self(), name);
+        for (;;) {
+            int idx;
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait(lk, [&] { return !queue_.empty() || quit_; });
+                if (queue_.empty()) return;
+                idx = queue_.front();
+                queue_.pop_front();
+            }
+            const CUptiResult r = Evaluate(images_[idx]);
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                busy_[idx] = false;
+                if (r != CUPTI_SUCCESS && workerResult_ == CUPTI_SUCCESS) workerResult_ = r;
+            }
+            cv_.notify_all();
+        }
+    }
+
+    // Evaluate every completed sample of the image, then re-initialize it.
+    CUptiResult Evaluate(std::vector<uint8_t>& image) {
+        CUpti_PmSampling_GetCounterDataInfo_Params info = {CUpti_PmSampling_GetCounterDataInfo_Params_STRUCT_SIZE};
+        info.pCounterDataImage = image.data();
+        info.counterDataImageSize = image.size();
+        {
+            std::lock_guard<std::mutex> g(cupti_);
+            if (auto r = cuptiPmSamplingGetCounterDataInfo(&info); r != CUPTI_SUCCESS) return r;
+        }
+        for (size_t i = 0; i < info.numCompletedSamples; ++i) {
+            SamplerRange sr;
+            {
+                std::lock_guard<std::mutex> g(cupti_);
+                if (auto r = host_.EvaluateCounterData(target_.GetPmSamplerObject(), i, metrics_, image, sr);
+                    r != CUPTI_SUCCESS) return r;
+            }
+            Keep(std::move(sr));
+        }
+        std::lock_guard<std::mutex> g(cupti_);
+        return target_.ResetCounterDataImage(image);
+    }
+
     // Drop empty and invalid samples; count the ones missing between two
-    // kept ones.
+    // kept ones. Worker thread only.
     void Keep(SamplerRange&& sr) {
         // Zero length, at a real time: CUPTI 13.3 returns one or two,
         // stamped at the start of sampling, in the decode after
@@ -116,21 +199,33 @@ private:
         host_.PushSample(std::move(sr));
     }
 
-    std::vector<uint8_t>& image_;
+    std::array<std::vector<uint8_t>, 2>& images_;
     const std::vector<const char*>& metrics_;
     CuptiPmSampling& target_;
     CuptiProfilerHost& host_;
     DecodeTarget device_;
     DecodeStats& stats_;
-    uint64_t lastEndNs_ = 0;
+
+    std::mutex cupti_;            // every CUPTI call of this device
+
+    std::mutex mu_;               // guards the hand-off state below
+    std::condition_variable cv_;
+    std::deque<int> queue_;       // decoded images, oldest first
+    bool busy_[2] = {false, false};
+    bool quit_ = false;
+    CUptiResult workerResult_ = CUPTI_SUCCESS;
+
+    int active_ = 0;              // decode thread only
+    uint64_t lastEndNs_ = 0;      // worker only
     bool warnedOverflow_ = false;
     bool warnedFull_ = false;
     bool warnedLost_ = false;
+    std::thread worker_;
 };
 
 } // namespace
 
-void DecodeThreadFunc(std::vector<uint8_t>& counterDataImage,
+void DecodeThreadFunc(std::array<std::vector<uint8_t>, 2>& counterDataImages,
                       const std::vector<const char*>& metricsList,
                       CuptiPmSampling& target,
                       CuptiProfilerHost& host,
@@ -139,20 +234,27 @@ void DecodeThreadFunc(std::vector<uint8_t>& counterDataImage,
                       StopSignal& stop,
                       CUptiResult& result)
 {
-    Decoder decoder(counterDataImage, metricsList, target, host, device, stats);
+    char name[16];
+    std::snprintf(name, sizeof(name), "cupti-decode%u", device.gpuIndex);
+    ::pthread_setname_np(::pthread_self(), name);
+
+    Decoder decoder(counterDataImages, metricsList, target, host, device, stats);
     // A pass every decode interval, on a fixed schedule; Stop() cuts the
     // wait short.
     const auto interval = std::chrono::milliseconds(device.decodeIntervalMs);
     auto next = std::chrono::steady_clock::now() + interval;
+    result = CUPTI_SUCCESS;
     while (!stop.WaitUntil(next)) {
         result = decoder.Pass();
-        if (result != CUPTI_SUCCESS) return;
+        if (result != CUPTI_SUCCESS) break;
         next += interval;
         const auto now = std::chrono::steady_clock::now();
         if (next < now) next = now + interval;   // overran: don't burst
     }
     // Final drain (sampling has been stopped).
-    result = decoder.Pass();
+    if (result == CUPTI_SUCCESS) result = decoder.Pass();
+    const CUptiResult worker = decoder.Finish();
+    if (result == CUPTI_SUCCESS) result = worker;
 }
 
 void ReportDecodeSummary(uint32_t gpuIndex, const DecodeStats& stats) {
