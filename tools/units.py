@@ -1,6 +1,5 @@
 """The byte-unit rule of both visualizers, for every bytes and bytes/s
-axis (rates, gauges, cumulative panels), the write-rate footer and the
-run totals.
+axis (rates, gauges, cumulative panels) and the write-rate footer.
 
 A unit is chosen from the largest value actually plotted, with a
 threshold factor F (default 2) so it does not switch too early: >= F TiB

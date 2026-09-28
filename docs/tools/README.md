@@ -84,7 +84,7 @@ Quality / size knobs:
 
 - `--smooth-window-s <s>` boxcar-smooths every `smoothable` metric over
   the given window (per-probe kernel size). `0` (default) = no
-  smoothing. Cumulative companion panels stay raw so their run totals
+  smoothing. Cumulative companion panels stay raw so their integrals
   remain faithful.
 - `--fit-axis-to-data` (off by default): a panel whose ceiling (the
   Peak line) is more than 5× the largest plotted value — the data would
@@ -95,7 +95,7 @@ Quality / size knobs:
   unchanged. Off, every panel reaches its Peak as before. Also on
   `visualize_interactive.py` and passed through by the vLLM example.
 - `--unit-scale-factor <F>` (default 2, must be ≥ 1): the byte-unit
-  threshold — an axis, run total or footer rate uses the largest prefix P
+  threshold — an axis or footer rate uses the largest prefix P
   (KiB, MiB, GiB, TiB) with its largest value ≥ F × P (see "Byte units"
   below); 1 switches as soon as a value reaches the prefix. Also on
   `visualize_interactive.py` (static and live mode) and passed through by
@@ -112,17 +112,13 @@ by run total — and one `+k more` entry; the rest are drawn in light
 grey, so every colour in a legend names one line (ten = the length of
 the colour cycle). A process keeps one colour in every panel, the
 busiest processes getting distinct colours first; within a panel the
-listed entries never share a colour. Cumulative companion panels carry
-each series' run total in its legend entry (`+k more` carries theirs
-combined). Every series, listed or not, is in `<output>.legend.txt`.
+listed entries never share a colour. Legend entries name the series or
+process only, on cumulative companions too (the values are on the
+axis). Every series, listed or not, is in `<output>.legend.txt`.
 In a panel with several metrics per process (the per-process I/O
 panels), the legend's first row is the line-style key alone (`── IO
 rchar (sum)  - - IO wchar (sum)`), the processes on the rows under it;
-the processes' entries name the process only. On a cumulative panel
-each process entry carries its totals, each marked with its line
-style's glyph instead of the metric's name: `vllm (PID 4106078): ──
-0.2556 GiB · ╌╌ 0.0048 GiB` (── solid, ╌╌ dashed, ┈┈ dotted, ─·─
-dash-dot).
+the processes' entries name the process only.
 
 **Process timeline.** Directly under the Region strip, on the same time
 axis: one bar per tracked process (processes only — threads are not
@@ -177,9 +173,9 @@ measured value.
 
 **Cumulative companions.** A layout panel with `aggregation:
 PANEL_AGGREGATION_INTEGRATE` gets a companion under it plotting ∫ y dt of
-each of its series (trapezoid rule, full-resolution data), run totals in
-the legend. `PANEL_AGGREGATION_INTEGRATE_SUM` first sums each metric over
-its instances (all devices, GPUs or processes, on the union of their
+each of its series (trapezoid rule, full-resolution data).
+`PANEL_AGGREGATION_INTEGRATE_SUM` first sums each metric over its
+instances (all devices, GPUs or processes, on the union of their
 sample times) and integrates the sums: one line per metric in one hue,
 told apart by line style — the disk bandwidth panel's companion in both
 shipped layouts is read (solid) and write (dashed) summed over every
@@ -193,8 +189,8 @@ for; the Peak line does not choose it), with a threshold factor F
 F = 2: ≥ 2 TiB → TiB, ≥ 2 GiB → GiB, ≥ 2 MiB → MiB,
 ≥ 2 KiB → KiB, else B (a 1.5 GiB peak reads as 1,536 MiB); rates the same
 with `/s`; an empty or all-zero panel B. The Peak line is drawn as before
-and labelled in the axis's unit. Run totals in legends and the write-rate
-footer use the same rule, each value in its own unit (`tools/units.py`).
+and labelled in the axis's unit. The write-rate footer uses the same rule,
+each value in its own unit (`tools/units.py`).
 
 **Statistic labels.** A metric that is a statistic over its entity's
 instances says which in its legend, from the FQN's rollup:
@@ -303,7 +299,7 @@ What you get:
   panels and process timeline alike; a line style per metric in
   panels with several metrics per process, with a legend of processes
   plus line styles; discovered processes labelled `child of <pid>`;
-  statistic labels; run totals in the cumulative panels' legends.
+  statistic labels; legend entries that name the series only.
 - **Click-to-hide legend entries**; legends sit **above** each panel,
   capped as in `visualize_all.py` (ten entries plus `+k more`, which
   hides or shows all the grey lines at once). The plot frame has a

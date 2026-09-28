@@ -451,13 +451,12 @@ def _plan_legend(panel, series_list: list[metric_layout.ResolvedSeries], kind: s
                  pid_color_map: dict[int, str], avail_width_pt: float,
                  metric_colors: dict | None = None) -> _LegendPlan:
     """Colours and legend entries of one panel (panel_legend.plan); a
-    cumulative companion's entries carry its run totals."""
+    cumulative companion's are ranked by run total."""
     if kind in ("integrated", "integrated_sum"):
         cums, _scale_fn, _ylabel = _integrated_axis(panel, series_list, projection)
         p = panel_legend.plan(series_list, projector, projection, pid_color_map,
                               totals={k: float(c[-1]) if c.size else 0.0
                                       for k, (_t, c) in cums.items()},
-                              fmt_total=units.fmt_bytes,   # each total in its own unit
                               metric_colors=metric_colors,
                               aggregated=kind == "integrated_sum")
     else:
@@ -637,9 +636,9 @@ def _render_integrated_panel(
     Uses the panel's source unit (descriptor.unit, possibly overridden
     by panel.unit_override) and looks up the integrated unit in
     _INTEGRATED_UNIT. If the source unit isn't integrable, the panel
-    falls back to UNIT_UNSPECIFIED (no axis label, auto-scale). Each
-    series' run total (from the full-resolution series) is in its
-    legend entry.
+    falls back to UNIT_UNSPECIFIED (no axis label, auto-scale). The
+    legend ranks the series by run total (full-resolution series) and
+    names them only.
     """
     if plan is None:
         plan = _plan_legend(panel, series_list, "integrated", projector, projection,
@@ -652,8 +651,8 @@ def _render_integrated_panel(
     ax.set_ylabel(ylabel)
 
     for key, (ts_ns, cum) in cums.items():
-        # Decimate the cumulative curve for display; the run totals in
-        # the legend use cum[-1] of the full-resolution series.
+        # Decimate the cumulative curve for display; the legend ranks
+        # by cum[-1] of the full-resolution series.
         ts_plot, cum_plot = _decimate_to_hz(ts_ns, cum, sample_freq_hz, display_hz)
         time_s = (ts_plot.astype(np.int64) - t0_ns) / 1e9
         _plot_styled(ax, time_s, scale_fn(cum_plot), key, plan)
@@ -1196,8 +1195,8 @@ def main() -> int:
                              "axis reaches the Peak).")
     parser.add_argument("--unit-scale-factor", type=_unit_scale_factor,
                         default=units.DEFAULT_SCALE_FACTOR, metavar="F",
-                        help="Byte-unit threshold: an axis (and every run total "
-                             "and footer rate) uses the largest prefix P with "
+                        help="Byte-unit threshold: an axis (and the footer "
+                             "rate) uses the largest prefix P with "
                              "max value >= F x P (default: %(default)s; 1 = "
                              "switch as soon as a value reaches the prefix; "
                              "must be >= 1).")

@@ -76,11 +76,6 @@ COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
 # Panels with a single metric per process keep solid lines.
 N_METRIC_STYLES = 4
 METRIC_COLOR = "black"   # the line-style entries' colour
-# In text (a cumulative panel's per-process totals), the line style a
-# value belongs to: solid, dashed, dotted, dash-dot. The metric's name is
-# in the line-style key of the legend, not repeated per process.
-# Doubled, so a solid one reads as a line sample, not a minus sign.
-STYLE_GLYPHS = ["\u2500\u2500", "\u254c\u254c", "\u2508\u2508", "\u2500\u00b7\u2500"]
 
 
 def series_label(series, projector, base: str | None = None) -> str:
@@ -274,12 +269,12 @@ class Plan:
 
 
 def plan(series_list, projector, projection: dict, pid_colors: dict,
-         totals: dict | None = None, fmt_total=None,
+         totals: dict | None = None,
          metric_colors: dict | None = None, aggregated: bool = False) -> Plan:
     """Colours, line styles and legend entries of one panel. A metric
     panel ranks its entries by activity; a cumulative companion, given
-    `totals` ((fqn, scope_key) -> run total, full resolution), by those,
-    and its labels carry them, formatted by fmt_total."""
+    `totals` ((fqn, scope_key) -> run total, full resolution), by those.
+    Entries name the series or process only; the values are on the axis."""
     label_bases = metric_layout.disambiguate_short_labels(series_list)
     styles_idx = metric_styles(series_list)
     styled = any(v for v in styles_idx.values())
@@ -302,8 +297,6 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
             st = fqns.index(s.fqn) % N_METRIC_STYLES
             styles[k] = (COLORS[0], st, True)
             label = series_label(s, projector, base=label_bases[k])
-            if cumulative:
-                label += f" = {fmt_total(amount[k])}"
             entries.append((label, COLORS[0], st, [k]))
         return Plan(styles, entries, amount)
 
@@ -350,23 +343,10 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
             for s in procs[k]:
                 colors[(s.fqn, k)] = c
         for k in shown:
-            label = process_label(projector, k)
-            if cumulative:
-                parts = [f"{STYLE_GLYPHS[styles_idx[(s.fqn, k)]]} {fmt_total(amount[(s.fqn, k)])}"
-                         for s in procs[k] if amount[(s.fqn, k)] > 0]
-                label += ": " + (" \u00b7 ".join(parts) if parts else "0")
-            entries.append((label, pcolor[k], 0, [(s.fqn, k) for s in procs[k]]))
+            entries.append((process_label(projector, k), pcolor[k], 0,
+                            [(s.fqn, k) for s in procs[k]]))
         if hidden:
-            label = more_label(len(hidden))
-            if cumulative:
-                sums: dict = {}
-                for k in hidden:
-                    for s in procs[k]:
-                        sums[s.fqn] = sums.get(s.fqn, 0.0) + amount[(s.fqn, k)]
-                style_of = {s.fqn: styles_idx[(s.fqn, s.scope_key)] for s in live}
-                parts = [f"{STYLE_GLYPHS[style_of[f]]} {fmt_total(v)}" for f, v in sums.items() if v > 0]
-                label += ": " + (" \u00b7 ".join(parts) if parts else "0")
-            entries.append((label, OTHER_COLOR, 0,
+            entries.append((more_label(len(hidden)), OTHER_COLOR, 0,
                             [(s.fqn, k) for k in hidden for s in procs[k]]))
         for fqn, st in dict.fromkeys((s.fqn, styles_idx[(s.fqn, s.scope_key)]) for s in live):
             entries.append((fqn_base[fqn], METRIC_COLOR, st,
@@ -385,13 +365,8 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
         by_key = {(s.fqn, s.scope_key): s for s in live}
         for k in shown:
             label = series_label(by_key[k], projector, base=label_bases[k])
-            if cumulative:
-                label += f" = {fmt_total(amount[k])}"
             entries.append((label, colors[k], styles_idx[k], [k]))
         if hidden:
-            label = more_label(len(hidden))
-            if cumulative:
-                label += f": {fmt_total(sum(amount[k] for k in hidden))}"
-            entries.append((label, OTHER_COLOR, 0, list(hidden)))
+            entries.append((more_label(len(hidden)), OTHER_COLOR, 0, list(hidden)))
         styles = {k: (colors[k], styles_idx[k], k in listed) for k in keys}
     return Plan(styles, entries, amount)

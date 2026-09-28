@@ -828,11 +828,10 @@ def _build_cumulative_panel(
     # Stash pre-cumulated values so the unified hover sees the
     # cumulative curve rather than the source rate.
     cumulative_projection: dict[tuple[str, object], tuple[np.ndarray, np.ndarray]] = {}
-    # Legend: the largest run totals (full resolution), each in its label.
+    # Legend: ranked by run total (full resolution), names only.
     plan = panel_legend.plan(
         series_list, projector, projection, pid_colors or {},
         totals={(s.fqn, s.scope_key): float(c[-1]) if c.size else 0.0 for s, c in full_totals},
-        fmt_total=units.fmt_bytes,          # each total in its own unit
         metric_colors=metric_colors, aggregated=aggregated)
     for series, ts_ns, cum in cumulatives:
         key = (series.fqn, series.scope_key)
@@ -1838,8 +1837,8 @@ def main() -> int:
                              "axis reaches the Peak).")
     parser.add_argument("--unit-scale-factor", type=_unit_scale_factor,
                         default=units.DEFAULT_SCALE_FACTOR, metavar="F",
-                        help="Byte-unit threshold: an axis (and every run total "
-                             "and footer rate) uses the largest prefix P with "
+                        help="Byte-unit threshold: an axis (and the footer "
+                             "rate) uses the largest prefix P with "
                              "max value >= F x P (default: %(default)s; 1 = "
                              "switch as soon as a value reaches the prefix; "
                              "must be >= 1).")

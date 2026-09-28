@@ -1,18 +1,15 @@
 """The disk bandwidth panel's cumulative companion
 (PANEL_AGGREGATION_INTEGRATE_SUM): read and write summed over all
 devices, then integrated — two lines, one hue, read solid / write
-dashed, each with its run total. Both renderers."""
+dashed, naming the metric only. Both renderers."""
 
 import pytest
 
 import viz_trace  # noqa: F401
-import units  # noqa: E402
 
 M = 1024.0 ** 2
 DEVICES = {"nvme0n1": (4 * M, 1 * M), "nvme1n1": (2 * M, 3 * M)}   # B/s, constant
 DUR = 10.0
-# the trace spans DUR s: read 6 MiB/s x 10 s, write 4 MiB/s x 10 s
-WANT = {"Read Bytes": units.fmt_bytes(6 * M * DUR), "Write Bytes": units.fmt_bytes(4 * M * DUR)}
 
 
 def _meta(tmp_path):
@@ -23,8 +20,7 @@ def _meta(tmp_path):
 def _check(labels, styles, colors):
     assert len(labels) == 2, labels
     for lab in labels:
-        name = "Read Bytes" if "Read" in lab else "Write Bytes"
-        assert "[all 2 devices]" in lab and lab.endswith("= " + WANT[name]), lab
+        assert lab.endswith("[all 2 devices]"), lab
     assert len(set(colors)) == 1 and len({str(s) for s in styles}) == 2
 
 

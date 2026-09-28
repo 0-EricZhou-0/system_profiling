@@ -1,5 +1,5 @@
-"""One byte-unit rule (tools/units.py) for every bytes and bytes/s axis,
-the run totals and the write-rate footer: the unit comes from the largest
+"""One byte-unit rule (tools/units.py) for every bytes and bytes/s axis
+and the write-rate footer: the unit comes from the largest
 value plotted, with a 2x threshold (>= 2 TiB -> TiB, >= 2 GiB -> GiB,
 >= 2 MiB -> MiB, >= 2 KiB -> KiB, else B), not from the panel's ceiling."""
 

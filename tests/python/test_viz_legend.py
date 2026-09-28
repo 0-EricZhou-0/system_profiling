@@ -3,6 +3,8 @@ their panel, outside the axes, under the panel title and clear of the
 panel above; with many series they list the LEGEND_MAX_ENTRIES most
 active plus one "+k more" entry."""
 
+import re
+
 import pytest
 
 matplotlib = pytest.importorskip("matplotlib")
@@ -127,11 +129,10 @@ def _io_trace(tmp_path):
 KEY = ["IO rchar (sum)", "IO wchar (sum)"]
 
 
-def test_style_key_on_its_own_first_row_and_process_only_totals(tmp_path):
+def test_style_key_on_its_own_first_row_and_process_only(tmp_path):
     """A per-process panel with several metrics: the line-style key alone
-    on the legend's first row, the processes under it; a cumulative
-    panel's process entries name the process and its totals (marked by
-    their line style), not the metric."""
+    on the legend's first row, the processes under it, each entry naming
+    the process only (a cumulative panel's too: no metric, no totals)."""
     meta = _io_trace(tmp_path)
     r = visualize_all.build_figure(meta)
     r.fig.canvas.draw()
@@ -149,8 +150,7 @@ def test_style_key_on_its_own_first_row_and_process_only_totals(tmp_path):
         for t in procs:
             assert "PID" in t.get_text() and "rchar" not in t.get_text() \
                 and "wchar" not in t.get_text(), t.get_text()
-        if kind == "integrated":
-            assert all("──" in t.get_text() for t in procs)   # totals, marked by style
+            assert t.get_text().endswith(")"), t.get_text()      # "... (PID n, ...)"
 
 
 def test_style_key_own_legend_bokeh(tmp_path):
@@ -188,3 +188,31 @@ def test_exited_process_ends_in_a_dashed_line(tmp_path):
     [f] = [f for p, k, f in doc.panel_figs if p.series_glob == "proc__rss_bytes"]
     [seg] = [rr for rr in f.renderers if rr.name == "end-lines"]
     assert len(seg.data_source.data["x0"]) == 1 and seg.glyph.line_dash == "dashed"
+
+
+# A run total in a label: "= 1.5 MiB", ": ── 3 KiB", "0.2556 GiB".
+_TOTAL = re.compile(r"(=|\u2500\u2500|\u254c\u254c|\d\s*(B|KiB|MiB|GiB|TiB)\b)")
+
+
+def test_cumulative_legends_name_only_both_renderers(tmp_path):
+    """Every cumulative companion's legend entries name the series or
+    process only, no run totals (the values are on the axis). Both
+    renderers, every cumulative panel of the default layout."""
+    procs = [viz_trace.proc(900 + i, ppid=900 if i else 0, comm=f"p{i}", discovered=bool(i),
+                            cpu=10 + i) for i in range(N + 3)]    # with a +k more entry
+    meta = viz_trace.write_trace(str(tmp_path / "t"), procs, disk=True,
+                                 devices={"nvme0n1": (4 << 20, 1 << 20), "sda": (1 << 20, 0)})
+    r = visualize_all.build_figure(meta)
+    static = [(p.title, [t.get_text() for t in ax.get_legend().get_texts()])
+              for p, _s, k, ax in r.panel_axes if k.startswith("integrated")]
+    pytest.importorskip("bokeh")
+    import visualize_interactive
+    doc = visualize_interactive.build_static(meta)
+    bokeh = [(p.title, [it.label.value for lg in f.legend for it in lg.items])
+             for p, k, f in doc.panel_figs if k == "cumulative"]
+    assert len(static) == len(bokeh) >= 2, (static, bokeh)      # per-process I/O, disk
+    assert any(any(l.startswith("+") for l in labels) for _t, labels in static)
+    for title, labels in static + bokeh:
+        assert labels, title
+        for label in labels:
+            assert not _TOTAL.search(label), (title, label)

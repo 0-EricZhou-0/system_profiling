@@ -93,7 +93,7 @@ the fork); GPU (with `--gpu`); whole-host CPU; **per-process CPU and resident
 memory**; per-device disk bandwidth; **per-process I/O** at the syscall layer
 (`rchar` solid, `wchar` dashed) and the storage layer (`read_bytes` solid,
 `write_bytes` dashed, `cancelled_write_bytes` dotted), each with its
-cumulative companion, whose legend carries each process's run totals.
+cumulative companion (bytes so far, per process).
 Legends sit above their panel and name each metric's statistic ("(avg)",
 "(max)", "(sum)"); the dotted `Peak:` line is the panel's ceiling (100%, or
 all of a resource), not the data's maximum.
