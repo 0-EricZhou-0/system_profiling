@@ -151,6 +151,16 @@ band over the full-colour `.max` one (max ≥ avg, so max shows from avg up
 to max). Series lines are 0.63 pt (the grey "+k more" 0.42 pt; the Bokeh
 page 0.84 / 0.56 px).
 
+**Byte units.** Every bytes and bytes/s axis — rates, gauges and
+cumulative panels, in both renderers — takes its unit from the largest
+value actually plotted on it (after any smoothing or decimation asked
+for; the Peak line does not choose it), with a 2x threshold so it does
+not switch too early: ≥ 2 TiB → TiB, ≥ 2 GiB → GiB, ≥ 2 MiB → MiB,
+≥ 2 KiB → KiB, else B (a 1.5 GiB peak reads as 1,536 MiB); rates the same
+with `/s`; an empty or all-zero panel B. The Peak line is drawn as before
+and labelled in the axis's unit. Run totals in legends and the write-rate
+footer use the same rule, each value in its own unit (`tools/units.py`).
+
 **Statistic labels.** A metric that is a statistic over its entity's
 instances says which in its legend, from the FQN's rollup:
 `sm__cycles_active.avg…` reads "Active Cycles (avg)" (the mean over the

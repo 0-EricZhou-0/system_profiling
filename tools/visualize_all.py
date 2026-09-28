@@ -58,6 +58,7 @@ import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
 import panel_legend  # noqa: E402
+import units  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
@@ -250,8 +251,9 @@ def _decimate_to_hz(ts_ns: np.ndarray, vals: np.ndarray,
 # Unit formatting
 # ---------------------------------------------------------------------------
 
-def _format_unit_axis(unit: int, peak_hint: float | None):
-    """Return (scale_fn, ylabel)."""
+def _format_unit_axis(unit: int, data_max: float | None):
+    """Return (scale_fn, ylabel). Bytes and bytes/s: the unit from the
+    largest value plotted on the axis (units.byte_unit: 2x thresholds)."""
     if unit in (mc_pb.UNIT_PCT, mc_pb.UNIT_PCT_OF_CORE):
         return (lambda v: v, "%")
     if unit == mc_pb.UNIT_RATIO:
@@ -260,17 +262,9 @@ def _format_unit_axis(unit: int, peak_hint: float | None):
         return (lambda v: v, "requests in-flight")
     if unit == mc_pb.UNIT_HZ:
         return (lambda v: v / 1e6, "MHz")
-    if unit == mc_pb.UNIT_BYTES:
-        ref = peak_hint if (peak_hint and peak_hint > 0) else 1024.0 ** 3
-        if ref >= 1024.0 ** 3:
-            return (lambda v: v / (1024.0 ** 3), "GiB")
-        if ref >= 1024.0 ** 2:
-            return (lambda v: v / (1024.0 ** 2), "MiB")
-        return (lambda v: v / 1024.0, "KiB")
-    if unit == mc_pb.UNIT_BYTES_PER_SEC:
-        if peak_hint is not None and peak_hint >= 1024.0 ** 3:
-            return (lambda v: v / (1024.0 ** 3), "GiB/s")
-        return (lambda v: v / (1024.0 ** 2), "MiB/s")
+    if unit in (mc_pb.UNIT_BYTES, mc_pb.UNIT_BYTES_PER_SEC):
+        div, label = units.byte_unit(data_max, rate=unit == mc_pb.UNIT_BYTES_PER_SEC)
+        return (lambda v: v / div, label)
     return (lambda v: v, "")
 
 
@@ -376,8 +370,7 @@ def _integrated_axis(panel, series_list, projection):
         cums[(s.fqn, s.scope_key)] = (ts_ns, cum)
         if cum.size and cum[-1] > max_total:
             max_total = float(cum[-1])
-    scale_fn, ylabel = _format_unit_axis(integrated_unit,
-                                         peak_hint=max_total if max_total > 0 else None)
+    scale_fn, ylabel = _format_unit_axis(integrated_unit, max_total)
     return cums, scale_fn, ylabel
 
 
@@ -459,12 +452,11 @@ def _plan_legend(panel, series_list: list[metric_layout.ResolvedSeries], kind: s
     """Colours and legend entries of one panel (panel_legend.plan); a
     cumulative companion's entries carry its run totals."""
     if kind == "integrated":
-        cums, scale_fn, ylabel = _integrated_axis(panel, series_list, projection)
-        unit_sfx = f" {ylabel}" if ylabel else ""
+        cums, _scale_fn, _ylabel = _integrated_axis(panel, series_list, projection)
         p = panel_legend.plan(series_list, projector, projection, pid_color_map,
                               totals={k: float(c[-1]) if c.size else 0.0
                                       for k, (_t, c) in cums.items()},
-                              fmt_total=lambda v: f"{_fmt_plain(scale_fn(v))}{unit_sfx}",
+                              fmt_total=units.fmt_bytes,   # each total in its own unit
                               metric_colors=metric_colors)
     else:
         p = panel_legend.plan(series_list, projector, projection, pid_color_map,
@@ -543,9 +535,7 @@ def _render_metric_panel(
     unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
         else series_list[0].descriptor.unit
     peak_hint = _resolve_panel_peak(panel, series_list[0].descriptor, projector)
-    scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
-    ax.set_ylabel(ylabel)
-
+    plotted = []
     for series in series_list:
         key = (series.fqn, series.scope_key)
         ts_ns, vals = projection[key]
@@ -560,7 +550,12 @@ def _render_metric_panel(
         # filter so stride-based decimation doesn't fold high-frequency
         # content back into the visible band.
         ts_ns, vals = _decimate_to_hz(ts_ns, vals, sample_freq_hz, display_hz)
+        plotted.append((key, ts_ns, vals))
 
+    # The unit from what is plotted (not the ceiling).
+    scale_fn, ylabel = _format_unit_axis(unit, units.largest(v for _k, _t, v in plotted))
+    ax.set_ylabel(ylabel)
+    for key, ts_ns, vals in plotted:
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
         _plot_styled(ax, time_s, scale_fn(vals), key, plan)
 
@@ -1028,10 +1023,7 @@ def _write_legend_file(out_path: Path, png_path: Path,
 # ---------------------------------------------------------------------------
 
 def _fmt_rate(bps: float) -> str:
-    if bps >= 1024 ** 3: return f"{bps / 1024**3:7.2f} GiB/s"
-    if bps >= 1024 ** 2: return f"{bps / 1024**2:7.2f} MiB/s"
-    if bps >= 1024:      return f"{bps / 1024:7.2f} KiB/s"
-    return f"{bps:7.0f}   B/s"
+    return f"{units.fmt_bytes(bps, rate=True):>13}"
 
 
 def _build_footer_text(rows: list[tuple[str, float, float, int]]) -> str:

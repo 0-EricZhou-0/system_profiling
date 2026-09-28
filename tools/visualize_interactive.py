@@ -52,6 +52,7 @@ import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
 import panel_legend  # noqa: E402
+import units  # noqa: E402
 import process_timeline  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
@@ -180,10 +181,7 @@ def _ingest_probes(
 # ---------------------------------------------------------------------------
 
 def _fmt_rate(bps: float) -> str:
-    if bps >= 1024 ** 3: return f"{bps / 1024**3:7.2f} GiB/s"
-    if bps >= 1024 ** 2: return f"{bps / 1024**2:7.2f} MiB/s"
-    if bps >= 1024:      return f"{bps / 1024:7.2f} KiB/s"
-    return f"{bps:7.0f}   B/s"
+    return f"{units.fmt_bytes(bps, rate=True):>13}"
 
 
 def _est_bytes_per_sample(n_metrics: int, extra_tag: int = 0) -> int:
@@ -291,7 +289,9 @@ def _format_write_rate_footer(rows: list[tuple[str, float, float, int]]) -> str:
 # Unit scaling — same logic as visualize_all.py
 # ---------------------------------------------------------------------------
 
-def _format_unit_axis(unit: int, peak_hint: float | None):
+def _format_unit_axis(unit: int, data_max: float | None):
+    """Return (scale_fn, ylabel). Bytes and bytes/s: the unit from the
+    largest value plotted on the axis (units.byte_unit: 2x thresholds)."""
     if unit in (mc_pb.UNIT_PCT, mc_pb.UNIT_PCT_OF_CORE):
         return (lambda v: v, "%")
     if unit == mc_pb.UNIT_RATIO:
@@ -300,17 +300,9 @@ def _format_unit_axis(unit: int, peak_hint: float | None):
         return (lambda v: v, "requests in-flight")
     if unit == mc_pb.UNIT_HZ:
         return (lambda v: v / 1e6, "MHz")
-    if unit == mc_pb.UNIT_BYTES:
-        ref = peak_hint if (peak_hint and peak_hint > 0) else 1024.0 ** 3
-        if ref >= 1024.0 ** 3:
-            return (lambda v: v / (1024.0 ** 3), "GiB")
-        if ref >= 1024.0 ** 2:
-            return (lambda v: v / (1024.0 ** 2), "MiB")
-        return (lambda v: v / 1024.0, "KiB")
-    if unit == mc_pb.UNIT_BYTES_PER_SEC:
-        if peak_hint is not None and peak_hint >= 1024.0 ** 3:
-            return (lambda v: v / (1024.0 ** 3), "GiB/s")
-        return (lambda v: v / (1024.0 ** 2), "MiB/s")
+    if unit in (mc_pb.UNIT_BYTES, mc_pb.UNIT_BYTES_PER_SEC):
+        div, label = units.byte_unit(data_max, rate=unit == mc_pb.UNIT_BYTES_PER_SEC)
+        return (lambda v: v / div, label)
     return (lambda v: v, "")
 
 
@@ -623,7 +615,9 @@ def _build_panel(
     unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
         else series_list[0].descriptor.unit
     peak_hint = _resolve_panel_peak(panel, series_list[0].descriptor, projector)
-    scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
+    # The unit from what is plotted (not the ceiling).
+    scale_fn, ylabel = _format_unit_axis(
+        unit, units.largest(projection[(s.fqn, s.scope_key)][1] for s in series_list))
 
     tools, box_zoom, wheel_zoom = _make_plot_tools()
     fig_kwargs = dict(
@@ -795,8 +789,7 @@ def _build_cumulative_panel(
             ts_ns, cum = _decimate_to_hz(ts_ns, cum, src_hz, display_hz)
         cumulatives.append((series, ts_ns, cum))
 
-    scale_fn, ylabel = _format_unit_axis(integrated_unit,
-                                          peak_hint=max_total if max_total > 0 else None)
+    scale_fn, ylabel = _format_unit_axis(integrated_unit, max_total)
     base_title = _panel_title(panel, series_list)
 
     tools, box_zoom, wheel_zoom = _make_plot_tools()
@@ -823,11 +816,10 @@ def _build_cumulative_panel(
     # cumulative curve rather than the source rate.
     cumulative_projection: dict[tuple[str, object], tuple[np.ndarray, np.ndarray]] = {}
     # Legend: the largest run totals (full resolution), each in its label.
-    unit_sfx = f" {ylabel}" if ylabel else ""
     plan = panel_legend.plan(
         series_list, projector, projection, pid_colors or {},
         totals={(s.fqn, s.scope_key): float(c[-1]) if c.size else 0.0 for s, c in full_totals},
-        fmt_total=lambda v: f"{_fmt_total(scale_fn(v))}{unit_sfx}",
+        fmt_total=units.fmt_bytes,          # each total in its own unit
         metric_colors=metric_colors)
     for series, ts_ns, cum in cumulatives:
         key = (series.fqn, series.scope_key)
