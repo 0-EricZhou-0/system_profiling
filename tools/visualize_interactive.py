@@ -1354,17 +1354,19 @@ def _inject_loading_overlay(html: str, n_figures: int) -> str:
 # Foldable panels, pinned timeline, hotkeys (static page)
 # ---------------------------------------------------------------------------
 
-_FOLD_CSS = InlineStyleSheet(css=".bk-btn { text-align: left; font-weight: bold; "
-                                 "border: none; background: transparent; padding: 2px 4px; }")
+_FOLD_CSS = (".bk-btn { text-align: left; font-weight: bold; "
+             "border: none; background: transparent; padding: 2px 4px; }")
 
 
-def _fold(fig, title: str):
+def _fold(fig, title: str, css: "InlineStyleSheet"):
     """Header button of a foldable panel: '▾ title' expanded, '▸ title'
     collapsed (the figure hidden, the header kept). The button carries the
-    panel's title; the figure's own is dropped so it is not shown twice."""
+    panel's title; the figure's own is dropped so it is not shown twice.
+    css: the page's InlineStyleSheet(_FOLD_CSS) (a model belongs to one
+    document, so one per page)."""
     fig.title.text = ""
     btn = Button(label="\u25be " + title, sizing_mode="stretch_width", height=24,
-                 stylesheets=[_FOLD_CSS], name="fold")
+                 stylesheets=[css], name="fold")
     btn.js_on_click(CustomJS(args=dict(fig=fig, btn=btn, title=title), code="""
         fig.visible = !fig.visible;
         btn.label = (fig.visible ? "\u25be " : "\u25b8 ") + title;
@@ -1520,6 +1522,7 @@ def _static_html(doc, title: str, bokeh_theme, theme: dict) -> str:
         i = html.rfind("</body>")
         html = html[:i] + _hotkeys_script(doc.x_range.id, doc.t_end_s, doc.folds) + html[i:]
     return html
+
 
 
 def static_page(metadata, **kw) -> str:
@@ -1716,15 +1719,16 @@ def _build_static_document(
     # its title; collapse / expand all at the top.
     folds: list = []                                   # (fig, button, title)
     folded_panels: list = []
+    fold_css = InlineStyleSheet(css=_FOLD_CSS)
     for panel, kind, fig in panel_figs:
         title = fig.title.text                      # the builders' titles
-        btn, wrapped = _fold(fig, title)
+        btn, wrapped = _fold(fig, title, fold_css)
         folds.append((fig, btn, title))
         folded_panels.append(wrapped)
     timeline_block = None
     if timeline_fig is not None:
         tl_title = timeline_fig.title.text
-        tl_btn, timeline_block = _fold(timeline_fig, tl_title)
+        tl_btn, timeline_block = _fold(timeline_fig, tl_title, fold_css)
         folds.insert(0, (timeline_fig, tl_btn, tl_title))
         # Pinned with the strips at its full height: nothing cut, no inner
         # scroll; on a dense trace the band is tall, and folding the

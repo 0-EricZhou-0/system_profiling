@@ -71,3 +71,11 @@ def test_hotkeys_in_the_page(tmp_path):
     # A key-set range counts as user-set: else the data range snaps back to
     # the full extent when the timeline labels' data follows the zoom.
     assert "xr.have_updated_interactively = true;" in html
+
+
+
+def test_two_pages_in_one_process(tmp_path):
+    """No model shared between documents (Bokeh: one document per model):
+    a second page in the same process builds."""
+    for n in range(2):
+        assert "cupti-keys-help" in vi.static_page(_meta(tmp_path / str(n)))
