@@ -94,3 +94,43 @@ def test_bottom_space_after_the_last_panel(tmp_path, monkeypatch, theme):
     assert "height:100vh" in tag and f"background:{vi._THEMES[theme]['page_bg']}" in tag, tag
     assert i > html.rfind("</pre>") and i > html.rfind("</script>")     # after everything drawn
     assert html[html.index("</div>", i) + len("</div>"):].strip().startswith("</body>")
+
+
+def _io_meta(tmp_path):
+    procs = [viz_trace.proc(10, comm="root", discovered=False),
+             viz_trace.proc(11, ppid=10, comm="child", start_s=1.0, end_s=5.0),
+             viz_trace.proc(12, ppid=99, comm="orphan", start_s=2.0, end_s=6.0)]
+    return viz_trace.write_trace(str(tmp_path / "t"), procs, regions=[("load", 1.0, 8.0)],
+                                 disk=True, gpu_fqns=["sm__cycles_active.avg.pct_of_peak_sustained_elapsed"])
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_marks_take_the_theme_ink(tmp_path, monkeypatch, theme):
+    """Timeline outlines, fork links, outside labels and leaders, the
+    line-style key's swatches, the Peak label and the fold headers are in
+    the theme's ink (light: as before), never dark marks on the dark page."""
+    monkeypatch.setattr(vi, "_THEME", theme)
+    t = vi._THEMES[theme]
+    doc = vi.build_static(_io_meta(tmp_path))
+    tl = doc.timeline
+    glyphs = [r.glyph for r in tl.renderers]
+    kinds = {type(g).__name__ for g in glyphs}
+    assert {"Quad", "Segment", "Text"} <= kinds
+    outline = {g.line_color for g in glyphs if type(g).__name__ == "Quad"
+               and isinstance(g.line_color, str) and g.line_color != "color"}
+    assert outline == {t["ink"], "#bbbbbb"}, outline            # root / orphan; "discovered" swatch grey
+    segs = {g.line_color for g in glyphs if type(g).__name__ == "Segment"}
+    assert segs == {t["link"], t["leader"]}, segs               # fork links, leaders
+    texts = {g.text_color for g in glyphs if type(g).__name__ == "Text"}
+    assert texts == {"white", t["label"]}, texts                # inside the bars, outside
+    io = [f for p, k, f in doc.panel_figs if p.series_glob.startswith("proc__io_?char") and k == "metric"]
+    [key] = [lg for lg in io[0].above if type(lg).__name__ == "Legend"]
+    assert {it.renderers[-1].glyph.line_color for it in key.items} == {t["ink"]}
+    peaks = [lb for _p, _k, f in doc.panel_figs for lb in f.center
+             if type(lb).__name__ == "Label" and lb.text.startswith("Peak:")]
+    assert peaks and {lb.text_color for lb in peaks} == {t["label"]}
+    [css] = {tuple(s.css for s in b.stylesheets) for _f, b, _t in doc.folds}
+    assert f"color: {t['page_fg']}" in css[0]
+    if theme == "dark":
+        dark = {"black", "#000000", "#333333", "#444444"}
+        assert not (outline | segs | texts) & dark

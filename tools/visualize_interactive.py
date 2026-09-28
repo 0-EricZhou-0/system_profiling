@@ -443,6 +443,15 @@ _THEMES = {
         "strip_border":  "#888888",
         "overlay_track": "#e0e0e0",
         "overlay_accent": "#3870c4",
+        # Drawn marks in the text colour's family (the page's ink): the
+        # timeline's root / orphan outlines, fork links, labels outside
+        # the bars and their leaders, the line-style key's swatches, the
+        # legends' frames and the fold headers.
+        "ink":            "black",
+        "link":           "#444444",
+        "label":          "#333333",
+        "leader":         "#aaaaaa",
+        "legend_border":  "#cccccc",
     },
     "dark": {
         "bokeh_theme":    "dark_minimal",
@@ -456,6 +465,13 @@ _THEMES = {
         "strip_border":   "#555555",
         "overlay_track":  "#2a3036",
         "overlay_accent": "#5b9bd5",
+        # As above, from the dark theme's text colour (page_fg = Bokeh
+        # dark_minimal's axis labels, #E0E0E0) toward its background.
+        "ink":            "#E0E0E0",
+        "link":           "#B8B8B8",
+        "label":          "#E0E0E0",
+        "leader":         "#6E7780",
+        "legend_border":  "#555555",
     },
 }
 _THEME = "light"
@@ -510,7 +526,8 @@ _METRIC_DASHES = ["solid", "dashed", "dotted", "dashdot"]
 def _legend(entries: list, ncols: int, **kw) -> "Legend":
     return Legend(items=[LegendItem(label=lab, renderers=list(rs)) for lab, rs in entries],
                   ncols=ncols, location="top_left", click_policy="hide",
-                  label_text_font_size="8pt", padding=4, border_line_color="#cccccc",
+                  label_text_font_size="8pt", padding=4,
+                  border_line_color=_THEMES[_THEME]["legend_border"],
                   border_line_alpha=1.0, **kw)
 
 
@@ -548,7 +565,8 @@ def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> tuple[list, list]:
         rs = [lines[k] for k in keys if k in lines]
         if color != panel_legend.OTHER_COLOR:
             # Last: a legend item draws all its renderers' swatches, in order.
-            rs.append(fig.line(x=[-2.0, -1.0], y=[0.0, 0.0], color=color,
+            ink = _THEMES[_THEME]["ink"] if color == panel_legend.METRIC_COLOR else color
+            rs.append(fig.line(x=[-2.0, -1.0], y=[0.0, 0.0], color=ink,
                                line_dash=_METRIC_DASHES[st], line_width=1.5))
         (key if color == panel_legend.METRIC_COLOR else items).append((label, rs))
     return items, key
@@ -686,7 +704,8 @@ def _build_panel(
         fig.add_layout(Label(x=4, x_units="screen", y=_FRAME_HEIGHT - 4, y_units="screen",
                              text=f"Peak: {_fmt_total(scale_fn(peak_hint))}{unit_str} (off-scale)",
                              text_font_size="8pt", text_font_style="bold",
-                             text_baseline="top"))
+                             text_baseline="top",
+                             text_color=_THEMES[_THEME]["label"]))
     elif peak_hint is not None and peak_hint > 0:
         scaled_peak = scale_fn(peak_hint)
         upper = scaled_peak * _YLIM_HEADROOM
@@ -700,7 +719,8 @@ def _build_panel(
         fig.add_layout(Label(x=4, x_units="screen", y=scaled_peak, y_units="data",
                              text=f"Peak: {_fmt_total(scaled_peak)}{unit_str}",
                              text_font_size="8pt", text_font_style="bold",
-                             text_baseline="bottom"))
+                             text_baseline="bottom",
+                             text_color=_THEMES[_THEME]["label"]))
     else:
         fig.y_range.bounds = (0.0, None)
 
@@ -1083,9 +1103,10 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                          + (", alive at the end" if p.alive else ""))
         d["start"].append(left)
         d["end"].append(right)
-    style = {process_timeline.ROOT: dict(line_color="black", line_width=1.5),
+    theme = _THEMES[_THEME]
+    style = {process_timeline.ROOT: dict(line_color=theme["ink"], line_width=1.5),
              process_timeline.DISCOVERED: dict(line_color="color", line_width=0.5),
-             process_timeline.ORPHAN: dict(line_color="black", line_width=1.0,
+             process_timeline.ORPHAN: dict(line_color=theme["ink"], line_width=1.0,
                                            line_dash="dashed")}
     shown = []
     names = {process_timeline.ROOT: "listed root", process_timeline.DISCOVERED: "discovered",
@@ -1106,8 +1127,8 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                 y0=[lk.parent_lane + 0.5 for lk in links],
                 y1=[lk.child_lane + 0.5 for lk in links])
     seg = fig.segment(x0="x", y0="y0", x1="x", y1="y1", source=ColumnDataSource(link),
-                      line_color="#444444", line_width=1.0)
-    fig.scatter("x", "y0", source=ColumnDataSource(link), size=3, color="#444444")
+                      line_color=theme["link"], line_width=1.0)
+    fig.scatter("x", "y0", source=ColumnDataSource(link), size=3, color=theme["link"])
     shown.append(("fork link (parent -> child)", seg))
     inside = dict(x=[], y=[], text=[], left=[], right=[], alpha=[])
     outside = dict(x=[], y=[], text=[])
@@ -1131,7 +1152,7 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
             leaders["x1"].append(lab.x_s)
             leaders["y1"].append(y - process_timeline.LABEL_ROW * 0.42)
     lead = fig.segment(x0="x0", y0="y0", x1="x1", y1="y1", source=ColumnDataSource(leaders),
-                       line_color="#aaaaaa", line_width=0.5)
+                       line_color=theme["leader"], line_width=0.5)
     fig.renderers.remove(lead)
     fig.renderers.insert(0, lead)                      # under the bars
     inside_src = ColumnDataSource(inside)
@@ -1155,7 +1176,7 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     x_range.js_on_change("end", follow)
     fig.text(x="x", y="y", text="text", source=ColumnDataSource(outside),
              text_align="center", text_baseline="middle", text_font_size="7pt",
-             text_color="#333333")
+             text_color=theme["label"])
     fig.add_tools(HoverTool(renderers=bars, tooltips=[
         ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),
         ("start", "@start{0.000}s"), ("end", "@end{0.000}s")]))
@@ -1354,8 +1375,8 @@ def _inject_loading_overlay(html: str, n_figures: int) -> str:
 # Foldable panels, pinned timeline, hotkeys (static page)
 # ---------------------------------------------------------------------------
 
-_FOLD_CSS = (".bk-btn { text-align: left; font-weight: bold; "
-             "border: none; background: transparent; padding: 2px 4px; }")
+_FOLD_CSS = (".bk-btn {{ text-align: left; font-weight: bold; color: {fg}; "
+             "border: none; background: transparent; padding: 2px 4px; }}")
 
 
 def _fold(fig, title: str, css: "InlineStyleSheet"):
@@ -1730,7 +1751,7 @@ def _build_static_document(
     # its title; collapse / expand all at the top.
     folds: list = []                                   # (fig, button, title)
     folded_panels: list = []
-    fold_css = InlineStyleSheet(css=_FOLD_CSS)
+    fold_css = InlineStyleSheet(css=_FOLD_CSS.format(fg=_THEMES[_THEME]["page_fg"]))
     for panel, kind, fig in panel_figs:
         title = fig.title.text                      # the builders' titles
         btn, wrapped = _fold(fig, title, fold_css)

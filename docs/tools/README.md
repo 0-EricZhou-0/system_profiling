@@ -246,7 +246,10 @@ Flag reference (selected; full list via `--help`):
 
 - `--theme {light,dark}` — `dark` applies Bokeh's `dark_minimal` to
   every plot and flips the page background, loading overlay, and
-  sticky-strip fills to match. Default `light`.
+  sticky-strip fills to match; the page's own marks (fold headers,
+  Peak labels, the timeline's outlines, fork links and outside labels,
+  the line-style key's swatches) take the theme's text colour, so they
+  stay legible on the dark background. Default `light`.
 - `--render-backend {canvas,webgl,svg}` — output backend per figure.
   Default `canvas`: ~4-5× faster first paint than `webgl` at our
   trace volume (some GPU drivers stall on WebGL `ReadPixels`). `webgl`
