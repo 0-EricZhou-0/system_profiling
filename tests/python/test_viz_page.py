@@ -4,7 +4,8 @@ strips, at its full height (nothing cut, no inner scroll); every figure
 with the same plot frame (left edge, width), so a time is at the same x
 everywhere; every panel (and the timeline) foldable under a header that
 keeps its title, plus collapse / expand all; keyboard shortcuts on the
-shared x-range; timeline bar labels that follow the visible bar; a
+shared x-range; timeline, region and event labels re-placed for every
+view; the timeline with the panels' tools; half-height strips; a
 window's height of empty page after the last panel."""
 
 import pytest
@@ -38,13 +39,63 @@ def test_every_figure_has_the_same_frame(tmp_path):
     assert {f.frame_width for f in figs} == {vi._FRAME_WIDTH}
 
 
-def test_timeline_labels_follow_the_visible_bar(tmp_path):
-    doc = vi.build_static(_meta(tmp_path))
-    [lab] = [r for r in doc.timeline.renderers if r.name == "inside-labels"]
+def _strip_meta(tmp_path):
+    procs = [viz_trace.proc(10, comm="root", discovered=False),
+             viz_trace.proc(11, ppid=10, comm="child", start_s=1.0, end_s=5.0)]
+    return viz_trace.write_trace(
+        str(tmp_path / "t"), procs, gpu_fqns=["sm__cycles_active.avg.pct_of_peak_sustained_elapsed"],
+        regions=[("load", 1.0, 8.0), ("a rather long region name", 8.0, 8.2)],
+        events=[("server ready", 1.0), ("shutdown", 9.9)])
+
+
+def _texts(fig, name):
+    [r] = [r for r in fig.renderers if r.name == name]
+    return list(r.data_source.data["text"])
+
+
+def test_labels_re_placed_on_every_view(tmp_path):
+    """Timeline, regions and events: one debounced JS relayout (the port of
+    label_spread.place_bar_labels) on x-range start and end; the first
+    layout is Python's: a label on its bar when it fits, else off it."""
+    doc = vi.build_static(_strip_meta(tmp_path))
+    events, regions = doc.strips
     cbs = doc.timeline.x_range.js_property_callbacks
-    codes = [cb.code for key in ("change:start", "change:end") for cb in cbs.get(key, [])]
-    assert any("alpha" in c and "Math.max(d.left[i], a)" in c for c in codes)
-    assert lab.glyph.text_alpha == "alpha" or getattr(lab.glyph.text_alpha, "field", None) == "alpha"
+    for key in ("timeline", "regions", "events"):
+        for change in ("change:start", "change:end"):
+            [cb] = [c for c in cbs[change] if c.args.get("key") == key]
+            assert "function placeBarLabels" in cb.code and "setTimeout(run, wait)" in cb.code
+            assert cb.args["wait"] == vi._RELAYOUT_DEBOUNCE_MS
+    assert _texts(regions, "regions-on-bar") == ["load"]
+    assert _texts(regions, "regions-off-bar") == ["a rather long region name"]
+    assert _texts(events, "events-on-bar") == []                     # a point holds no label
+    assert sorted(_texts(events, "events-off-bar")) == ["server ready", "shutdown"]
+    assert sorted(_texts(doc.timeline, "timeline-on-bar")) == ["child (11)", "root (10)"]
+
+
+def test_timeline_has_the_panels_tools(tmp_path):
+    """Same tools (so the same toolbar and right-click menu) as a metric
+    panel, box zoom on a drag; its key right of the lanes."""
+    doc = vi.build_static(_strip_meta(tmp_path))
+    tl, panel = doc.timeline, doc.panel_figs[0][2]
+    kinds = lambda f: [type(t).__name__ for t in f.tools]
+    assert kinds(tl) == kinds(panel) and "BoxZoomTool" in kinds(tl), (kinds(tl), kinds(panel))
+    assert tl.toolbar_location == panel.toolbar_location == "left"
+    assert type(tl.toolbar.active_drag).__name__ == "BoxZoomTool"
+    assert tl.toolbar.active_drag.dimensions == "width"
+    [key] = [r for r in tl.right if type(r).__name__ == "Legend"]
+    assert not [r for r in tl.above if type(r).__name__ == "Legend"]
+    assert [it.label.value for it in key.items][-1] == "fork link (parent -> child)"
+
+
+def test_strips_half_height(tmp_path):
+    """Event and region strips at half their former 70 px: no title row
+    (the name is a horizontal label left of the frame)."""
+    doc = vi.build_static(_strip_meta(tmp_path))
+    assert [s.yaxis[0].axis_label for s in doc.strips] == ["Events", "Regions"]
+    for s in doc.strips:
+        assert not s.title.text
+        assert s.frame_height + s.min_border_top + s.min_border_bottom <= 36
+        assert s.frame_width == vi._FRAME_WIDTH and s.min_border_left == vi._BORDER_LEFT_PX
 
 
 def test_every_panel_foldable_with_title_kept(tmp_path):

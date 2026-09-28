@@ -54,6 +54,7 @@ import metric_suffix  # noqa: E402
 import panel_legend  # noqa: E402
 import units  # noqa: E402
 import process_timeline  # noqa: E402
+import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 from bokeh.application import Application  # noqa: E402
@@ -62,7 +63,8 @@ from bokeh.embed import file_html  # noqa: E402
 from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column, row  # noqa: E402
 from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
-                          Button, CustomJS, HoverTool, InlineStyleSheet, Label, Legend,
+                          Button, CustomJS, FixedTicker, HoverTool, InlineStyleSheet, Label,
+                          Legend,
                           LegendItem, PanTool,
                           Range1d, ResetTool, SaveTool, Span, WheelZoomTool)
 from bokeh.palettes import Category10  # noqa: E402
@@ -953,31 +955,144 @@ def _load_events_for_session(meta: session_metadata_pb2.SessionMetadata,
     return [], []
 
 
-def _build_region_strip(regions, t0_ns: int, x_range) -> "figure":
-    """Thin strip figure with one colored bar per region. Hover shows
-    name + start/end."""
+# Bar labels that follow the view (process timeline, region and event
+# strips): on its bar when the label fits the bar's visible part, else
+# off the bar in a label row with a leader, off-bar labels never
+# overlapping (label_spread.place_bar_labels; the page runs its line-for-
+# line JS port, tools/label_spread.js, on every x-range change — zoom,
+# pan, reset, keys — debounced by _RELAYOUT_DEBOUNCE_MS). The first
+# layout is Python's, at the full view.
+_RELAYOUT_DEBOUNCE_MS = 60
+_LABEL_SPREAD_JS = (_HERE / "label_spread.js").read_text()
+
+
+def _bar_labels(fig, x_range, key: str, bars: list, placed: list, *, row_y0: float,
+                row_h: float, max_rows: int, char_px: float, pad: float,
+                max_shift: float | None, font: str, in_color: str, out_color: str,
+                leader_color: str) -> None:
+    """Draw `placed` (label_spread.place_bar_labels of `bars` at the full
+    view) and re-place it in JS on every x-range change. bars: dicts with
+    left, right, texts (the preferred text first), y_in (a label's y on its
+    bar), y_anchor (where its leader starts); off-bar row r is centred at
+    row_y0 + r * row_h (y grows downward: the y ranges are reversed)."""
+    ins = dict(x=[], y=[], text=[])
+    outs = dict(x=[], y=[], text=[])
+    leads = dict(x0=[], y0=[], x1=[], y1=[])
+    for b, pl in zip(bars, placed):
+        if pl is None:
+            continue
+        where, text, x, anchor, row = pl
+        if where == "in":
+            ins["x"].append(x); ins["y"].append(b["y_in"]); ins["text"].append(text)
+        else:
+            y = row_y0 + row * row_h
+            outs["x"].append(x); outs["y"].append(y); outs["text"].append(text)
+            leads["x0"].append(anchor); leads["y0"].append(b["y_anchor"])
+            leads["x1"].append(x); leads["y1"].append(y - row_h * 0.42)
+    in_src, out_src, lead_src = (ColumnDataSource(d) for d in (ins, outs, leads))
+    lead = fig.segment(x0="x0", y0="y0", x1="x1", y1="y1", source=lead_src,
+                       line_color=leader_color, line_width=0.5, name=f"{key}-leaders")
+    fig.renderers.remove(lead)
+    fig.renderers.insert(0, lead)                      # under the bars
+    fig.text(x="x", y="y", text="text", source=in_src, text_align="center",
+             text_baseline="middle", text_font_size=font, text_color=in_color,
+             name=f"{key}-on-bar")
+    fig.text(x="x", y="y", text="text", source=out_src, text_align="center",
+             text_baseline="middle", text_font_size=font, text_color=out_color,
+             name=f"{key}-off-bar")
+    bar_src = ColumnDataSource(dict(
+        left=[b["left"] for b in bars], right=[b["right"] for b in bars],
+        t0=[b["texts"][0] for b in bars], t1=[b["texts"][-1] for b in bars],
+        y_in=[b["y_in"] for b in bars], y_anchor=[b["y_anchor"] for b in bars]))
+    relayout = CustomJS(args=dict(rng=x_range, bars=bar_src, ins=in_src, outs=out_src,
+                                  lead=lead_src, key=key, W=_FRAME_WIDTH, char=char_px,
+                                  pad=pad, cap=max_rows, shift=max_shift, y0=row_y0, rh=row_h,
+                                  wait=_RELAYOUT_DEBOUNCE_MS),
+                        code=_LABEL_SPREAD_JS + """
+        const run = () => {
+            const t = performance.now(), d = bars.data;
+            const bs = d.left.map((l, i) => [l, d.right[i], [d.t0[i], d.t1[i]]]);
+            const placed = placeBarLabels(bs, rng.start, rng.end, W, (s) => s.length * char,
+                                          pad, cap, shift);
+            const I = {x: [], y: [], text: []}, O = {x: [], y: [], text: []};
+            const E = {x0: [], y0: [], x1: [], y1: []};
+            placed.forEach((p, i) => {
+                if (!p) return;
+                if (p[0] === "in") { I.x.push(p[2]); I.y.push(d.y_in[i]); I.text.push(p[1]); return; }
+                const y = y0 + p[4] * rh;
+                O.x.push(p[2]); O.y.push(y); O.text.push(p[1]);
+                E.x0.push(p[3]); E.y0.push(d.y_anchor[i]); E.x1.push(p[2]); E.y1.push(y - rh * 0.42);
+            });
+            ins.data = I; outs.data = O; lead.data = E;
+            (window.cuptiRelayoutMs = window.cuptiRelayoutMs || {})[key] = performance.now() - t;
+        };
+        const timers = (window.cuptiRelayoutTimers = window.cuptiRelayoutTimers || {});
+        clearTimeout(timers[key]);
+        timers[key] = setTimeout(run, wait);
+    """)
+    x_range.js_on_change("start", relayout)
+    x_range.js_on_change("end", relayout)
+
+
+# Event and region strips: the name as a horizontal label left of the
+# frame (the figures have no title row), the frame _STRIP_FRAME_PX high in
+# pixel units (y down): bars / markers at the top, then _STRIP_ROWS rows of
+# off-bar labels.
+_STRIP_FRAME_PX = 32
+_STRIP_BAR = (1.0, 11.0)          # a region bar's top and bottom
+_STRIP_ROW_Y0 = 17.0              # centre of the first off-bar label row
+_STRIP_ROW_H = 9.5
+_STRIP_ROWS = 2
+_STRIP_FONT = "7pt"
+
+
+def _strip_figure(title: str, x_range, n: int) -> "figure":
     tools, box_zoom, wheel_zoom = _make_plot_tools(include_save=False)
     fig = figure(
-        title="Regions",
-        width=1200, height=70, frame_width=_FRAME_WIDTH,
-        min_border_left=_STRIP_LEFT_PX,
-        x_range=x_range, y_range=(0.0, 1.0),
-        tools=tools,
-        toolbar_location="left",
-        active_drag=box_zoom,
-        active_scroll=wheel_zoom,
+        width=1200, frame_height=_STRIP_FRAME_PX, frame_width=_FRAME_WIDTH,
+        min_border_left=_STRIP_LEFT_PX, min_border_top=2, min_border_bottom=2,
+        x_range=x_range, y_range=Range1d(_STRIP_FRAME_PX, 0),
+        tools=tools, toolbar_location="left",
+        active_drag=box_zoom, active_scroll=wheel_zoom,
         output_backend=_RENDER_BACKEND,
     )
-    # Solid fills on both the plot area and the surrounding frame
-    # so metric panels can't bleed through during scroll. The two
-    # strip figures are wrapped in a single sticky Column at the
-    # call site (gap-free), so the sticky positioning lives there
-    # rather than on each strip.
+    # Solid fills on both the plot area and the surrounding frame so
+    # metric panels can't bleed through during scroll (the strips sit in
+    # the sticky band).
     fig.background_fill_color = _THEMES[_THEME]["strip_bg"]
     fig.border_fill_color     = _THEMES[_THEME]["strip_bg"]
-    fig.yaxis.visible = False
     fig.ygrid.visible = False
     fig.xaxis.visible = False
+    ax = fig.yaxis[0]
+    ax.axis_label = title
+    ax.axis_label_orientation = "horizontal"
+    ax.axis_label_text_font_style = "bold"
+    ax.axis_label_text_font_size = "10pt"
+    ax.axis_label_text_color = _THEMES[_THEME]["page_fg"]
+    ax.ticker = FixedTicker(ticks=[])
+    ax.axis_line_color = None
+    ax.major_tick_line_color = ax.minor_tick_line_color = None
+    ax.major_label_text_font_size = "0pt"
+    return fig
+
+
+def _strip_labels(fig, x_range, key: str, bars: list, t_end_s: float) -> None:
+    text_px = lambda t: len(t) * _TIMELINE_CHAR_PX
+    shift = process_timeline.LABEL_MAX_SHIFT * _FRAME_WIDTH
+    placed = label_spread.place_bar_labels(
+        [(b["left"], b["right"], b["texts"]) for b in bars], 0.0, max(t_end_s, 1e-9),
+        _FRAME_WIDTH, text_px, 6.0, _STRIP_ROWS, shift)
+    t = _THEMES[_THEME]
+    _bar_labels(fig, x_range, key, bars, placed, row_y0=_STRIP_ROW_Y0, row_h=_STRIP_ROW_H,
+                max_rows=_STRIP_ROWS, char_px=_TIMELINE_CHAR_PX, pad=6.0, max_shift=shift,
+                font=_STRIP_FONT, in_color=t["label"], out_color=t["label"],
+                leader_color=t["leader"])
+
+
+def _build_region_strip(regions, t0_ns: int, x_range, t_end_s: float = 0.0) -> "figure":
+    """Thin strip, one coloured bar per region, its name on the bar or
+    under it with a leader (_strip_labels). Hover: name, start, end."""
+    fig = _strip_figure("Regions", x_range, len(regions))
     if not regions:
         return fig
     names, lefts, rights, colors = [], [], [], []
@@ -986,9 +1101,10 @@ def _build_region_strip(regions, t0_ns: int, x_range) -> "figure":
         lefts.append((s - t0_ns) / 1e9)
         rights.append((e - t0_ns) / 1e9)
         colors.append(_PALETTE[i % len(_PALETTE)])
+    top, bottom = _STRIP_BAR
     cds = ColumnDataSource(data=dict(
         name=names, left=lefts, right=rights,
-        top=[0.85] * len(regions), bottom=[0.15] * len(regions),
+        top=[top] * len(regions), bottom=[bottom] * len(regions),
         color=colors,
     ))
     g = fig.quad(left="left", right="right", top="top", bottom="bottom",
@@ -998,29 +1114,17 @@ def _build_region_strip(regions, t0_ns: int, x_range) -> "figure":
         tooltips=[("region", "@name"),
                   ("start", "@left{0.000}s"),
                   ("end",   "@right{0.000}s")]))
+    _strip_labels(fig, x_range, "regions",
+                  [dict(left=l, right=r, texts=[n], y_in=(top + bottom) / 2, y_anchor=bottom)
+                   for n, l, r in zip(names, lefts, rights)], t_end_s)
     return fig
 
 
-def _build_event_strip(events, t0_ns: int, x_range) -> "figure":
-    """Thin strip figure with one inverted-triangle marker per event
-    plus a vertical hairline. Hover shows name + timestamp."""
-    tools, box_zoom, wheel_zoom = _make_plot_tools(include_save=False)
-    fig = figure(
-        title="Events",
-        width=1200, height=70, frame_width=_FRAME_WIDTH,
-        min_border_left=_STRIP_LEFT_PX,
-        x_range=x_range, y_range=(0.0, 1.0),
-        tools=tools,
-        toolbar_location="left",
-        active_drag=box_zoom,
-        active_scroll=wheel_zoom,
-        output_backend=_RENDER_BACKEND,
-    )
-    fig.background_fill_color = _THEMES[_THEME]["strip_bg"]
-    fig.border_fill_color     = _THEMES[_THEME]["strip_bg"]
-    fig.yaxis.visible = False
-    fig.ygrid.visible = False
-    fig.xaxis.visible = False
+def _build_event_strip(events, t0_ns: int, x_range, t_end_s: float = 0.0) -> "figure":
+    """Thin strip, one inverted-triangle marker per event plus a vertical
+    hairline, its name under it (_strip_labels: a point never holds its
+    label, so always off it, with a leader). Hover: name, timestamp."""
+    fig = _strip_figure("Events", x_range, len(events))
     if not events:
         return fig
     names, xs, colors = [], [], []
@@ -1029,15 +1133,18 @@ def _build_event_strip(events, t0_ns: int, x_range) -> "figure":
         xs.append((ts - t0_ns) / 1e9)
         colors.append(_PALETTE[i % len(_PALETTE)])
     cds = ColumnDataSource(data=dict(
-        name=names, x=xs, y=[0.5] * len(events), color=colors,
+        name=names, x=xs, y=[5.0] * len(events), color=colors,
     ))
     g = fig.scatter("x", "y", source=cds, marker="inverted_triangle",
-                    size=12, color="color")
+                    size=9, color="color")
     for x, c in zip(xs, colors):
         fig.add_layout(Span(location=x, dimension="height",
                             line_color=c, line_width=1.0, line_alpha=0.5))
     fig.add_tools(HoverTool(renderers=[g],
         tooltips=[("event", "@name"), ("t", "@x{0.000}s")]))
+    _strip_labels(fig, x_range, "events",
+                  [dict(left=x, right=x, texts=[n], y_in=5.0, y_anchor=_STRIP_BAR[1])
+                   for n, x in zip(names, xs)], t_end_s)
     return fig
 
 
@@ -1072,11 +1179,15 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     placed, n_rows = process_timeline.place_labels(procs, lanes, t0_ns, t_end_ns,
                                                    _FRAME_WIDTH, text_px, pad_units=10.0)
     height = process_timeline.height_in_lanes(n_lanes, n_rows)
+    tools, box_zoom, wheel_zoom = _make_plot_tools()
     fig = figure(
         title="Processes (bars: lifetime, packed into the fewest lanes; lines: fork links)",
         width=1200, frame_height=max(1, round(height * _LANE_PX)), frame_width=_FRAME_WIDTH,
         min_border_left=_STRIP_LEFT_PX, x_range=x_range, y_range=Range1d(height, 0),
-        tools=[], toolbar_location=None, output_backend=_RENDER_BACKEND,
+        # The panels' tools, toolbar and so right-click menu: box zoom on
+        # a drag, ctrl+wheel zoom, pan, reset, save, hover.
+        tools=tools, toolbar_location="left", active_drag=box_zoom, active_scroll=wheel_zoom,
+        output_backend=_RENDER_BACKEND,
     )
     fig.yaxis.visible = False
     fig.ygrid.visible = False
@@ -1130,59 +1241,28 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                       line_color=theme["link"], line_width=1.0)
     fig.scatter("x", "y0", source=ColumnDataSource(link), size=3, color=theme["link"])
     shown.append(("fork link (parent -> child)", seg))
-    inside = dict(x=[], y=[], text=[], left=[], right=[], alpha=[])
-    outside = dict(x=[], y=[], text=[])
-    leaders = dict(x0=[], y0=[], x1=[], y1=[])
-    for lab in placed:
-        if lab.row < 0:
-            p = next(q for q in procs if q.key == lab.key)
-            inside["x"].append(lab.x_s)
-            inside["y"].append(lab.lane + 0.5)
-            inside["text"].append(lab.text)
-            inside["left"].append((p.start_ns - t0_ns) / 1e9)
-            inside["right"].append((p.end_ns - t0_ns) / 1e9)
-            inside["alpha"].append(1.0)
-        else:
-            y = process_timeline.label_row_y(n_lanes, lab.row)
-            outside["x"].append(lab.x_s)
-            outside["y"].append(y)
-            outside["text"].append(lab.text)
-            leaders["x0"].append(lab.anchor_s)
-            leaders["y0"].append(lab.lane + 0.89)
-            leaders["x1"].append(lab.x_s)
-            leaders["y1"].append(y - process_timeline.LABEL_ROW * 0.42)
-    lead = fig.segment(x0="x0", y0="y0", x1="x1", y1="y1", source=ColumnDataSource(leaders),
-                       line_color=theme["leader"], line_width=0.5)
-    fig.renderers.remove(lead)
-    fig.renderers.insert(0, lead)                      # under the bars
-    inside_src = ColumnDataSource(inside)
-    fig.text(x="x", y="y", text="text", source=inside_src, text_alpha="alpha",
-             text_align="center", text_baseline="middle", text_font_size="7pt",
-             text_color="white", name="inside-labels")
-    # Zoomed, a label sits in the middle of the visible part of its bar,
-    # and is hidden when it no longer fits there (never cut at an edge).
-    follow = CustomJS(args=dict(src=inside_src, rng=x_range, w=_FRAME_WIDTH,
-                                char=_TIMELINE_CHAR_PX), code="""
-        const d = src.data, a = rng.start, b = rng.end, per = w / Math.max(b - a, 1e-12);
-        const x = [], alpha = [];
-        for (let i = 0; i < d.text.length; i++) {
-            const lo = Math.max(d.left[i], a), hi = Math.min(d.right[i], b);
-            x.push((lo + hi) / 2);
-            alpha.push(hi > lo && d.text[i].length * char + 6 < (hi - lo) * per ? 1 : 0);
-        }
-        src.data = Object.assign({}, d, {x: x, alpha: alpha});
-    """)
-    x_range.js_on_change("start", follow)
-    x_range.js_on_change("end", follow)
-    fig.text(x="x", y="y", text="text", source=ColumnDataSource(outside),
-             text_align="center", text_baseline="middle", text_font_size="7pt",
-             text_color=theme["label"])
+    # Labels: Python's full-view layout (place_labels), re-placed in JS
+    # for every view (_bar_labels) with the same rules and rows.
+    lab_of = {lab.key: lab for lab in placed}
+    tl_bars, tl_placed = [], []
+    for p in procs:
+        lane = lanes[p.key]
+        tl_bars.append(dict(left=(p.start_ns - t0_ns) / 1e9, right=(p.end_ns - t0_ns) / 1e9,
+                            texts=[f"{p.comm} ({p.pid})", p.comm],
+                            y_in=lane + 0.5, y_anchor=lane + 0.89))
+        lab = lab_of.get(p.key)
+        tl_placed.append(None if lab is None else
+                         ("in" if lab.row < 0 else "out", lab.text, lab.x_s, lab.anchor_s, lab.row))
+    _bar_labels(fig, x_range, "timeline", tl_bars, tl_placed,
+                row_y0=process_timeline.label_row_y(n_lanes, 0), row_h=process_timeline.LABEL_ROW,
+                max_rows=n_rows, char_px=_TIMELINE_CHAR_PX, pad=10.0,
+                max_shift=process_timeline.LABEL_MAX_SHIFT * _FRAME_WIDTH, font="7pt",
+                in_color="white", out_color=theme["label"], leader_color=theme["leader"])
     fig.add_tools(HoverTool(renderers=bars, tooltips=[
         ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),
         ("start", "@start{0.000}s"), ("end", "@end{0.000}s")]))
-    # What the bars' styles mean: a key, above the lanes like a panel's.
-    fig.add_layout(_legend([(lab, [r]) for lab, r in shown], len(shown), margin=2, spacing=3),
-                   "above")
+    # What the bars' styles mean: right of the lanes, like a panel's legend.
+    _legend_right(fig, [(lab, [r]) for lab, r in shown])
     fig.legend[0].click_policy = "none"
     return fig
 
@@ -1722,9 +1802,9 @@ def _build_static_document(
     # vertically with the panels below), then regions.
     strips: list = []
     if shared_x is not None and events:
-        strips.append(_build_event_strip(events, t0_ns, shared_x))
+        strips.append(_build_event_strip(events, t0_ns, shared_x, x_end_s))
     if shared_x is not None and regions:
-        strips.append(_build_region_strip(regions, t0_ns, shared_x))
+        strips.append(_build_region_strip(regions, t0_ns, shared_x, x_end_s))
 
     # The process timeline, right under the (sticky) strips, scrolling.
     timeline_fig = None
@@ -1738,7 +1818,7 @@ def _build_static_document(
     # page is visual noise; the framework is implicit from the file
     # extension). The wheel-zoom's maintain_focus=False is set at
     # construction time inside _make_plot_tools.
-    for f in strips + figs:
+    for f in strips + figs + ([timeline_fig] if timeline_fig is not None else []):
         f.toolbar.logo = None
     # One right border on the page: the frames end at one x, the figures too.
     _reserve_right(strips + ([timeline_fig] if timeline_fig is not None else []) + figs)

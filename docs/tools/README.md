@@ -134,7 +134,10 @@ of the lowest lane by more than half a lane (`tools/label_spread.py`,
 the same routine the event and region strips use) in as many rows as it takes — up to 16 —
 for each to sit within 8% of the axis width of its bar; a burst of
 short-lived compilers (a cold vLLM start, ~90 processes in a few
-seconds) becomes a few rows of labels near the burst.
+seconds) becomes a few rows of labels near the burst. If even 16 rows
+cannot hold them all, the labels of the narrowest bars are left out
+(the hover still names them) rather than overlap
+(`label_spread.place_bar_labels`).
 Listed roots are outlined solid, orphans — discovered processes whose
 parent is not in the trace — dashed. A thin line with a dot on the
 parent's bar marks each fork: from the parent's bar at the child's start
@@ -264,8 +267,20 @@ What you get:
   hover a bar for the process's every name, pid, parent, kind, start and
   end. It keeps its full height (a cold vLLM start: 21 lanes and their
   label rows make the band tall; fold the timeline with its ▾ to give the
-  space back). Zoomed, a bar's label sits in the visible part of the bar
-  and is hidden when it no longer fits there. Every figure on the page
+  space back). It has the panels' tools, toolbar and right-click menu
+  (drag to box-zoom, ctrl + scroll, pan, reset, save, hover), and its
+  key (listed root / discovered / orphan / fork link) right of the
+  lanes, like a panel's legend.
+- **Labels that follow the view** on the timeline and the region and
+  event strips: after every x-range change (zoom, pan, reset, keys;
+  debounced 60 ms) the page places them again for what is in view — on a
+  bar when the label fits its visible part, else in a label row with a
+  leader, never overlapping — so zooming in moves a label back onto its
+  bar once the bar is wide enough. Same rules as the full-view layout:
+  `tools/label_spread.js` is a line-for-line port of
+  `label_spread.place_bar_labels` (a test runs both on the same inputs).
+  Measured on the cold vLLM trace (86 processes): 0.3–0.6 ms per
+  relayout. Every figure on the page
   has the same plot frame (left edge and width) and reserves the same
   right border (room for the widest legend), so a time is at the same x
   in the strips, the timeline and every panel, and the page has one
@@ -291,7 +306,9 @@ What you get:
   | `?` | show / hide this key list |
 - **Sticky event + region strips** pinned at the top of the page; the
   metric panels below scroll past behind them. The two strips share
-  one continuous opaque band with a dashed separator at the bottom.
+  one continuous opaque band with a dashed separator at the bottom. Each
+  is 36 px high (its name left of the frame): the bars / markers on
+  top, up to two rows of labels under them.
 - **Gesture conventions** that match TensorBoard / NSYS / NCU:
     - plain mouse scroll → page scroll
     - **ctrl + scroll** → cursor-anchored x-axis zoom

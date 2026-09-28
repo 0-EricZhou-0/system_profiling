@@ -60,9 +60,9 @@ DEV_FQNS = ["disk__read_bytes.sum.per_second", "disk__write_bytes.sum.per_second
 
 
 def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_values=None,
-                disk=False, devices=None, pcie_peak=0.0):
+                disk=False, devices=None, pcie_peak=0.0, events=()):
     """Write a trace of `procs` (see proc()) over duration_s seconds.
-    regions: (name, start_s, end_s). gpu_fqns: GPU metrics to add, each
+    regions: (name, start_s, end_s). events: (name, t_s). gpu_fqns: GPU metrics to add, each
     a constant: gpu_values[i], else 50. disk: also a Disk trace with each
     process's rchar / wchar rates (cpu x 1 MB/s, cpu x 0.1 MB/s).
     devices: {name: (read B/s, write B/s)}, constant, in that Disk trace.
@@ -129,13 +129,15 @@ def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_va
         meta.probes.add(kind=session_metadata_pb2.PROBE_KIND_DISK,
                         output_file="disk_metrics.pb", sampling_frequency_hz=HZ)
 
-    if regions:
+    if regions or events:
         ev = events_pb2.EventTrace()
         ev.metadata.steady_clock_reference_ns = T0
         buf = ev.buffers.add()
         for name, s, e in regions:
             buf.regions.add(name=name, start_timestamp_ns=T0 + int(s * 1e9),
                             end_timestamp_ns=T0 + int(e * 1e9))
+        for name, t in events:
+            buf.events.add(name=name, timestamp_ns=T0 + int(t * 1e9))
         _write_frames(os.path.join(out_dir, "events.pb"), [ev])
         meta.probes.add(kind=session_metadata_pb2.PROBE_KIND_EVENTS, output_file="events.pb")
 
