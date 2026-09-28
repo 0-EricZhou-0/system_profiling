@@ -1120,6 +1120,23 @@ def _ingest_probes(
     return out
 
 
+STOP_COLOR = "#444444"   # the stop line (the Bokeh page's light theme uses the same)
+
+
+def _mark_stop(axes: list, stop_s: float) -> None:
+    """A dashed vertical line at the session's stop on every metric panel
+    (rate and cumulative), no legend entry, a small "stop" note at its
+    top; the axis limits are kept as they were."""
+    for ax in axes:
+        xl, yl = ax.get_xlim(), ax.get_ylim()
+        ln = ax.axvline(stop_s, color=STOP_COLOR, linestyle="--", linewidth=0.8, zorder=2.5)
+        ln._stop_line = True
+        ax.text(stop_s, 0.98, "stop ", transform=ax.get_xaxis_transform(), ha="right",
+                va="top", fontsize=7, color=STOP_COLOR)
+        ax.set_xlim(xl)
+        ax.set_ylim(yl)
+
+
 def _first_last_ns(projector: TraceProjector,
                    projection) -> tuple[int | None, int | None]:
     """min/max timestamp across all projected series (already in
@@ -1269,6 +1286,10 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
         return None
 
     t0_ns, t_end_ns = _first_last_ns(projector, proj)
+    # The session's stop: the last sample any probe took (the trace does not
+    # record the stop call itself; the probes' last samples are within one
+    # sampling interval of it). Regions and events do not move it.
+    stop_ns = t_end_ns
     # Include events in the time range so the strips don't overflow.
     for _name, ts in probes["events"]["events"]:
         if t0_ns is None or ts < t0_ns: t0_ns = ts
@@ -1611,6 +1632,7 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
     for g in ("gpu", "system", "disk"):
         for ax, (panel, series_list, kind) in zip(metric_axes_by_group[g], groups[g]):
             panel_axes.append((panel, series_list, kind, ax))
+    _mark_stop([ax for *_x, ax in panel_axes], (stop_ns - t0_ns) / 1e9)
     return Rendered(fig=fig, resolved=resolved, projector=projector,
                     panel_axes=panel_axes, region_ax=region_ax, event_ax=event_ax,
                     process_ax=process_ax, timeline=timeline)

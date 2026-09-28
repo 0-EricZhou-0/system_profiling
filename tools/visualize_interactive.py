@@ -1270,6 +1270,20 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     return fig
 
 
+def _mark_stop(figs: list, stop_s: float) -> None:
+    """A dashed vertical line at the session's stop on every metric panel
+    (rate and cumulative), with a small "stop" note at its top; annotations,
+    so no axis range changes."""
+    t = _THEMES[_THEME]
+    for fig in figs:
+        fig.add_layout(Span(location=stop_s, dimension="height", line_color=t["link"],
+                            line_dash="dashed", line_width=1.0, name="stop-line"))
+        fig.add_layout(Label(x=stop_s, x_units="data", y=_FRAME_HEIGHT - 2, y_units="screen",
+                             x_offset=-3, text="stop", text_align="right",
+                             text_baseline="top", text_font_size="7pt",
+                             text_color=t["link"], name="stop-note"))
+
+
 def _overlay_regions(figs: list, regions, t0_ns: int) -> None:
     """Add a translucent BoxAnnotation per region to each metric panel."""
     if not regions or not figs:
@@ -1704,6 +1718,10 @@ def _build_static_document(
         return None
     t0_ns = min(int(ts[0]) for ts, _ in proj.values() if ts.size > 0)
     t_end_ns = max(int(ts[-1]) for ts, _ in proj.values() if ts.size > 0)
+    # The session's stop: the last sample any probe took (the trace does not
+    # record the stop call itself; the probes' last samples are within one
+    # sampling interval of it). Regions and events do not move it.
+    stop_ns = t_end_ns
     series_keys = list(proj.keys())
 
     # Promote synthesized GPU descriptors.
@@ -1815,6 +1833,7 @@ def _build_static_document(
     # Region-shaded overlays on every metric panel (translucent so
     # they don't drown the traces).
     _overlay_regions(metric_figs, regions, t0_ns)
+    _mark_stop(metric_figs, (stop_ns - t0_ns) / 1e9)
 
     # Strips above the panels: events first (so its hairlines line up
     # vertically with the panels below), then regions.

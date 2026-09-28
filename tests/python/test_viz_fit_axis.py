@@ -53,13 +53,15 @@ def test_bokeh(tmp_path):
             doc = vi.build_static(meta, fit_axis_to_data=fit)
             figs = {p.series_glob[:4]: f for p, k, f in doc.panel_figs if k == "metric"}
             pcie, sm = figs["pcie"], figs["sm__"]
-            labels = [r.text for r in pcie.center if type(r).__name__ == "Label"]
-            spans = [r for r in pcie.center if type(r).__name__ == "Span"]
+            peakish = lambda f, t: [r for r in f.center if type(r).__name__ == t
+                                    and r.name not in ("stop-line", "stop-note")]   # not the stop
+            labels = [r.text for r in peakish(pcie, "Label")]
+            spans = peakish(pcie, "Span")
             if fit:
                 assert labels and labels[0].endswith("(off-scale)") and not spans
             else:
                 assert spans and not any("off-scale" in l for l in labels)
-            assert [type(r).__name__ for r in sm.center if type(r).__name__ == "Span"] == ["Span"]
+            assert len(peakish(sm, "Span")) == 1
     finally:
         vi.build_static(meta)                  # back to the default for later tests
 

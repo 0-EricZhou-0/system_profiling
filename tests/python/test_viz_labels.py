@@ -95,7 +95,7 @@ def test_peak_line_is_labelled_peak_bokeh(tmp_path):
                                  gpu_fqns=["sm__cycles_active.avg.pct_of_peak_sustained_elapsed"])
     doc = visualize_interactive.build_static(meta)
     [fig] = [f for p, _k, f in doc.panel_figs if p.series_glob.startswith("sm__")]
-    labels = [r.text for r in fig.center if type(r).__name__ == "Label"]
+    labels = [r.text for r in fig.center if type(r).__name__ == "Label" and r.name != "stop-note"]
     assert labels == ["Peak: 100 %"], labels
     assert [it.label.value for it in fig.legend[0].items] == ["Active Cycles (avg)"]
 
