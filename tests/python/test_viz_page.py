@@ -4,7 +4,8 @@ strips, at its full height (nothing cut, no inner scroll); every figure
 with the same plot frame (left edge, width), so a time is at the same x
 everywhere; every panel (and the timeline) foldable under a header that
 keeps its title, plus collapse / expand all; keyboard shortcuts on the
-shared x-range; timeline bar labels that follow the visible bar."""
+shared x-range; timeline bar labels that follow the visible bar; a
+window's height of empty page after the last panel."""
 
 import pytest
 
@@ -79,3 +80,17 @@ def test_two_pages_in_one_process(tmp_path):
     a second page in the same process builds."""
     for n in range(2):
         assert "cupti-keys-help" in vi.static_page(_meta(tmp_path / str(n)))
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_bottom_space_after_the_last_panel(tmp_path, monkeypatch, theme):
+    """100vh of page background at the end of the page (after the panels
+    and the footer), so the last panel scrolls up under the band."""
+    monkeypatch.setattr(vi, "_THEME", theme)
+    html = vi.static_page(_meta(tmp_path))
+    i = html.find('<div id="cupti-bottom-space"')
+    assert i > 0 and html.count('id="cupti-bottom-space"') == 1
+    tag = html[i:html.index(">", i) + 1]
+    assert "height:100vh" in tag and f"background:{vi._THEMES[theme]['page_bg']}" in tag, tag
+    assert i > html.rfind("</pre>") and i > html.rfind("</script>")     # after everything drawn
+    assert html[html.index("</div>", i) + len("</div>"):].strip().startswith("</body>")

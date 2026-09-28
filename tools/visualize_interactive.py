@@ -1521,8 +1521,19 @@ def _static_html(doc, title: str, bokeh_theme, theme: dict) -> str:
     if doc.x_range is not None:
         i = html.rfind("</body>")
         html = html[:i] + _hotkeys_script(doc.x_range.id, doc.t_end_s, doc.folds) + html[i:]
-    return html
+    return _inject_bottom_space(html, theme)
 
+
+def _inject_bottom_space(html: str, theme: dict) -> str:
+    """A window's height of empty page (the page background) after the
+    last panel, so the last panel can scroll up to just under the sticky
+    band instead of stopping at the window's bottom edge."""
+    i = html.rfind("</body>")
+    if i < 0:
+        return html
+    space = (f'<div id="cupti-bottom-space" aria-hidden="true" '
+             f'style="height:100vh;background:{theme["page_bg"]}"></div>')
+    return html[:i] + space + html[i:]
 
 
 def static_page(metadata, **kw) -> str:

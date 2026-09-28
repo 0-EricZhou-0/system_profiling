@@ -272,6 +272,9 @@ What you get:
   its title and a ▾/▸ control; collapsed, only the header row is left.
   *Collapse all* / *Expand all* sit at the top of the sticky band. Works
   in the saved HTML without a server (not remembered across reloads).
+- **Room to scroll the last panel up**: a window's height of empty page
+  (the page background, either theme) follows the last panel and the
+  footer, so the last panel can sit right under the sticky band.
 - **Keys** (ignored while typing in a text field; the toolbar's tools
   are unchanged):
 
