@@ -304,6 +304,13 @@ What you get:
   cold vLLM page ~50 ms to fold and ~110 ms to unfold a panel, ~0.5 s /
   ~1 s to collapse / expand all (hiding by Bokeh's `visible` re-laid out
   the whole page: ~1.1 s a panel, 6.6–8.5 s for all).
+- **Middle-button drag pans** the time axis on any plot (panels,
+  timeline, strips) whatever toolbar tool is active; left-drag keeps the
+  active tool (box zoom). The browser's middle-click autoscroll / paste
+  is suppressed on the plots.
+- **`? Keys` button** at the top right of the sticky band: the same key
+  list as the `?` key. Process and region tooltips show a duration next
+  to start and end.
 - **Room to scroll the last panel up**: a window's height of empty page
   (the page background, either theme) follows the last panel and the
   footer, so the last panel can sit right under the sticky band.

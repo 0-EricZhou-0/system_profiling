@@ -64,7 +64,7 @@ from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column, row  # noqa: E402
 from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
                           Button, CustomJS, FixedTicker, HoverTool, InlineStyleSheet, Label,
-                          Legend,
+                          Legend, Spacer,
                           LegendItem, PanTool,
                           Range1d, ResetTool, SaveTool, Span, WheelZoomTool)
 from bokeh.palettes import Category10  # noqa: E402
@@ -1122,7 +1122,7 @@ def _build_region_strip(regions, t0_ns: int, x_range, t_end_s: float = 0.0) -> "
     cds = ColumnDataSource(data=dict(
         name=names, left=lefts, right=rights,
         top=[top] * len(regions), bottom=[bottom] * len(regions),
-        color=colors,
+        color=colors, dur=[r - l for l, r in zip(lefts, rights)],
     ))
     g = fig.quad(left="left", right="right", top="top", bottom="bottom",
                  source=cds, fill_color="color", fill_alpha=0.6,
@@ -1132,7 +1132,8 @@ def _build_region_strip(regions, t0_ns: int, x_range, t_end_s: float = 0.0) -> "
     fig.add_tools(HoverTool(renderers=[g], point_policy="follow_mouse",
         tooltips=[("region", "@name"),
                   ("start", "@left{0.000}s"),
-                  ("end",   "@right{0.000}s")]))
+                  ("end",   "@right{0.000}s"),
+                  ("duration", "@dur{0.000}s")]))
     _strip_labels(fig, x_range, "regions",
                   [dict(left=l, right=r, texts=[n], y_in=(top + bottom) / 2, y_anchor=bottom)
                    for n, l, r in zip(names, lefts, rights)], t_end_s)
@@ -1217,7 +1218,7 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     fig.xaxis.visible = False
     span_s = max((t_end_ns - t0_ns) / 1e9, 1e-9)
     by_kind: dict = {k: dict(left=[], right=[], top=[], bottom=[], color=[], name=[], pid=[],
-                             ppid=[], kind=[], start=[], end=[])
+                             ppid=[], kind=[], start=[], end=[], dur=[])
                      for k in (process_timeline.ROOT, process_timeline.DISCOVERED,
                                process_timeline.ORPHAN)}
     for p in procs:
@@ -1237,6 +1238,7 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                          + (", alive at the end" if p.alive else ""))
         d["start"].append(left)
         d["end"].append(right)
+        d["dur"].append(right - left)
     theme = _THEMES[_THEME]
     style = {process_timeline.ROOT: dict(line_color=theme["ink"], line_width=1.5),
              process_timeline.DISCOVERED: dict(line_color="color", line_width=0.5),
@@ -1287,7 +1289,7 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     # At the pointer, as on the region strip (a bar's centre can be off-screen).
     fig.add_tools(HoverTool(renderers=bars, point_policy="follow_mouse", tooltips=[
         ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),
-        ("start", "@start{0.000}s"), ("end", "@end{0.000}s")]))
+        ("start", "@start{0.000}s"), ("end", "@end{0.000}s"), ("duration", "@dur{0.000}s")]))
     # What the bars' styles mean: right of the lanes, like a panel's legend.
     _legend_right(fig, [(lab, [r]) for lab, r in shown])
     fig.legend[0].click_policy = "none"
@@ -1538,6 +1540,13 @@ _FOLD_ALL_JS = _FOLD_FN_JS + """
 """
 
 
+def _keys_button():
+    """The 'Keys' button (top right of the sticky band): the '?' key's help."""
+    b = Button(label="? Keys", width=80, height=26, name="keys-help")
+    b.js_on_click(CustomJS(code='if (window.cuptiHotkey) window.cuptiHotkey("?");'))
+    return b
+
+
 def _fold_all_buttons(folds: list):
     """'Collapse all' / 'Expand all' for folds = [(fig, button, title)]."""
     args = dict(figs=[f for f, _b, _t in folds], btns=[b for _f, b, _t in folds],
@@ -1552,10 +1561,12 @@ def _fold_all_buttons(folds: list):
 
 _KEYS = [("r / 0", "reset zoom"), ("= / +", "zoom in (2x, around the centre)"),
          ("-", "zoom out"), ("\u2190 / \u2192", "pan 10% of the view (Shift: 50%)"),
-         ("c", "collapse / expand all panels"), ("?", "this help")]
+         ("c", "collapse / expand all panels"), ("?", "this help (also the Keys button)"),
+         ("middle-drag", "pan, on any plot, whatever tool is active")]
 
 
-def _hotkeys_script(xr_id: str, t_end_s: float, folds: list) -> str:
+def _hotkeys_script(xr_id: str, t_end_s: float, folds: list,
+                    frame_px: int = _FRAME_WIDTH) -> str:
     """Keyboard shortcuts on the shared x-range of every panel and the
     fold state, plus a help overlay ('?'). Plain JS on the document,
     ignored while typing in an input / textarea."""
@@ -1618,6 +1629,39 @@ def _hotkeys_script(xr_id: str, t_end_s: float, folds: list) -> str:
     const xr = model(XR);
     return xr ? [xr.start, xr.end] : null;
   }};
+  // Middle-button drag pans the shared x-range on any plot (panels,
+  // timeline, strips) whatever Bokeh tool is active: taken in the capture
+  // phase so Bokeh's tools never see the middle button, and the browser's
+  // middle-click autoscroll / paste are suppressed. Same clamping as the keys.
+  let pan = null, queued = null;
+  // A plot's pointer events land on its Bokeh event layer (div.bk-events).
+  const onPlot = (e) => e.composedPath().some((n) => n && n.classList && n.classList.contains("bk-events"));
+  const stop = (e) => {{ e.preventDefault(); e.stopPropagation(); }};
+  window.addEventListener("pointerdown", function (e) {{
+    if (e.button !== 1 || !onPlot(e)) return;
+    const xr = model(XR);
+    if (!xr) return;
+    pan = {{x: e.clientX, a: xr.start, b: xr.end}};
+    stop(e);
+  }}, true);
+  for (const type of ["mousedown", "mouseup", "auxclick"])
+    window.addEventListener(type, function (e) {{ if (e.button === 1 && (pan || onPlot(e))) stop(e); }}, true);
+  window.addEventListener("pointermove", function (e) {{
+    if (!pan) return;
+    stop(e);
+    const first = queued === null;
+    queued = e.clientX;
+    if (first) requestAnimationFrame(function () {{
+      if (pan && queued !== null) {{
+        const d = (queued - pan.x) * (pan.b - pan.a) / {frame_px};
+        setRange(model(XR), pan.a - d, pan.b - d);
+      }}
+      queued = null;
+    }});
+  }}, true);
+  const endPan = function (e) {{ if (pan && (e.type === "pointercancel" || e.button === 1)) {{ pan = null; stop(e); }} }};
+  window.addEventListener("pointerup", endPan, true);
+  window.addEventListener("pointercancel", endPan, true);
   document.addEventListener("keydown", function (e) {{
     const t = e.target;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1910,7 +1954,9 @@ def _build_static_document(
     theme = _THEMES[_THEME]
     layout_children: list = []
     # The fold-all buttons ride in the sticky band too, always at hand.
-    band = ([row(_fold_all_buttons(folds))] if folds else []) + strips \
+    top = (_fold_all_buttons(folds) if folds else []) + [Spacer(sizing_mode="stretch_width"),
+                                                        _keys_button()]
+    band = [row(top, sizing_mode="stretch_width")] + strips \
         + ([timeline_block] if timeline_block is not None else [])
     if band:
         strip_col = column(band, spacing=0, sizing_mode="stretch_width")

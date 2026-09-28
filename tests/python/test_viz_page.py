@@ -113,9 +113,9 @@ def test_every_panel_foldable_with_title_kept(tmp_path):
         # folded by CSS display, not fig.visible (a whole-document relayout)
         assert "setFolded(fig, hide)" in cb.code and cb.args["fig"] is fig
         assert ".visible" not in cb.code
-    names = [b.label for b in doc.band.children[0].children]
-    assert names == ["Collapse all", "Expand all"]
-    for b in doc.band.children[0].children:
+    fold_all = [b for b in doc.band.children[0].children if b.name == "fold-all"]
+    assert [b.label for b in fold_all] == ["Collapse all", "Expand all"]
+    for b in fold_all:
         [cb] = b.js_event_callbacks["button_click"]
         assert "setFolded(figs[i], collapse)" in cb.code and ".visible" not in cb.code
     html = vi.static_page(_meta(tmp_path / "p"))
@@ -210,3 +210,44 @@ def test_bar_hover_follows_the_mouse(tmp_path):
     for fig in (doc.timeline, regions):
         [hv] = [t for t in fig.tools if type(t).__name__ == "HoverTool"]
         assert hv.point_policy == "follow_mouse"
+
+
+def test_keys_button_top_right(tmp_path):
+    """A 'Keys' button, last in the sticky band's top row (right-aligned
+    after a stretching spacer), toggles the '?' help."""
+    doc = vi.build_static(_meta(tmp_path))
+    top = doc.band.children[0]
+    assert top.sizing_mode == "stretch_width"
+    *_rest, spacer, keys = top.children
+    assert type(spacer).__name__ == "Spacer" and spacer.sizing_mode == "stretch_width"
+    assert keys.name == "keys-help" and "Keys" in keys.label
+    [cb] = keys.js_event_callbacks["button_click"]
+    assert 'window.cuptiHotkey("?")' in cb.code
+
+
+def test_middle_drag_pans_everywhere(tmp_path):
+    """Middle-button drag pans the shared x-range on any plot: capture-phase
+    pointer handlers on the window (before Bokeh's tools), autoscroll and
+    paste suppressed, the keys' clamping (setRange)."""
+    html = vi.static_page(_meta(tmp_path))
+    i = html.index("Middle-button drag pans")
+    js = html[i:i + 2500]
+    assert 'window.addEventListener("pointerdown"' in js and "e.button !== 1" in js
+    assert '["mousedown", "mouseup", "auxclick"]' in js and "}, true);" in js
+    assert "setRange(model(XR), pan.a - d, pan.b - d)" in js
+    assert "middle-drag" in html                                       # in the help
+
+
+def test_hover_has_duration(tmp_path):
+    doc = vi.build_static(_strip_meta(tmp_path))
+    _events, regions = doc.strips
+    for fig in (doc.timeline, regions):
+        [hv] = [t for t in fig.tools if type(t).__name__ == "HoverTool"]
+        names = [n for n, _v in hv.tooltips]
+        assert names[-3:] == ["start", "end", "duration"], names
+        assert dict(hv.tooltips)["duration"] == "@dur{0.000}s"
+        for r in hv.renderers:
+            d = r.data_source.data
+            ends = d["end"] if "end" in d else d["right"]
+            starts = d["start"] if "start" in d else d["left"]
+            assert all(abs(u - (e - s)) < 1e-9 for u, s, e in zip(d["dur"], starts, ends))
