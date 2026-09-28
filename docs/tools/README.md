@@ -350,9 +350,10 @@ What you get:
       x-region)
   Pan is still available via the toolbar's pan button on the left.
 - **Unified hover popup** anchored at the bottom edge of each panel:
-  one tooltip per panel listing every co-plotted series's value at
-  the cursor x (interpolated where sampling rates differ). Triggers
-  regardless of which legend entries are hidden.
+  one tooltip per panel listing every co-plotted series that has a value
+  at the cursor x (interpolated where sampling rates differ): a process
+  not started yet or already gone gets no row. Triggers regardless of
+  which legend entries are hidden.
 - **Same series styling as `visualize_all.py`** (shared code,
   `tools/panel_legend.py`): one colour per process across the page,
   panels and process timeline alike; a line style per metric in

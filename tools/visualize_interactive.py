@@ -63,7 +63,7 @@ from bokeh.embed import file_html  # noqa: E402
 from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column, row  # noqa: E402
 from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
-                          Button, CustomJS, FixedTicker, HoverTool, InlineStyleSheet, Label,
+                          Button, CustomJS, CustomJSHover, FixedTicker, HoverTool, InlineStyleSheet, Label,
                           Legend, Spacer,
                           LegendItem, PanTool,
                           Range1d, ResetTool, SaveTool, Span, WheelZoomTool)
@@ -612,7 +612,9 @@ def _attach_unified_hover(
     Implementation: build an invisible 'anchor' line glyph whose CDS
     has x = union of every series's timestamps and one y_i column per
     series (np.interp aligns series with different sampling). Bind the
-    HoverTool to *only* that anchor, with one tooltip row per series."""
+    HoverTool to *only* that anchor. Its body is built at hover time: one
+    row per series that has a value there — a process not started yet or
+    already gone (NaN) gets no row."""
     aligned: list[tuple[metric_layout.ResolvedSeries, np.ndarray, np.ndarray]] = []
     for s in series_list:
         ts_ns, vals = projection[(s.fqn, s.scope_key)]
@@ -624,7 +626,7 @@ def _attach_unified_hover(
     union_ts_ns = np.unique(np.concatenate([ts for _, ts, _ in aligned]))
     union_x_s   = (union_ts_ns.astype(np.int64) - t0_ns) / 1e9
     data: dict = {"x": union_x_s, "_anchor_y": np.zeros_like(union_x_s)}
-    tooltips: list[tuple[str, str]] = [("t", "@x{0.000}s")]
+    rows: list[list[str]] = []                         # [column, label]
     for i, (s, ts_ns, vals) in enumerate(aligned):
         ts_s   = (ts_ns.astype(np.int64) - t0_ns) / 1e9
         scaled = scale_fn(vals.astype(np.float64))
@@ -635,15 +637,28 @@ def _attach_unified_hover(
                                   left=np.nan, right=np.nan)
         col = f"y_{i}"
         data[col] = y_aligned
-        label = _series_label(s, projector,
-                              base=label_bases[(s.fqn, s.scope_key)])
-        unit_part = f" {unit_suffix}" if unit_suffix else ""
-        tooltips.append((label, f"@{col}{{{value_fmt}}}{unit_part}"))
+        rows.append([col, _series_label(s, projector,
+                                        base=label_bases[(s.fqn, s.scope_key)])])
     anchor_cds = ColumnDataSource(data=data)
     anchor = fig.line("x", "_anchor_y", source=anchor_cds,
                       line_alpha=0, line_width=0)
-    fig.add_tools(HoverTool(renderers=[anchor], mode="vline",
-                            attachment="below", tooltips=tooltips))
+    decimals = len(value_fmt.split(".")[1]) if "." in value_fmt else 0
+    present = CustomJSHover(args=dict(src=anchor_cds, rows=rows, dec=decimals,
+                                      unit=f" {unit_suffix}" if unit_suffix else ""), code="""
+        const i = special_vars.index, d = src.data, out = [];
+        for (const [col, label] of rows) {
+            const v = d[col][i];
+            if (v !== null && Number.isFinite(v))
+                out.push(label + ": " + v.toLocaleString("en-US", {useGrouping: false, minimumFractionDigits: dec,
+                                                                  maximumFractionDigits: dec}) + unit);
+        }
+        return out.join("\\n");
+    """)
+    fig.add_tools(HoverTool(
+        renderers=[anchor], mode="vline", attachment="below",
+        tooltips='<div style="font-size:11px;white-space:pre">t: @x{0.000}s\n'
+                 '@_anchor_y{present}</div>',
+        formatters={"@_anchor_y": present}))
 
 
 def _panel_title(panel, series_list: list[metric_layout.ResolvedSeries]) -> str:

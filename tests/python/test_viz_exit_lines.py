@@ -76,3 +76,29 @@ def test_cli_knob(tool):
     assert "--no-exit-lines" in out
     ex = open(os.path.join(viz_trace.TOOLS, "..", "examples", "vllm_serving_profiling.py")).read()
     assert '["--no-exit-lines"] if args.no_exit_lines' in ex
+
+
+def test_hover_lists_only_series_with_a_value(tmp_path):
+    """The unified hover's rows are built at hover time: a process with no
+    value there (not started yet / gone: NaN) gets no row. Every panel;
+    the formatter run under node on a NaN and a finite column."""
+    import json
+    import shutil
+    pytest.importorskip("bokeh")
+    import visualize_interactive as vi
+    doc = vi.build_static(_meta(tmp_path))
+    for p, _k, f in doc.panel_figs:
+        [hv] = [t for t in f.tools if type(t).__name__ == "HoverTool" and isinstance(t.tooltips, str)]
+        assert "@_anchor_y{present}" in hv.tooltips, p.title
+        fmt = hv.formatters["@_anchor_y"]
+        assert "Number.isFinite(v)" in fmt.code
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node not installed")
+    js = ("const f = new Function('special_vars', 'src', 'rows', 'dec', 'unit', %s);"
+          "console.log(JSON.stringify(f({index: 1}, {data: {y_0: [1, 2.5], y_1: [NaN, NaN],"
+          " y_2: [null, 7]}}, [['y_0', 'a'], ['y_1', 'gone'], ['y_2', 'c']], 3, ' %%')));"
+          % json.dumps(fmt.code))
+    out = json.loads(subprocess.run([node, "-e", js], capture_output=True, text=True,
+                                    check=True, timeout=60).stdout)
+    assert out.split("\n") == ["a: 2.500 %", "c: 7.000 %"]
