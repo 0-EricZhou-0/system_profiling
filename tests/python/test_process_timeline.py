@@ -132,6 +132,20 @@ def test_timeline_under_region_static(tmp_path):
     assert len(r.timeline.links) == 2                  # 101 <- 100, 102 <- 101; 103 is an orphan
 
 
+def test_every_axis_has_the_same_frame_static(tmp_path):
+    """A time is at the same x on every row of the PNG: region strip,
+    timeline and every panel share the plot frame's left and right edge
+    (in pixels, after drawing)."""
+    pytest.importorskip("matplotlib")
+    import matplotlib
+    matplotlib.use("Agg")
+    import visualize_all
+    r = visualize_all.build_figure(_trace(tmp_path))
+    r.fig.canvas.draw()
+    axes = [r.region_ax, r.process_ax] + [ax for *_x, ax in r.panel_axes]
+    edges = {(round(b.x0, 1), round(b.x1, 1)) for b in (ax.get_window_extent() for ax in axes)}
+    assert len(edges) == 1, edges
+
 def test_timeline_under_region_bokeh(tmp_path):
     pytest.importorskip("bokeh")
     import visualize_interactive

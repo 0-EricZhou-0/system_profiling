@@ -399,21 +399,14 @@ _series_label = panel_legend.series_label
 # Bokeh color palette — Category10 has 10 distinct colors; cycle past that.
 _PALETTE = list(Category10[10])
 
-# Fixed plot-area borders so every panel ends at the same right edge
-# regardless of how wide its legend is. Without these the legends sit
-# in a variable-width right column, which jiggles the plot frames
-# left and right across panels and makes legend labels start at
-# different x. _FRAME_WIDTH locks the plot frame itself.
-#
-# Strips don't actually render a toolbar (Bokeh suppresses it on
-# figures with height < ~100 px), so their left border is the bare
-# _BORDER_LEFT_PX. Metric panels DO render a 30 px left-side toolbar,
-# and Bokeh expands their effective left border to ~98 px (toolbar +
-# y-axis padding) regardless of min_border_left. _STRIP_LEFT_PX shims
-# the strips' left border so their plot frames line up with the
-# metric panels' frames despite the missing toolbar reservation.
-_BORDER_LEFT_PX  = 80
-_STRIP_LEFT_PX   = 98
+# Every figure on the page — strips, timeline, panels — has the same
+# plot-frame left edge and width, so a time is at the same x everywhere.
+# The left border is fixed, not fitted: Bokeh would size it to the widest
+# y tick labels (+ the toolbar) of each figure, which differ from panel to
+# panel. 140 px holds the toolbar (30 px), the y label and ticks of up to
+# 9 characters (measured in headless Chrome: every frame 140 -> 1000 px).
+_BORDER_LEFT_PX  = 140
+_STRIP_LEFT_PX   = _BORDER_LEFT_PX
 _FRAME_WIDTH     = 860
 # Plot-frame height of a metric panel; the title, the legend above and
 # the axis below add to it (so a long legend never squeezes the plot).
@@ -1097,14 +1090,18 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                       line_color="#444444", line_width=1.0)
     fig.scatter("x", "y0", source=ColumnDataSource(link), size=3, color="#444444")
     shown.append(("fork link (parent -> child)", seg))
-    inside = dict(x=[], y=[], text=[])
+    inside = dict(x=[], y=[], text=[], left=[], right=[], alpha=[])
     outside = dict(x=[], y=[], text=[])
     leaders = dict(x0=[], y0=[], x1=[], y1=[])
     for lab in placed:
         if lab.row < 0:
+            p = next(q for q in procs if q.key == lab.key)
             inside["x"].append(lab.x_s)
             inside["y"].append(lab.lane + 0.5)
             inside["text"].append(lab.text)
+            inside["left"].append((p.start_ns - t0_ns) / 1e9)
+            inside["right"].append((p.end_ns - t0_ns) / 1e9)
+            inside["alpha"].append(1.0)
         else:
             y = process_timeline.label_row_y(n_lanes, lab.row)
             outside["x"].append(lab.x_s)
@@ -1118,9 +1115,25 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                        line_color="#aaaaaa", line_width=0.5)
     fig.renderers.remove(lead)
     fig.renderers.insert(0, lead)                      # under the bars
-    fig.text(x="x", y="y", text="text", source=ColumnDataSource(inside),
+    inside_src = ColumnDataSource(inside)
+    fig.text(x="x", y="y", text="text", source=inside_src, text_alpha="alpha",
              text_align="center", text_baseline="middle", text_font_size="7pt",
-             text_color="white")
+             text_color="white", name="inside-labels")
+    # Zoomed, a label sits in the middle of the visible part of its bar,
+    # and is hidden when it no longer fits there (never cut at an edge).
+    follow = CustomJS(args=dict(src=inside_src, rng=x_range, w=_FRAME_WIDTH,
+                                char=_TIMELINE_CHAR_PX), code="""
+        const d = src.data, a = rng.start, b = rng.end, per = w / Math.max(b - a, 1e-12);
+        const x = [], alpha = [];
+        for (let i = 0; i < d.text.length; i++) {
+            const lo = Math.max(d.left[i], a), hi = Math.min(d.right[i], b);
+            x.push((lo + hi) / 2);
+            alpha.push(hi > lo && d.text[i].length * char + 6 < (hi - lo) * per ? 1 : 0);
+        }
+        src.data = Object.assign({}, d, {x: x, alpha: alpha});
+    """)
+    x_range.js_on_change("start", follow)
+    x_range.js_on_change("end", follow)
     fig.text(x="x", y="y", text="text", source=ColumnDataSource(outside),
              text_align="center", text_baseline="middle", text_font_size="7pt",
              text_color="#333333")
@@ -1320,12 +1333,6 @@ def _inject_loading_overlay(html: str, n_figures: int) -> str:
 # Foldable panels, pinned timeline, hotkeys (static page)
 # ---------------------------------------------------------------------------
 
-# The pinned process timeline scrolls inside the sticky band beyond this
-# share of the window height: with the event and region strips (~140 px)
-# it keeps the band under about half of a laptop-height window, so at
-# least half is left for the panels scrolling under it.
-_TIMELINE_MAX_VH = 35
-
 _FOLD_CSS = InlineStyleSheet(css=".bk-btn { text-align: left; font-weight: bold; "
                                  "border: none; background: transparent; padding: 2px 4px; }")
 
@@ -1393,6 +1400,11 @@ def _hotkeys_script(xr_id: str, t_end_s: float, folds: list) -> str:
     const hi = T_END * 1.4, w = b - a;
     if (a < 0) {{ a = 0; b = w; }}
     if (b > hi) {{ b = hi; a = Math.max(0, hi - w); }}
+    // A range set here counts as set by the user, as a pan or zoom tool
+    // does: otherwise the data range snaps back to the full extent the
+    // next time glyph data changes (the timeline's labels follow the
+    // range). The reset tool clears it again.
+    xr.have_updated_interactively = true;
     xr.start = a; xr.end = b;
   }}
   function foldAll() {{
@@ -1696,13 +1708,9 @@ def _build_static_document(
         tl_title = timeline_fig.title.text
         tl_btn, timeline_block = _fold(timeline_fig, tl_title)
         folds.insert(0, (timeline_fig, tl_btn, tl_title))
-        # Pinned with the strips; beyond _TIMELINE_MAX_VH of the window it
-        # scrolls inside the band.
-        # The figure keeps its full height (Bokeh would otherwise shrink it
-        # to fit the cap); the block scrolls over it.
-        timeline_fig.height_policy = "fixed"
-        timeline_block.height_policy = "fit"
-        timeline_block.styles = {"max-height": f"{_TIMELINE_MAX_VH}vh", "overflow-y": "auto"}
+        # Pinned with the strips at its full height: nothing cut, no inner
+        # scroll; on a dense trace the band is tall, and folding the
+        # timeline (its ▾) gives the space back.
 
     theme = _THEMES[_THEME]
     layout_children: list = []

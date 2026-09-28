@@ -1,8 +1,10 @@
 """The interactive static page (tools/visualize_interactive.py):
 the process timeline pinned in the sticky band with the event and region
-strips, scrolling inside the band past a height cap; every panel (and
-the timeline) foldable under a header that keeps its title, plus
-collapse / expand all; keyboard shortcuts on the shared x-range."""
+strips, at its full height (nothing cut, no inner scroll); every figure
+with the same plot frame (left edge, width), so a time is at the same x
+everywhere; every panel (and the timeline) foldable under a header that
+keeps its title, plus collapse / expand all; keyboard shortcuts on the
+shared x-range; timeline bar labels that follow the visible bar."""
 
 import pytest
 
@@ -19,13 +21,29 @@ def _meta(tmp_path):
                                  gpu_fqns=["sm__cycles_active.avg.pct_of_peak_sustained_elapsed"])
 
 
-def test_timeline_pinned_and_capped(tmp_path):
+def test_timeline_pinned_at_full_height(tmp_path):
     doc = vi.build_static(_meta(tmp_path))
     assert doc.band.styles["position"] == "sticky"
     assert doc.timeline_block in doc.band.children
-    st = doc.timeline_block.styles
-    assert st["max-height"] == f"{vi._TIMELINE_MAX_VH}vh" and st["overflow-y"] == "auto"
-    assert doc.timeline.height_policy == "fixed"          # scrolls, not shrunk to the cap
+    st = dict(doc.timeline_block.styles)
+    assert "max-height" not in st and "overflow-y" not in st        # nothing cut, no inner scroll
+    assert doc.timeline.frame_height >= 2 * vi._LANE_PX           # its lanes' full height
+
+
+def test_every_figure_has_the_same_frame(tmp_path):
+    doc = vi.build_static(_meta(tmp_path))
+    figs = doc.strips + [doc.timeline] + [f for _p, _k, f in doc.panel_figs]
+    assert {f.min_border_left for f in figs} == {vi._BORDER_LEFT_PX}
+    assert {f.frame_width for f in figs} == {vi._FRAME_WIDTH}
+
+
+def test_timeline_labels_follow_the_visible_bar(tmp_path):
+    doc = vi.build_static(_meta(tmp_path))
+    [lab] = [r for r in doc.timeline.renderers if r.name == "inside-labels"]
+    cbs = doc.timeline.x_range.js_property_callbacks
+    codes = [cb.code for key in ("change:start", "change:end") for cb in cbs.get(key, [])]
+    assert any("alpha" in c and "Math.max(d.left[i], a)" in c for c in codes)
+    assert lab.glyph.text_alpha == "alpha" or getattr(lab.glyph.text_alpha, "field", None) == "alpha"
 
 
 def test_every_panel_foldable_with_title_kept(tmp_path):
@@ -50,3 +68,6 @@ def test_hotkeys_in_the_page(tmp_path):
         assert key in html, key
     assert 'id="cupti-keys-help"' in html
     assert 't.tagName === "INPUT"' in html                 # not while typing
+    # A key-set range counts as user-set: else the data range snaps back to
+    # the full extent when the timeline labels' data follows the zoom.
+    assert "xr.have_updated_interactively = true;" in html

@@ -264,9 +264,12 @@ What you get:
 - **Process timeline pinned** in the sticky band, under the event and
   region strips (same x-range as the panels), as in `visualize_all.py`;
   hover a bar for the process's every name, pid, parent, kind, start and
-  end. Taller than 35% of the window (a cold vLLM start: 21 lanes and
-  their label rows), it scrolls inside the band, so the band stays under
-  about half the window and the panels keep the rest.
+  end. It keeps its full height (a cold vLLM start: 21 lanes and their
+  label rows make the band tall; fold the timeline with its ▾ to give the
+  space back). Zoomed, a bar's label sits in the visible part of the bar
+  and is hidden when it no longer fits there. Every figure on the page
+  has the same plot frame (left edge and width), so a time is at the
+  same x in the strips, the timeline and every panel.
 - **Foldable panels**: each panel, and the timeline, has a header with
   its title and a ▾/▸ control; collapsed, only the header row is left.
   *Collapse all* / *Expand all* sit at the top of the sticky band. Works
