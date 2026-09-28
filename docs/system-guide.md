@@ -844,10 +844,17 @@ on its own terminating signals and when the host process exits (it holds
 a pidfd on it).
 
 **Decode health.** Every GPU trace frame carries `GpuDecodeStats` per
-device: decode calls, samples kept, samples missing between two kept ones,
-invalid samples dropped, counter-data-image-full and hardware-buffer
-overflow counts. A clean run has all loss counters at 0; anything else is
-also printed as a `[cupti-profiler] warning:`.
+device: decode calls, samples kept, samples missing (between two kept
+ones, or inside a dropped stretched sample), invalid samples dropped,
+counter-data-image-full passes, late passes, hardware-buffer overflows
+and sampler restarts. A late pass (more than 3/4 of an image waiting) is
+warned about before anything is lost; a pass that overfills the image
+loses the samples beyond it and the next passes are clean; a
+hardware-buffer overflow makes the probe disable and re-enable the
+sampler (~0.1 s) and go on. A clean run has all loss counters at 0 (one
+stretched sample, CUPTI's first, is normal); anything else is also
+printed as a `[cupti-profiler] warning:`, at most once per 30 s per kind,
+with a summary at stop.
 
 Fixed behaviour, not configurable: exit detection (a pidfd per tracked
 process, polled every sample tick) is always on; `comm` is re-read every
@@ -1179,6 +1186,30 @@ Limits of the tail:
   lists all of them in `pids`** with their combined tail, rather than a
   guessed split.
 
+**Chains.** A tracked P that reaps its tracked child C and then exits
+and is reaped by a tracked G, all within one sample interval (a
+`sh -c` running a compiler: the compiler exits, the shell reaps it and
+exits at once), gives G a `cutime` growth of P's CPU *plus C's*, since P
+had reaped C (the same kernel fold as for I/O, below), and P's own
+children's CPU could not be read in between. C's CPU up to its last
+sample is already in C's samples, so it is taken out of P's tail, walking
+down every tracked descendant P reaped in that interval; they are listed
+in `CpuTail.chain_pids` (C's CPU after its last sample stays in P's tail,
+where it cannot be told apart). Whether P reaped C or exited first,
+leaving C to a subreaper or init, is decided exactly as for reaped I/O
+(below): C reaped by the launcher's orphan reaper → not in P; the reaper
+runs and C's tree hangs under the launcher → P reaped C, subtracted;
+otherwise C is listed in `CpuTail.ambiguous_pids` and **not** subtracted
+(its CPU may then be counted twice), never guessed. Without
+`adopt_orphans()` every such chain is ambiguous. Measured on the vLLM
+example started with cold compile caches (2026-09-28, ~70 compiler
+processes, 32 of them in such chains): with `adopt_orphans()` the trace's
+CPU of the whole tree is 329.2 s against the kernel's 330.4 s (−0.36%;
+the trace never saw ~70 processes that lived less than a scan interval);
+without it, 20
+tails list ambiguous children and the trace is 58% (180 s) above the
+kernel. Before 2026-09-28 the chains were counted twice silently (+61%).
+
 Cost: nothing with discovery off; otherwise one `/proc/<pid>/stat` read
 per sample tick for each tracked process that has discovered children,
 plus one per exited child until it is reaped.
@@ -1449,7 +1480,9 @@ message SystemMetricsTrace {
 }
 message CpuTail { uint64 timestamp_ns; uint32 parent_pid;
                   repeated uint32 pids;               // several = not apportionable
-                  uint64 cpu_after_last_sample_ns; }
+                  uint64 cpu_after_last_sample_ns;
+                  repeated uint32 chain_pids;         // reaped with it, taken out
+                  repeated uint32 ambiguous_pids; }   // reaped by whom unknown, left in
 ```
 
 ### Disk schema
@@ -1841,6 +1874,14 @@ any run (`GpuDecodeStats`), and each probe wrote once per 5 s flush (GPU 24 /
 116 kB per flush at 100 / 500 Hz; the sidecar's System 106 kB and Disk
 360 kB).
 
+Those runs used a counter-data image sized for 1.25 decode intervals.
+With the current four (re-measured the same way, n = 5 pairs, against no
+profiler): GPU 100 Hz: S64 prefill +0.59% [+0.41, +0.78], S1 TTFT +0.32%;
+1 kHz: +0.54% / +0.46%; **1 kHz on vLLM's own L3**, the worst case:
+S64 prefill +0.81% [+0.60, +1.03], S1 TTFT +0.74% [+0.01, +1.47], S64 ITL
++0.06%. The launcher uses 0.9% of a core at 100 Hz and 5.9% at 1 kHz
+(decode thread 2.8%, evaluation worker 3.0%).
+
 - **The rate does not change the cost** from 100 to 1000 Hz. Choose it for
   time resolution and trace size: about 4 / 20 / 40 kB/s at 100 / 500 /
   1000 Hz with 4 metrics.
@@ -1850,8 +1891,9 @@ any run (`GpuDecodeStats`), and each probe wrote once per 5 s flush (GPU 24 /
   re-initialized every ~60 ms, 92% of a core), the launcher on vLLM's CCD
   slowed vLLM by **+7.5% (S64 ITL) and +10–16% (TTFT)**; the same launcher
   on another CCD or the other NUMA node cost **+0.13% / +0.19%**. The
-  collection is now a pass per second into a small image (5% of a core at
-  1 kHz, and the same cost on vLLM's CCD as off it), but the advice stands: whatever the host
+  collection is now a pass per second into a small image (6% of a core at
+  1 kHz, and within 0.3 points of the same cost on vLLM's CCD as off it),
+  but the advice stands: whatever the host
   process does, it should not share an L3 with the serving engine. Find
   the L3 of each CPU with `lscpu -e` (the `L3` column of `CACHE`) or
   `/sys/devices/system/cpu/cpu<N>/cache/index3/shared_cpu_list`, and pin

@@ -46,7 +46,9 @@ message SystemMetricsTrace {
 //   * when several tracked children of one parent are reaped within one
 //     sample interval, their shares cannot be told apart: ONE CpuTail
 //     lists all of them in `pids` with their combined tail, rather than
-//     a guessed split.
+//     a guessed split;
+//   * a reap chain (the child reaped its own tracked child and exited in
+//     the same interval): see chain_pids / ambiguous_pids.
 message CpuTail {
     uint64          timestamp_ns             = 1;  // sample tick that saw the growth
     uint32          parent_pid               = 2;  // the tracked parent that reaped
