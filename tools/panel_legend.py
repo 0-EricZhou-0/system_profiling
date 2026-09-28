@@ -1,4 +1,5 @@
-"""Which series a panel's legend lists, shared by both visualizers.
+"""What a panel draws — colours, line styles, which series its legend
+lists and with which labels — shared by both visualizers.
 
 Legends sit above their panel. A panel can hold many series: a cold
 vLLM start tracks ~160 processes, most of them short-lived compilers.
@@ -16,6 +17,9 @@ from __future__ import annotations
 from typing import Hashable, Iterable
 
 import numpy as np
+
+import metric_catalog_pb2 as _mc
+import metric_layout
 
 
 LEGEND_MAX_ENTRIES = 10
@@ -52,3 +56,204 @@ def cap(activities: Iterable[tuple[Hashable, float]],
 
 def more_label(n_hidden: int) -> str:
     return f"+{n_hidden} more"
+
+
+# ---------------------------------------------------------------------------
+# Colours, line styles and entries of one panel (both renderers)
+# ---------------------------------------------------------------------------
+
+# The colour cycle of both renderers: matplotlib's tab10 (its default
+# cycle) = Bokeh's Category10[10].
+COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+          "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+# A per-PID panel can hold several metrics of one process (the I/O
+# panels: rchar and wchar; read_bytes, write_bytes and cancelled). The
+# colour stays the PID's, the same in every panel; the line style tells
+# its metrics apart: the n-th distinct metric of the panel gets style n
+# (0 solid, 1 dashed, 2 dotted, 3 dash-dot; each renderer maps them).
+# Panels with a single metric per process keep solid lines.
+N_METRIC_STYLES = 4
+METRIC_COLOR = "black"   # the line-style entries' colour
+
+
+def series_label(series, projector, base: str | None = None) -> str:
+    """Compact legend label (the panel title carries the entity and
+    suffix). `base` overrides `series.label_short`: pass the label from
+    `metric_layout.disambiguate_short_labels`."""
+    if base is None:
+        base = series.label_short
+    key = series.scope_key
+    if series.scope == _mc.SCOPE_SYSTEM:
+        return base
+    if series.scope == _mc.SCOPE_PROCESS:
+        return f"{base}  [{process_label(projector, key)}]"
+    if series.scope == _mc.SCOPE_DEVICE:
+        return f"{base}  [{key}]"
+    if series.scope == _mc.SCOPE_GPU:
+        # Single-GPU runs need no suffix; with several GPUs, the index.
+        if len(projector.gpu_info) <= 1:
+            return base
+        return f"{base}  [GPU {key}]"
+    return base
+
+
+def process_label(projector, key) -> str:
+    """'vllm/VLLM::EngineCor (PID 7, child of 6)': discovered processes
+    name the tracked parent they were found under, so they read apart
+    from the listed roots."""
+    tp = projector.tracked_processes.get(int(key))
+    found = f", child of {tp.parent_pid}" if tp and tp.discovered else ""
+    name = f"{tp.alias} " if tp and tp.alias else ""
+    return f"{name}(PID {key}{found})"
+
+
+def metric_styles(series_list) -> dict:
+    """(fqn, scope_key) -> line style index (see N_METRIC_STYLES)."""
+    fqns = list(dict.fromkeys(s.fqn for s in series_list if s.scope == _mc.SCOPE_PROCESS))
+    return {(s.fqn, s.scope_key): (fqns.index(s.fqn) % N_METRIC_STYLES
+                                   if len(fqns) > 1 and s.scope == _mc.SCOPE_PROCESS else 0)
+            for s in series_list}
+
+
+def pid_color_map(panels, projection) -> dict:
+    """PID -> colour, shared by every per-process panel (and the process
+    timeline) so a process has one colour throughout. `panels`:
+    (panel, series_list, kind) in layout order. Colours go by rank: the
+    processes most active in the first per-process metric panel
+    (per-process CPU in both shipped layouts) first, the rest in the
+    order they appear, so with more processes than colours the busiest
+    ones still get distinct colours."""
+    seen: list = []
+    rank_act: dict = {}
+    first_panel = None
+    for _p, series_list, kind in panels:
+        for s in series_list:
+            if s.scope != _mc.SCOPE_PROCESS:
+                continue
+            pid = int(s.scope_key)
+            if pid not in seen:
+                seen.append(pid)
+            if first_panel is None and kind == "metric":
+                first_panel = id(series_list)
+            if id(series_list) == first_panel:
+                rank_act[pid] = rank_act.get(pid, 0.0) + activity(
+                    *projection[(s.fqn, s.scope_key)])
+    order = sorted(range(len(seen)),
+                   key=lambda i: (seen[i] not in rank_act, -rank_act.get(seen[i], 0.0), i))
+    return {seen[i]: COLORS[r % len(COLORS)] for r, i in enumerate(order)}
+
+
+def _distinct_colors(keys_by_rank: list, colors: dict) -> dict:
+    """Colours for a panel's listed legend keys (most active first), each
+    its own: a key whose colour an earlier one already has gets the first
+    colour of the cycle not yet used in the panel."""
+    out, used = {}, set()
+    for k in keys_by_rank:
+        c = colors[k]
+        if c in used:
+            c = next((x for x in COLORS if x not in used), c)
+        out[k] = c
+        used.add(c)
+    return out
+
+
+class Plan:
+    """What a panel draws, before any renderer draws it.
+
+    styles:  (fqn, scope_key) -> (color, style index, listed); a series
+             not listed in the legend is drawn in OTHER_COLOR.
+    entries: [(label, color, style index, keys)] in legend order, keys =
+             the series the entry stands for; line-style entries have
+             METRIC_COLOR.
+    """
+
+    def __init__(self, styles: dict, entries: list):
+        self.styles = styles
+        self.entries = entries
+
+
+def plan(series_list, projector, projection: dict, pid_colors: dict,
+         totals: dict | None = None, fmt_total=None) -> Plan:
+    """Colours, line styles and legend entries of one panel. A metric
+    panel ranks its entries by activity; a cumulative companion, given
+    `totals` ((fqn, scope_key) -> run total, full resolution), by those,
+    and its labels carry them, formatted by fmt_total."""
+    label_bases = metric_layout.disambiguate_short_labels(series_list)
+    styles_idx = metric_styles(series_list)
+    styled = any(v for v in styles_idx.values())
+    live = [s for s in series_list if projection[(s.fqn, s.scope_key)][0].size]
+    cumulative = totals is not None
+
+    colors = {}
+    color_idx = 0
+    for s in live:
+        if s.scope == _mc.SCOPE_PROCESS and int(s.scope_key) in pid_colors:
+            colors[(s.fqn, s.scope_key)] = pid_colors[int(s.scope_key)]
+        else:
+            colors[(s.fqn, s.scope_key)] = COLORS[color_idx % len(COLORS)]
+            color_idx += 1
+
+    if cumulative:
+        amount = {(s.fqn, s.scope_key): totals.get((s.fqn, s.scope_key), 0.0) for s in live}
+    else:
+        amount = {(s.fqn, s.scope_key): activity(*projection[(s.fqn, s.scope_key)])
+                  for s in live}
+
+    entries = []
+    if styled:
+        # One entry per process (its colour) and one per metric (its line
+        # style), not every process x metric pair.
+        fqn_base = {s.fqn: label_bases[(s.fqn, s.scope_key)] for s in live}
+        procs: dict = {}
+        for s in live:
+            procs.setdefault(s.scope_key, []).append(s)
+        proc_act = {k: sum(amount[(s.fqn, k)] for s in ss) for k, ss in procs.items()}
+        shown, hidden = cap(list(proc_act.items()))
+        listed = set(shown)
+        pcolor = _distinct_colors(sorted(shown, key=lambda k: -proc_act[k]),
+                                  {k: colors[(procs[k][0].fqn, k)] for k in shown})
+        for k, c in pcolor.items():
+            for s in procs[k]:
+                colors[(s.fqn, k)] = c
+        for k in shown:
+            label = process_label(projector, k)
+            if cumulative:
+                parts = [f"{label_bases[(s.fqn, k)]} {fmt_total(amount[(s.fqn, k)])}"
+                         for s in procs[k] if amount[(s.fqn, k)] > 0]
+                label += ": " + (", ".join(parts) if parts else "0")
+            entries.append((label, pcolor[k], 0, [(s.fqn, k) for s in procs[k]]))
+        if hidden:
+            label = more_label(len(hidden))
+            if cumulative:
+                sums: dict = {}
+                for k in hidden:
+                    for s in procs[k]:
+                        sums[s.fqn] = sums.get(s.fqn, 0.0) + amount[(s.fqn, k)]
+                parts = [f"{fqn_base[f]} {fmt_total(v)}" for f, v in sums.items() if v > 0]
+                label += ": " + (", ".join(parts) if parts else "0")
+            entries.append((label, OTHER_COLOR, 0,
+                            [(s.fqn, k) for k in hidden for s in procs[k]]))
+        for fqn, st in dict.fromkeys((s.fqn, styles_idx[(s.fqn, s.scope_key)]) for s in live):
+            entries.append((fqn_base[fqn], METRIC_COLOR, st,
+                            [(s.fqn, s.scope_key) for s in live if s.fqn == fqn]))
+        styles = {(s.fqn, s.scope_key): (colors[(s.fqn, s.scope_key)],
+                                         styles_idx[(s.fqn, s.scope_key)],
+                                         s.scope_key in listed) for s in live}
+    else:
+        keys = [(s.fqn, s.scope_key) for s in live]
+        shown, hidden = cap([(k, amount[k]) for k in keys])
+        listed = set(shown)
+        colors.update(_distinct_colors(sorted(shown, key=lambda k: -amount[k]), colors))
+        by_key = {(s.fqn, s.scope_key): s for s in live}
+        for k in shown:
+            label = series_label(by_key[k], projector, base=label_bases[k])
+            if cumulative:
+                label += f" = {fmt_total(amount[k])}"
+            entries.append((label, colors[k], styles_idx[k], [k]))
+        if hidden:
+            label = more_label(len(hidden))
+            if cumulative:
+                label += f": {fmt_total(sum(amount[k] for k in hidden))}"
+            entries.append((label, OTHER_COLOR, 0, list(hidden)))
+        styles = {k: (colors[k], styles_idx[k], k in listed) for k in keys}
+    return Plan(styles, entries)

@@ -395,35 +395,8 @@ def _resolve_panel_peak(panel, descriptor, projector: TraceProjector) -> float |
                                        projector.lookup_first_value)
 
 
-def _series_label(series: metric_layout.ResolvedSeries,
-                  projector: TraceProjector,
-                  base: str | None = None) -> str:
-    """Compact legend label. Hover tooltips can carry the long form.
-
-    `base` overrides `series.label_short`; pass the disambiguated
-    label from `metric_layout.disambiguate_short_labels` when rendering
-    multiple series in one panel so colliding entries (e.g. avg/max
-    rollups) stay distinguishable."""
-    if base is None:
-        base = series.label_short
-    key = series.scope_key
-    if series.scope == mc_pb.SCOPE_SYSTEM:
-        return base
-    if series.scope == mc_pb.SCOPE_PROCESS:
-        tp = projector.tracked_processes.get(int(key))
-        if tp and tp.alias:
-            return f"{base}  [{tp.alias} (PID {key})]"
-        return f"{base}  [PID {key}]"
-    if series.scope == mc_pb.SCOPE_DEVICE:
-        return f"{base}  [{key}]"
-    if series.scope == mc_pb.SCOPE_GPU:
-        # Single-GPU runs need no scope-key suffix; with multiple GPUs,
-        # label by index only — the device-name string is redundant
-        # with the panel title and just inflates the legend.
-        if len(projector.gpu_info) <= 1:
-            return base
-        return f"{base}  [GPU {key}]"
-    return base
+# Legend labels: shared with visualize_all.py.
+_series_label = panel_legend.series_label
 
 
 # ---------------------------------------------------------------------------
@@ -515,23 +488,48 @@ def _legend_ncols(labels: list[str]) -> int:
     return max(1, min(len(labels), int(_FRAME_WIDTH // (widest + _LEGEND_ENTRY_PAD))))
 
 
-def _legend_above(fig, shown: list[tuple[str, object]], hidden: list,
-                  more_suffix: str = "") -> None:
-    """Legend above the plot: `shown` = [(label, renderer)], `hidden` =
-    renderers counted in one "+k more" entry (its label followed by
-    `more_suffix`). Click an entry to hide its line(s)."""
-    labels = [lab for lab, _r in shown]
-    items = [LegendItem(label=lab, renderers=[r]) for lab, r in shown]
-    if hidden:
-        labels.append(panel_legend.more_label(len(hidden)) + more_suffix)
-        items.append(LegendItem(label=labels[-1], renderers=list(hidden)))
+# panel_legend's line style index -> Bokeh line_dash.
+_METRIC_DASHES = ["solid", "dashed", "dotted", "dashdot"]
+
+
+def _legend_above(fig, items: list[tuple[str, list]]) -> None:
+    """Legend above the plot: items = [(label, renderers)]; an entry's
+    swatch draws every renderer's glyph, the last on top. Click an entry
+    to hide its lines."""
+    items = [LegendItem(label=lab, renderers=list(rs)) for lab, rs in items]
     if not items:
         return
-    fig.add_layout(Legend(items=items, ncols=_legend_ncols(labels),
+    fig.add_layout(Legend(items=items, ncols=_legend_ncols([i.label.value for i in items]),
                           location="top_left", click_policy="hide",
                           label_text_font_size="8pt", padding=4, margin=2,
                           spacing=3, border_line_alpha=0.0),
                    "above")
+
+
+def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> list:
+    """Draw every series of a panel_legend.Plan (sources: (fqn,
+    scope_key) -> ColumnDataSource) and return its legend items: listed
+    series in their colour and line style, the rest light grey. A
+    process (with several metrics) or line-style entry gets a swatch of its own (a one-point
+    line at negative time, outside the x range's bounds) so it shows the
+    process's colour, or the style in black; clicking it hides all its
+    lines."""
+    lines = {}
+    for key, (color, st, listed) in p.styles.items():
+        lines[key] = fig.line("x", "y", source=sources[key],
+                              color=color if listed else panel_legend.OTHER_COLOR,
+                              line_dash=_METRIC_DASHES[st],
+                              line_width=1.2 if listed else 0.8)
+    items = []
+    for label, color, st, keys in p.entries:
+        rs = [lines[k] for k in keys if k in lines]
+        if color == panel_legend.METRIC_COLOR or (len(keys) > 1
+                                                  and color != panel_legend.OTHER_COLOR):
+            # Last: a legend item draws all its renderers' swatches, in order.
+            rs.append(fig.line(x=[-2.0, -1.0], y=[0.0, 0.0], color=color,
+                               line_dash=_METRIC_DASHES[st], line_width=1.5))
+        items.append((label, rs))
+    return items
 
 
 def _attach_unified_hover(
@@ -607,10 +605,11 @@ def _build_panel(
     projection: dict,
     t0_ns: int,
     x_range=None,
+    pid_colors: dict | None = None,
 ) -> tuple:
     """Build one Bokeh figure for one panel. Returns
     (figure, dict[(fqn, scope_key) -> ColumnDataSource]) so live mode
-    can stream new rows in."""
+    can stream new rows in. pid_colors: panel_legend.pid_color_map."""
     unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
         else series_list[0].descriptor.unit
     peak_hint = _resolve_panel_peak(panel, series_list[0].descriptor, projector)
@@ -634,29 +633,16 @@ def _build_panel(
     fig = figure(**fig_kwargs)
 
     label_bases = metric_layout.disambiguate_short_labels(series_list)
-    live = [s for s in series_list if projection[(s.fqn, s.scope_key)][0].size]
-    listed, _hidden = panel_legend.cap(
-        [((s.fqn, s.scope_key), panel_legend.activity(*projection[(s.fqn, s.scope_key)]))
-         for s in live])
-    listed = set(listed)
+    plan = panel_legend.plan(series_list, projector, projection, pid_colors or {})
 
     cds_by_key: dict[tuple, ColumnDataSource] = {}
-    shown, hidden = [], []
-    for series in live:
-        key = (series.fqn, series.scope_key)
+    for key in plan.styles:
         ts_ns, vals = projection[key]
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
-        cds = ColumnDataSource(data=dict(
+        cds_by_key[key] = ColumnDataSource(data=dict(
             x=time_s, y=scale_fn(vals.astype(np.float64)),
         ))
-        cds_by_key[key] = cds
-        if key in listed:
-            r = fig.line("x", "y", source=cds, color=_PALETTE[len(shown) % len(_PALETTE)],
-                         line_width=1.2)
-            shown.append((_series_label(series, projector, base=label_bases[key]), r))
-        else:
-            hidden.append(fig.line("x", "y", source=cds, color=panel_legend.OTHER_COLOR,
-                                   line_width=0.8))
+    legend_items = _draw_plan(fig, plan, cds_by_key)
 
     # Peak reference line + y-range. When the panel has a known peak,
     # pin the view to [0, peak*headroom] with hard bounds so pan/zoom
@@ -694,7 +680,7 @@ def _build_panel(
         unit_suffix=ylabel,
     )
 
-    _legend_above(fig, shown, hidden)
+    _legend_above(fig, legend_items)
     return fig, cds_by_key
 
 
@@ -759,6 +745,7 @@ def _build_cumulative_panel(
     x_range=None,
     display_hz: float = 0.0,
     source_hzs: dict[tuple[str, object], float] | None = None,
+    pid_colors: dict | None = None,
 ) -> tuple:
     """Bokeh equivalent of visualize_all._render_integrated_panel.
 
@@ -824,28 +811,17 @@ def _build_cumulative_panel(
     # cumulative curve rather than the source rate.
     cumulative_projection: dict[tuple[str, object], tuple[np.ndarray, np.ndarray]] = {}
     # Legend: the largest run totals (full resolution), each in its label.
-    totals = {(s.fqn, s.scope_key): float(c[-1]) if c.size else 0.0
-              for s, c in full_totals}
-    listed, _hidden = panel_legend.cap(list(totals.items()))
-    listed = set(listed)
     unit_sfx = f" {ylabel}" if ylabel else ""
-    shown, hidden = [], []
-    hidden_total = 0.0
+    plan = panel_legend.plan(
+        series_list, projector, projection, pid_colors or {},
+        totals={(s.fqn, s.scope_key): float(c[-1]) if c.size else 0.0 for s, c in full_totals},
+        fmt_total=lambda v: f"{_fmt_total(scale_fn(v))}{unit_sfx}")
     for series, ts_ns, cum in cumulatives:
         key = (series.fqn, series.scope_key)
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
-        cds = ColumnDataSource(data=dict(x=time_s, y=scale_fn(cum)))
-        cds_by_key[key] = cds
+        cds_by_key[key] = ColumnDataSource(data=dict(x=time_s, y=scale_fn(cum)))
         cumulative_projection[key] = (ts_ns, cum)
-        if key in listed:
-            r = fig.line("x", "y", source=cds, color=_PALETTE[len(shown) % len(_PALETTE)],
-                         line_width=1.2)
-            label = _series_label(series, projector, base=label_bases[key])
-            shown.append((f"{label} = {_fmt_total(scale_fn(totals[key]))}{unit_sfx}", r))
-        else:
-            hidden.append(fig.line("x", "y", source=cds, color=panel_legend.OTHER_COLOR,
-                                   line_width=0.8))
-            hidden_total += totals[key]
+    legend_items = _draw_plan(fig, plan, cds_by_key)
 
     # Cumulative curves are non-negative monotonic — clamp the floor
     # at 0 and let the upper auto-fit.
@@ -859,8 +835,7 @@ def _build_cumulative_panel(
         unit_suffix=ylabel,
     )
 
-    _legend_above(fig, shown, hidden,
-                  more_suffix=f": {_fmt_total(scale_fn(hidden_total))}{unit_sfx}")
+    _legend_above(fig, legend_items)
     return fig, cds_by_key
 
 
@@ -1102,7 +1077,7 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     fig.add_tools(HoverTool(renderers=bars, tooltips=[
         ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),
         ("start", "@start{0.000}s"), ("end", "@end{0.000}s")]))
-    _legend_above(fig, shown, [])
+    _legend_above(fig, [(lab, [r]) for lab, r in shown])
     fig.legend[0].click_policy = "none"
     return fig
 
@@ -1416,16 +1391,19 @@ def _build_static_document(
         if s < t0_ns:    t0_ns    = s
         if e > t_end_ns: t_end_ns = e
 
+    resolved = [(panel, metric_layout.resolve_panel_series(panel, catalog_index, series_keys))
+                for panel in layout.panels]
+    resolved = [(panel, series) for panel, series in resolved if series]
+    # One colour per process on the whole page (panels and timeline).
+    pid_colors = panel_legend.pid_color_map([(p, s, "metric") for p, s in resolved], proj)
+
     metric_figs: list = []
     figs: list = []
     panel_figs: list = []
     shared_x = None
-    for panel in layout.panels:
-        series = metric_layout.resolve_panel_series(panel, catalog_index, series_keys)
-        if not series:
-            continue
+    for panel, series in resolved:
         fig, _ = _build_panel(panel, series, projector, smoothed_proj, t0_ns,
-                              x_range=shared_x)
+                              x_range=shared_x, pid_colors=pid_colors)
         if shared_x is None:
             shared_x = fig.x_range
         figs.append(fig)
@@ -1443,7 +1421,7 @@ def _build_static_document(
             }
             cum_fig, _ = _build_cumulative_panel(
                 panel, series, projector, proj, t0_ns, x_range=shared_x,
-                display_hz=display_hz, source_hzs=source_hzs)
+                display_hz=display_hz, source_hzs=source_hzs, pid_colors=pid_colors)
             figs.append(cum_fig)
             metric_figs.append(cum_fig)
             panel_figs.append((panel, "cumulative", cum_fig))
@@ -1489,10 +1467,8 @@ def _build_static_document(
     if shared_x is not None:
         procs, lanes, n_lanes, links = _timeline_data(projector, proj, t0_ns, t_end_ns)
         if procs:
-            order = {pid: i for i, pid in enumerate(dict.fromkeys(p.pid for p in procs))}
             timeline_fig = _build_process_timeline(
-                procs, lanes, n_lanes, links, t0_ns, t_end_ns, shared_x,
-                {pid: _PALETTE[i % len(_PALETTE)] for pid, i in order.items()})
+                procs, lanes, n_lanes, links, t0_ns, t_end_ns, shared_x, pid_colors)
 
     # Drop the Bokeh logo from every toolbar (15 logos across the
     # page is visual noise; the framework is implicit from the file

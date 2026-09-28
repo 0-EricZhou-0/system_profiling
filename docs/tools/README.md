@@ -199,6 +199,12 @@ What you get:
   one tooltip per panel listing every co-plotted series's value at
   the cursor x (interpolated where sampling rates differ). Triggers
   regardless of which legend entries are hidden.
+- **Same series styling as `visualize_all.py`** (shared code,
+  `tools/panel_legend.py`): one colour per process across the page,
+  panels and process timeline alike; a line style per metric in
+  panels with several metrics per process, with a legend of processes
+  plus line styles; discovered processes labelled `child of <pid>`;
+  statistic labels; run totals in the cumulative panels' legends.
 - **Click-to-hide legend entries**; legends sit **above** each panel,
   capped as in `visualize_all.py` (ten entries plus `+k more`, which
   hides or shows all the grey lines at once). The plot frame has a

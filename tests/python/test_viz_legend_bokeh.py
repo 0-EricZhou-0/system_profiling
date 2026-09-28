@@ -41,7 +41,7 @@ def test_legend_capped_with_more_entry(tmp_path):
     [cpu] = [f for p, k, f in doc.panel_figs if k == "metric" and p.series_glob.startswith("proc__cycles")]
     labels = _labels(cpu)
     assert len(labels) == N + 1 and labels[-1] == f"+{n - N} more", labels
-    listed = {int(lab.split("PID ")[1].rstrip(")]")) for lab in labels[:-1]}
+    listed = {int(lab.split("PID ")[1].split(",")[0].rstrip(")]")) for lab in labels[:-1]}
     assert listed == {500 + i for i in range(n - N, n)}
     [legend] = cpu.legend
     assert len(legend.items[-1].renderers) == n - N

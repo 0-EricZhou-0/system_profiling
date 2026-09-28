@@ -299,41 +299,6 @@ def _resolve_panel_peak(panel, descriptor, projector: TraceProjector) -> float |
 # Series labels
 # ---------------------------------------------------------------------------
 
-def _series_label(series: metric_layout.ResolvedSeries,
-                  projector: TraceProjector,
-                  base: str | None = None) -> str:
-    """Compact legend label (panel title already carries the entity +
-    suffix). The long form lives in `<output>.legend.txt`.
-
-    `base` overrides `series.label_short`; pass the disambiguated
-    label from `metric_layout.disambiguate_short_labels` when rendering
-    multiple series in one panel so colliding entries (e.g. avg/max
-    rollups) stay distinguishable."""
-    if base is None:
-        base = series.label_short
-    key = series.scope_key
-    if series.scope == mc_pb.SCOPE_SYSTEM:
-        return base
-    if series.scope == mc_pb.SCOPE_PROCESS:
-        tp = projector.tracked_processes.get(int(key))
-        # Discovered processes name the tracked parent they were found
-        # under, so they read apart from the listed roots.
-        found = f", child of {tp.parent_pid}" if tp and tp.discovered else ""
-        if tp and tp.alias:
-            return f"{base}  [{tp.alias} (PID {key}{found})]"
-        return f"{base}  [PID {key}{found}]"
-    if series.scope == mc_pb.SCOPE_DEVICE:
-        return f"{base}  [{key}]"
-    if series.scope == mc_pb.SCOPE_GPU:
-        # Single-GPU runs need no scope-key suffix — the panel title
-        # carries the entity + suffix. With multiple GPUs, label by
-        # index only; the device-name string just inflates the legend.
-        if len(projector.gpu_info) <= 1:
-            return base
-        return f"{base}  [GPU {key}]"
-    return base
-
-
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
@@ -371,13 +336,7 @@ def _trapz_cumulative(ts_ns: np.ndarray, vals: np.ndarray) -> np.ndarray:
 # Panel rendering
 # ---------------------------------------------------------------------------
 
-_COLOR_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-
-# A per-PID panel can hold several metrics of one process (the I/O
-# panels: rchar and wchar; read_bytes, write_bytes and cancelled). The
-# colour stays the PID's, the same in every panel; the line style tells
-# its metrics apart: the n-th distinct metric of the panel gets the n-th
-# style. Panels with a single metric per process keep solid lines.
+# panel_legend's line style index -> matplotlib linestyle.
 _METRIC_LINESTYLES = ["-", "--", ":", "-."]
 
 # Legends sit above their panel, outside the axes, in as many columns
@@ -392,23 +351,6 @@ LEGEND_ROWSPACE_EM = 0.3    # between rows
 LEGEND_BORDER_EM   = 0.2    # legend box padding (frameless)
 LEGEND_AXESPAD_EM  = 0.3    # legend bottom -> axes top
 LEGEND_TITLE_GAP_PT = 3.0   # legend top -> title baseline
-
-
-def _series_linestyles(series_list: list[metric_layout.ResolvedSeries]) -> dict:
-    fqns = list(dict.fromkeys(s.fqn for s in series_list if s.scope == mc_pb.SCOPE_PROCESS))
-    styles = {}
-    for s in series_list:
-        styles[(s.fqn, s.scope_key)] = (
-            _METRIC_LINESTYLES[fqns.index(s.fqn) % len(_METRIC_LINESTYLES)]
-            if len(fqns) > 1 and s.scope == mc_pb.SCOPE_PROCESS else "-")
-    return styles
-
-
-def _process_label(projector: TraceProjector, key) -> str:
-    tp = projector.tracked_processes.get(int(key))
-    found = f", child of {tp.parent_pid}" if tp and tp.discovered else ""
-    name = f"{tp.alias} " if tp and tp.alias else ""
-    return f"{name}(PID {key}{found})"
 
 
 def _integrated_axis(panel, series_list, projection):
@@ -433,46 +375,6 @@ def _integrated_axis(panel, series_list, projection):
     return cums, scale_fn, ylabel
 
 
-def _pid_color_map(panels, projection) -> dict[int, str]:
-    """PID -> colour, shared by every per-process panel so a process has
-    one colour throughout. Colours go by rank: the processes most active
-    in the first per-process panel (per-process CPU in both layouts)
-    first, the rest in the order they appear, so with more processes
-    than colours the busiest ones still get distinct colours."""
-    seen: list[int] = []
-    rank_act: dict[int, float] = {}
-    first_panel = None
-    for _p, series_list, kind in panels:
-        for s in series_list:
-            if s.scope != mc_pb.SCOPE_PROCESS:
-                continue
-            pid = int(s.scope_key)
-            if pid not in seen:
-                seen.append(pid)
-            if first_panel is None and kind == "metric":
-                first_panel = id(series_list)
-            if id(series_list) == first_panel:
-                rank_act[pid] = rank_act.get(pid, 0.0) + panel_legend.activity(
-                    *projection[(s.fqn, s.scope_key)])
-    order = sorted(range(len(seen)),
-                   key=lambda i: (seen[i] not in rank_act, -rank_act.get(seen[i], 0.0), i))
-    return {seen[i]: _COLOR_CYCLE[r % len(_COLOR_CYCLE)] for r, i in enumerate(order)}
-
-
-def _distinct_colors(keys_by_rank: list, colors: dict) -> dict:
-    """Colours for a panel's listed legend keys (most active first), each
-    its own: a key whose colour an earlier one already has gets the first
-    colour of the cycle not yet used in the panel."""
-    out, used = {}, set()
-    for k in keys_by_rank:
-        c = colors[k]
-        if c in used:
-            c = next((x for x in _COLOR_CYCLE if x not in used), c)
-        out[k] = c
-        used.add(c)
-    return out
-
-
 class _LegendPlan:
     """Colours, line styles and legend entries of one panel, decided
     before the figure is laid out so each panel's legend height can be
@@ -483,10 +385,11 @@ class _LegendPlan:
     entries: [(label, color, linestyle)] in legend order.
     """
 
-    def __init__(self, styles: dict, entries: list, avail_width_pt: float):
-        self.styles = styles
-        self.entries = entries
-        self.ncol, self.nrows = _legend_grid([e[0] for e in entries], avail_width_pt)
+    def __init__(self, p: panel_legend.Plan, avail_width_pt: float):
+        self.styles = {k: (c, _METRIC_LINESTYLES[st], listed)
+                       for k, (c, st, listed) in p.styles.items()}
+        self.entries = [(lab, c, _METRIC_LINESTYLES[st]) for lab, c, st, _keys in p.entries]
+        self.ncol, self.nrows = _legend_grid([e[0] for e in self.entries], avail_width_pt)
 
     @property
     def height_pt(self) -> float:
@@ -530,92 +433,18 @@ def _legend_grid(labels: list[str], avail_width_pt: float) -> tuple[int, int]:
 def _plan_legend(panel, series_list: list[metric_layout.ResolvedSeries], kind: str,
                  projector: TraceProjector, projection: dict,
                  pid_color_map: dict[int, str], avail_width_pt: float) -> _LegendPlan:
-    """Colours and legend entries of one panel. Metric panels rank their
-    entries by activity (panel_legend.activity); cumulative companions
-    by run total, and their labels carry the totals."""
-    label_bases = metric_layout.disambiguate_short_labels(series_list)
-    linestyles = _series_linestyles(series_list)
-    styled = any(ls != "-" for ls in linestyles.values())
-    live = [s for s in series_list if projection[(s.fqn, s.scope_key)][0].size]
-
-    colors = {}
-    color_idx = 0
-    for s in live:
-        if s.scope == mc_pb.SCOPE_PROCESS and int(s.scope_key) in pid_color_map:
-            colors[(s.fqn, s.scope_key)] = pid_color_map[int(s.scope_key)]
-        else:
-            colors[(s.fqn, s.scope_key)] = _COLOR_CYCLE[color_idx % len(_COLOR_CYCLE)]
-            color_idx += 1
-
+    """Colours and legend entries of one panel (panel_legend.plan); a
+    cumulative companion's entries carry its run totals."""
     if kind == "integrated":
         cums, scale_fn, ylabel = _integrated_axis(panel, series_list, projection)
-        amount = {k: float(c[-1]) if c.size else 0.0 for k, (_t, c) in cums.items()}
         unit_sfx = f" {ylabel}" if ylabel else ""
-
-        def total(v):
-            return f"{_fmt_plain(scale_fn(v))}{unit_sfx}"
+        p = panel_legend.plan(series_list, projector, projection, pid_color_map,
+                              totals={k: float(c[-1]) if c.size else 0.0
+                                      for k, (_t, c) in cums.items()},
+                              fmt_total=lambda v: f"{_fmt_plain(scale_fn(v))}{unit_sfx}")
     else:
-        amount = {(s.fqn, s.scope_key): panel_legend.activity(*projection[(s.fqn, s.scope_key)])
-                  for s in live}
-
-    entries = []
-    if styled:
-        # One entry per process (its colour) and one per metric (its line
-        # style), not every process x metric pair.
-        fqn_base = {s.fqn: label_bases[(s.fqn, s.scope_key)] for s in live}
-        procs: dict = {}
-        for s in live:
-            procs.setdefault(s.scope_key, []).append(s)
-        shown, hidden = panel_legend.cap(
-            [(k, sum(amount[(s.fqn, k)] for s in ss)) for k, ss in procs.items()])
-        listed = set(shown)
-        proc_act = {k: sum(amount[(s.fqn, k)] for s in ss) for k, ss in procs.items()}
-        pcolor = _distinct_colors(sorted(shown, key=lambda k: -proc_act[k]),
-                                  {k: colors[(procs[k][0].fqn, k)] for k in shown})
-        for ss in procs.values():
-            for s in ss:
-                if s.scope_key in pcolor:
-                    colors[(s.fqn, s.scope_key)] = pcolor[s.scope_key]
-        for k in shown:
-            label = _process_label(projector, k)
-            if kind == "integrated":
-                parts = [f"{label_bases[(s.fqn, k)]} {total(amount[(s.fqn, k)])}"
-                         for s in procs[k] if amount[(s.fqn, k)] > 0]
-                label += ": " + (", ".join(parts) if parts else "0")
-            entries.append((label, colors[(procs[k][0].fqn, k)], "-"))
-        if hidden:
-            label = panel_legend.more_label(len(hidden))
-            if kind == "integrated":
-                sums: dict = {}
-                for k in hidden:
-                    for s in procs[k]:
-                        sums[s.fqn] = sums.get(s.fqn, 0.0) + amount[(s.fqn, k)]
-                parts = [f"{fqn_base[f]} {total(v)}" for f, v in sums.items() if v > 0]
-                label += ": " + (", ".join(parts) if parts else "0")
-            entries.append((label, panel_legend.OTHER_COLOR, "-"))
-        for fqn, ls in dict.fromkeys((s.fqn, linestyles[(s.fqn, s.scope_key)]) for s in live):
-            entries.append((fqn_base[fqn], "black", ls))
-        styles = {(s.fqn, s.scope_key): (colors[(s.fqn, s.scope_key)],
-                                         linestyles[(s.fqn, s.scope_key)],
-                                         s.scope_key in listed) for s in live}
-    else:
-        keys = [(s.fqn, s.scope_key) for s in live]
-        shown, hidden = panel_legend.cap([(k, amount[k]) for k in keys])
-        listed = set(shown)
-        colors.update(_distinct_colors(sorted(shown, key=lambda k: -amount[k]), colors))
-        by_key = {(s.fqn, s.scope_key): s for s in live}
-        for k in shown:
-            label = _series_label(by_key[k], projector, base=label_bases[k])
-            if kind == "integrated":
-                label += f" = {total(amount[k])}"
-            entries.append((label, colors[k], linestyles[k]))
-        if hidden:
-            label = panel_legend.more_label(len(hidden))
-            if kind == "integrated":
-                label += f": {total(sum(amount[k] for k in hidden))}"
-            entries.append((label, panel_legend.OTHER_COLOR, "-"))
-        styles = {k: (colors[k], linestyles[k], k in listed) for k in keys}
-    return _LegendPlan(styles, entries, avail_width_pt)
+        p = panel_legend.plan(series_list, projector, projection, pid_color_map)
+    return _LegendPlan(p, avail_width_pt)
 
 
 def _draw_legend(ax, plan: _LegendPlan) -> None:
@@ -624,7 +453,7 @@ def _draw_legend(ax, plan: _LegendPlan) -> None:
         return
     from matplotlib.lines import Line2D
     handles = [Line2D([], [], color=c, linestyle=ls,
-                      lw=1.0 if c == "black" else 1.5, label=lab)
+                      lw=1.0 if c == panel_legend.METRIC_COLOR else 1.5, label=lab)
                for lab, c, ls in plan.entries]
     fs = LEGEND_FONTSIZE
     ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
@@ -1431,8 +1260,8 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
         g = _panel_group(series, projector.fqn_to_probe)
         groups.setdefault(g, []).append((panel, series, kind))
 
-    pid_color_map = _pid_color_map([p for g in ("gpu", "system", "disk")
-                                    for p in groups.get(g, [])], proj)
+    pid_color_map = panel_legend.pid_color_map([p for g in ("gpu", "system", "disk")
+                                                for p in groups.get(g, [])], proj)
 
     # Legends (above each panel): colours, entries and height, decided
     # now so each legend's height is reserved in the layout.
