@@ -37,6 +37,9 @@ message EventFlushStats {
     uint64 timestamp_ns = 1;
     uint64 bytes_written = 2;
     uint64 interval_ns = 3;
+    // See FlushStats.flush_duration_ns / slow_flushes.
+    uint64 duration_ns = 4;
+    uint64 slow_flushes = 5;
 }
 
 // Per-trace anchor info that lets consumers convert domain timestamps into

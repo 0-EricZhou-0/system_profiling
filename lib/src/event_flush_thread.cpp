@@ -1,5 +1,7 @@
 #include "event_flush_thread.h"
+#include "flush_backlog.h"
 #include "lifecycle.h"
+#include "testing_hooks.h"
 #include "delimited_write.h"
 
 #include <cupti_profiler/event_profiler.h>
@@ -65,9 +67,12 @@ void EventFlushThreadFunc(EventTracker& generic,
     lifecycle::BlockSignalsInThisThread();
     ::pthread_setname_np(::pthread_self(), "cupti-evt-flush");
     uint64_t prevFlushNs = 0;
+    FlushBacklog backlog("Events probe", flushIntervalMs);
+    struct SummaryAtEnd { FlushBacklog& b; ~SummaryAtEnd() { b.Summary(); } } summary{backlog};
     // Stop() wakes the wait; the final flush is Stop()'s.
     while (!stop.WaitUntil(std::chrono::steady_clock::now() +
                            std::chrono::milliseconds(flushIntervalMs))) {
+        const uint64_t flushStartNs = SteadyNowNs();
 
         EventTrace trace;
         auto* meta = trace.mutable_metadata();
@@ -87,6 +92,8 @@ void EventFlushThreadFunc(EventTracker& generic,
                 fs->set_timestamp_ns(pending.timestampNs);
                 fs->set_bytes_written(pending.bytesWritten);
                 fs->set_interval_ns(pending.intervalNs);
+                fs->set_duration_ns(pending.durationNs);
+                fs->set_slow_flushes(pending.slowFlushes);
                 pending.valid = false;
             }
         }
@@ -99,8 +106,10 @@ void EventFlushThreadFunc(EventTracker& generic,
             bytes = WriteDelimitedEventTraceSized(trace, outFile);
             outFile.flush();
         }
-        uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        PassFlushDelay();   // test-only slow writer; see <cupti_profiler/testing.h>
+        uint64_t nowNs = SteadyNowNs();
+        const uint64_t durationNs = nowNs - flushStartNs;
+        backlog.Record(durationNs, bytes);
         uint64_t intervalNs = (prevFlushNs == 0) ? 0 : (nowNs - prevFlushNs);
         prevFlushNs = nowNs;
 
@@ -109,6 +118,8 @@ void EventFlushThreadFunc(EventTracker& generic,
             pending.timestampNs  = nowNs;
             pending.bytesWritten = bytes;
             pending.intervalNs   = intervalNs;
+            pending.durationNs   = durationNs;
+            pending.slowFlushes  = backlog.SlowFlushes();
             pending.valid        = true;
         }
 

@@ -21,6 +21,8 @@ struct EventPendingFlushStats {
     uint64_t timestampNs   = 0;
     uint64_t bytesWritten  = 0;
     uint64_t intervalNs    = 0;
+    uint64_t durationNs    = 0;   // drain to written
+    uint64_t slowFlushes   = 0;   // so far (FlushBacklog)
     bool     valid         = false;
 };
 

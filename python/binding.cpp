@@ -345,6 +345,8 @@ PYBIND11_MODULE(_native, m) {
           [](double timeout_s) { return testing::WaitFlushHeld(static_cast<unsigned>(timeout_s * 1000)); },
           py::arg("timeout_s"), py::call_guard<py::gil_scoped_release>());
     m.def("_testing_release_flush_gate", &testing::ReleaseFlushGate);
+    m.def("_testing_set_flush_delay_ms", &testing::SetFlushDelayMs, py::arg("ms"));
+    m.def("_testing_set_backlog_report_period_ms", &testing::SetBacklogReportPeriodMs, py::arg("ms"));
     m.def("_testing_kill_after_next_read",
           [](uint32_t pid, const std::string& probe) {
               if (probe != "system" && probe != "disk")

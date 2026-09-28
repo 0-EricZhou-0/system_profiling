@@ -609,6 +609,8 @@ void DiskProfiler::Stop() {
                 auto* fs = trace.add_flush_stats();
                 fs->set_flush_byte_size(m_impl->flushStatsPending.bytesWritten);
                 fs->set_flush_interval_ns(m_impl->flushStatsPending.intervalNs);
+                fs->set_flush_duration_ns(m_impl->flushStatsPending.durationNs);
+                fs->set_slow_flushes(m_impl->flushStatsPending.slowFlushes);
                 m_impl->flushStatsPending.valid = false;
             }
 

@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <thread>
 #include <poll.h>
 #include <signal.h>
 #include <unistd.h>
@@ -33,6 +34,9 @@ struct ReadHook {
     std::atomic<uint32_t> skip{0};
 };
 ReadHook g_readHook[2];
+
+std::atomic<unsigned> g_flushDelayMs{0};
+std::atomic<unsigned> g_backlogPeriodMs{30000};
 
 ReadHook& HookFor(testing::ReadProbe probe) {
     return g_readHook[probe == testing::ReadProbe::Disk ? 1 : 0];
@@ -60,6 +64,10 @@ bool WaitFlushHeld(unsigned timeoutMs) {
     std::unique_lock<std::mutex> lk(g_mu);
     return g_cv.wait_for(lk, std::chrono::milliseconds(timeoutMs), [] { return g_held; });
 }
+
+void SetFlushDelayMs(unsigned ms) { g_flushDelayMs.store(ms); }
+
+void SetBacklogReportPeriodMs(unsigned ms) { g_backlogPeriodMs.store(ms); }
 
 void ReleaseFlushGate() {
     std::lock_guard<std::mutex> lk(g_mu);
@@ -114,5 +122,13 @@ bool PassReadHook(uint32_t pid, testing::ReadProbe probe) {
     return true;
 }
 
+void PassFlushDelay() {
+    const unsigned ms = g_flushDelayMs.load(std::memory_order_relaxed);
+    if (ms) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+unsigned BacklogReportPeriodMs() { return g_backlogPeriodMs.load(std::memory_order_relaxed); }
+
 } // namespace internal
+
 } // namespace cupti_profiler

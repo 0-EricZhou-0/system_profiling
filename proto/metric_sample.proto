@@ -190,4 +190,10 @@ message TraceHeader {
 message FlushStats {
     uint64 flush_byte_size       = 1;
     uint64 flush_interval_ns     = 2;
+    // How long that flush took, from draining the buffers to written.
+    uint64 flush_duration_ns     = 3;
+    // Flushes of this probe so far that took longer than the flush
+    // interval: writing was not keeping up and buffered data grew
+    // (also warned about on stderr, rate-limited; nothing is dropped).
+    uint64 slow_flushes          = 4;
 }

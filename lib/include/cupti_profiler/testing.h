@@ -55,5 +55,14 @@ CUPTI_PROFILER_API void KillAfterNextRead(uint32_t pid, ReadProbe probe = ReadPr
 /// Unset: does nothing. Returns true if it armed the hook.
 CUPTI_PROFILER_API bool ArmKillAfterReadFromEnv();
 
+/// Slow writer: every periodic flush of an in-process probe (GPU,
+/// System, Disk, Events) takes `ms` longer, as if the disk were slow
+/// (the flush thread sleeps after its write). 0 = off.
+CUPTI_PROFILER_API void SetFlushDelayMs(unsigned ms);
+
+/// Period of the rate-limited flush-backlog summary lines (default
+/// 30000 ms), so a test does not have to run for minutes.
+CUPTI_PROFILER_API void SetBacklogReportPeriodMs(unsigned ms);
+
 } // namespace testing
 } // namespace cupti_profiler

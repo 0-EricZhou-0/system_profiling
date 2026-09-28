@@ -1,4 +1,5 @@
 #include "disk_flush_thread.h"
+#include "flush_backlog.h"
 #include "lifecycle.h"
 #include "delimited_write.h"
 #include "testing_hooks.h"
@@ -252,9 +253,12 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
     ::pthread_setname_np(::pthread_self(), "cupti-dsk-flush");
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;
+    FlushBacklog backlog("Disk probe", flushIntervalMs);
+    struct SummaryAtEnd { FlushBacklog& b; ~SummaryAtEnd() { b.Summary(); } } summary{backlog};
     // Stop() wakes the wait; the final flush is Stop()'s.
     while (!stop.WaitUntil(std::chrono::steady_clock::now() +
                            std::chrono::milliseconds(flushIntervalMs))) {
+        const uint64_t flushStartNs = SteadyNowNs();
 
         DiskSampleBatch drained;
         {
@@ -280,6 +284,8 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
                 auto* fs = trace.add_flush_stats();
                 fs->set_flush_byte_size(pending.bytesWritten);
                 fs->set_flush_interval_ns(pending.intervalNs);
+                fs->set_flush_duration_ns(pending.durationNs);
+                fs->set_slow_flushes(pending.slowFlushes);
                 pending.valid = false;
             }
         }
@@ -293,8 +299,10 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
         internal::PassFlushGate();   // test-only; see <cupti_profiler/testing.h>
         probe.CommitPendingRemovals(processSnapshot);
 
-        uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        PassFlushDelay();   // test-only slow writer; see <cupti_profiler/testing.h>
+        uint64_t nowNs = SteadyNowNs();
+        const uint64_t durationNs = nowNs - flushStartNs;
+        backlog.Record(durationNs, bytes);
         uint64_t intervalNs = (prevFlushNs == 0) ? 0 : (nowNs - prevFlushNs);
         prevFlushNs = nowNs;
 
@@ -302,6 +310,8 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
             std::lock_guard<std::mutex> lock(pendingMutex);
             pending.bytesWritten = bytes;
             pending.intervalNs   = intervalNs;
+            pending.durationNs   = durationNs;
+            pending.slowFlushes  = backlog.SlowFlushes();
             pending.valid        = true;
         }
 

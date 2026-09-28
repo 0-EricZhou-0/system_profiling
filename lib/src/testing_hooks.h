@@ -19,5 +19,12 @@ void PassFlushGate();
 /// its reading as another process's. Disarmed: one relaxed atomic load.
 bool PassReadHook(uint32_t pid, testing::ReadProbe probe);
 
+/// Called by every flush thread after its write: sleeps for the delay a
+/// test set with testing::SetFlushDelayMs. Off: one relaxed atomic load.
+void PassFlushDelay();
+
+/// testing::SetBacklogReportPeriodMs, 30000 by default.
+unsigned BacklogReportPeriodMs();
+
 } // namespace internal
 } // namespace cupti_profiler

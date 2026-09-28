@@ -41,6 +41,7 @@ add_library(cupti_profiler SHARED
     src/sidecar_process.cpp
     src/process_tracking_probe.cpp
     src/lifecycle.cpp
+    src/flush_backlog.cpp
     src/testing_hooks.cpp
     # Descendant tracking, subreaper helper, startup situation report
     src/process_discovery.cpp
