@@ -118,6 +118,22 @@ a new lane opens only when none is free, so the lane count is the most
 processes alive at one instant. From the trace's process table (the
 System probe's): pid, parent, comm history, start (10 ms ticks) and end.
 
+**Colours and line order.** A process has one colour on the whole page
+(its PID's; per-process panels tell a process's metrics apart by line
+style). Every other series takes its colour from its *base metric* —
+entity, counter and submetric, plus the device or GPU it is of — one hue
+per base metric, handed out in layout order from the tab10 cycle and
+continuing across panels (SM activity blue, warps orange, DRAM read
+green, DRAM write red, ...). Statistic variants of one metric share its
+hue: `.max` in the full colour, `.avg` tinted halfway to white, `.min`
+three quarters, `.sum` shaded a third toward black; a statistic alone in
+its panel keeps the full colour. Within a panel two base metrics never
+share a hue (the more active keeps it). Series are drawn from the most
+active to the least, so a smaller one lies on top: the lighter `.avg`
+band over the full-colour `.max` one (max ≥ avg, so max shows from avg up
+to max). Series lines are 0.63 pt (the grey "+k more" 0.42 pt; the Bokeh
+page 0.84 / 0.56 px).
+
 **Statistic labels.** A metric that is a statistic over its entity's
 instances says which in its legend, from the FQN's rollup:
 `sm__cycles_active.avg…` reads "Active Cycles (avg)" (the mean over the

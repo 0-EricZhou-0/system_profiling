@@ -488,6 +488,11 @@ def _legend_ncols(labels: list[str]) -> int:
     return max(1, min(len(labels), int(_FRAME_WIDTH // (widest + _LEGEND_ENTRY_PAD))))
 
 
+# Series line widths (70% of the earlier 1.2 / 0.8; the static PNG's
+# are scaled the same way).
+_SERIES_LINE_WIDTH = 0.84
+_OTHER_LINE_WIDTH  = 0.56
+
 # panel_legend's line style index -> Bokeh line_dash.
 _METRIC_DASHES = ["solid", "dashed", "dotted", "dashdot"]
 
@@ -502,7 +507,7 @@ def _legend_above(fig, items: list[tuple[str, list]]) -> None:
     fig.add_layout(Legend(items=items, ncols=_legend_ncols([i.label.value for i in items]),
                           location="top_left", click_policy="hide",
                           label_text_font_size="8pt", padding=4, margin=2,
-                          spacing=3, border_line_alpha=0.0),
+                          spacing=3, border_line_color="#cccccc", border_line_alpha=1.0),
                    "above")
 
 
@@ -520,7 +525,7 @@ def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> list:
         lines[key] = fig.line("x", "y", source=sources[key],
                               color=color if listed else panel_legend.OTHER_COLOR,
                               line_dash=_METRIC_DASHES[st],
-                              line_width=1.2 if listed else 0.8)
+                              line_width=_SERIES_LINE_WIDTH if listed else _OTHER_LINE_WIDTH)
     items = []
     for label, color, st, keys in p.entries:
         rs = [lines[k] for k in keys if k in lines]
@@ -607,6 +612,7 @@ def _build_panel(
     t0_ns: int,
     x_range=None,
     pid_colors: dict | None = None,
+    metric_colors: dict | None = None,
 ) -> tuple:
     """Build one Bokeh figure for one panel. Returns
     (figure, dict[(fqn, scope_key) -> ColumnDataSource]) so live mode
@@ -634,7 +640,8 @@ def _build_panel(
     fig = figure(**fig_kwargs)
 
     label_bases = metric_layout.disambiguate_short_labels(series_list)
-    plan = panel_legend.plan(series_list, projector, projection, pid_colors or {})
+    plan = panel_legend.plan(series_list, projector, projection, pid_colors or {},
+                             metric_colors=metric_colors)
 
     cds_by_key: dict[tuple, ColumnDataSource] = {}
     for key in plan.styles:
@@ -747,6 +754,7 @@ def _build_cumulative_panel(
     display_hz: float = 0.0,
     source_hzs: dict[tuple[str, object], float] | None = None,
     pid_colors: dict | None = None,
+    metric_colors: dict | None = None,
 ) -> tuple:
     """Bokeh equivalent of visualize_all._render_integrated_panel.
 
@@ -816,7 +824,8 @@ def _build_cumulative_panel(
     plan = panel_legend.plan(
         series_list, projector, projection, pid_colors or {},
         totals={(s.fqn, s.scope_key): float(c[-1]) if c.size else 0.0 for s, c in full_totals},
-        fmt_total=lambda v: f"{_fmt_total(scale_fn(v))}{unit_sfx}")
+        fmt_total=lambda v: f"{_fmt_total(scale_fn(v))}{unit_sfx}",
+        metric_colors=metric_colors)
     for series, ts_ns, cum in cumulatives:
         key = (series.fqn, series.scope_key)
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
@@ -1397,6 +1406,8 @@ def _build_static_document(
     resolved = [(panel, series) for panel, series in resolved if series]
     # One colour per process on the whole page (panels and timeline).
     pid_colors = panel_legend.pid_color_map([(p, s, "metric") for p, s in resolved], proj)
+    # One hue per base metric across the page (statistics share it).
+    metric_colors = panel_legend.metric_color_map([(p, s, "metric") for p, s in resolved])
 
     metric_figs: list = []
     figs: list = []
@@ -1404,7 +1415,8 @@ def _build_static_document(
     shared_x = None
     for panel, series in resolved:
         fig, _ = _build_panel(panel, series, projector, smoothed_proj, t0_ns,
-                              x_range=shared_x, pid_colors=pid_colors)
+                              x_range=shared_x, pid_colors=pid_colors,
+                              metric_colors=metric_colors)
         if shared_x is None:
             shared_x = fig.x_range
         figs.append(fig)
@@ -1422,7 +1434,8 @@ def _build_static_document(
             }
             cum_fig, _ = _build_cumulative_panel(
                 panel, series, projector, proj, t0_ns, x_range=shared_x,
-                display_hz=display_hz, source_hzs=source_hzs, pid_colors=pid_colors)
+                display_hz=display_hz, source_hzs=source_hzs, pid_colors=pid_colors,
+                metric_colors=metric_colors)
             figs.append(cum_fig)
             metric_figs.append(cum_fig)
             panel_figs.append((panel, "cumulative", cum_fig))

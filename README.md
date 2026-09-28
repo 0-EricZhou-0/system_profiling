@@ -65,7 +65,7 @@ multiprocessing helper and the startup workers are each their own series,
 found by descendant tracking; the GPU panels are device-wide counters.
 How to run it and read it: [docs/examples/vllm_serving.md](docs/examples/vllm_serving.md).
 
-![vLLM serving profile](docs/images/vllm_serving.v0.2.0.png)
+![vLLM serving profile](docs/images/vllm_serving_profile.v0.2.0.png)
 
 ## Repository layout
 

@@ -9,7 +9,7 @@ fork), a multiprocessing helper, and during startup a stream of short-lived
 workers (compile workers, `ldconfig`, `ninja`, ...). This example traces
 every one of them, from spawn to shutdown, from a small launcher.
 
-![vLLM serving profile](../images/vllm_serving.v0.2.0.png)
+![vLLM serving profile](../images/vllm_serving_profile.v0.2.0.png)
 
 ## What it does
 

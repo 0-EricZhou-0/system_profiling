@@ -145,6 +145,42 @@ def pid_color_map(panels, projection) -> dict:
     return {seen[i]: COLORS[r % len(COLORS)] for r, i in enumerate(order)}
 
 
+# Statistic variants of one metric (sm__cycles_active.avg / .max, ...)
+# share its hue: max in the full colour, avg tinted halfway to white, min
+# three quarters, sum shaded a third toward black (a sum over instances
+# is at least their max). Only when a panel holds two or more statistics
+# of one base; alone, a statistic has the full colour.
+STAT_SHADE = {"max": 0.0, "avg": 0.5, "min": 0.75, "sum": -0.35}
+
+
+def shade(color: str, f: float) -> str:
+    """`color` moved a fraction f toward white (f > 0) or black (f < 0)."""
+    c = [int(color[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    c = [x + (1 - x) * f if f >= 0 else x * (1 + f) for x in c]
+    return "#" + "".join(f"{round(x * 255):02x}" for x in c)
+
+
+def metric_base(s) -> tuple:
+    """A series' metric without its statistic: entity, counter, submetric
+    and the instance it is of (device, GPU; none for whole-system)."""
+    d = s.descriptor
+    return (d.entity, d.counter, d.submetric,
+            None if s.scope == _mc.SCOPE_SYSTEM else s.scope_key)
+
+
+def metric_color_map(panels) -> dict:
+    """Base metric -> hue, for the series that are not per-process, in
+    layout order across the whole figure, so a metric keeps its hue and
+    the cycle continues from panel to panel (as v0.0.1's figure did).
+    `panels`: (panel, series_list, kind) in layout order."""
+    out: dict = {}
+    for _p, series_list, _k in panels:
+        for s in series_list:
+            if s.scope != _mc.SCOPE_PROCESS:
+                out.setdefault(metric_base(s), COLORS[len(out) % len(COLORS)])
+    return out
+
+
 def _distinct_colors(keys_by_rank: list, colors: dict) -> dict:
     """Colours for a panel's listed legend keys (most active first), each
     its own: a key whose colour an earlier one already has gets the first
@@ -183,7 +219,8 @@ class Plan:
 
 
 def plan(series_list, projector, projection: dict, pid_colors: dict,
-         totals: dict | None = None, fmt_total=None) -> Plan:
+         totals: dict | None = None, fmt_total=None,
+         metric_colors: dict | None = None) -> Plan:
     """Colours, line styles and legend entries of one panel. A metric
     panel ranks its entries by activity; a cumulative companion, given
     `totals` ((fqn, scope_key) -> run total, full resolution), by those,
@@ -194,20 +231,37 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
     live = [s for s in series_list if projection[(s.fqn, s.scope_key)][0].size]
     cumulative = totals is not None
 
-    colors = {}
-    color_idx = 0
-    for s in live:
-        if s.scope == _mc.SCOPE_PROCESS and int(s.scope_key) in pid_colors:
-            colors[(s.fqn, s.scope_key)] = pid_colors[int(s.scope_key)]
-        else:
-            colors[(s.fqn, s.scope_key)] = COLORS[color_idx % len(COLORS)]
-            color_idx += 1
-
     if cumulative:
         amount = {(s.fqn, s.scope_key): totals.get((s.fqn, s.scope_key), 0.0) for s in live}
     else:
         amount = {(s.fqn, s.scope_key): activity(*projection[(s.fqn, s.scope_key)])
                   for s in live}
+
+    colors = {}
+    color_idx = 0
+    groups: dict = {}                     # base metric -> its series, not per-process
+    for s in live:
+        if s.scope == _mc.SCOPE_PROCESS and int(s.scope_key) in pid_colors:
+            colors[(s.fqn, s.scope_key)] = pid_colors[int(s.scope_key)]
+        elif s.scope == _mc.SCOPE_PROCESS:
+            colors[(s.fqn, s.scope_key)] = COLORS[color_idx % len(COLORS)]
+            color_idx += 1
+        else:
+            groups.setdefault(metric_base(s), []).append(s)
+    # One hue per base metric (the figure-wide one), distinct within the
+    # panel (the most active group keeps its hue); its statistics shaded.
+    hues, used = {}, set()
+    for b in sorted(groups, key=lambda b: -sum(amount[(s.fqn, s.scope_key)] for s in groups[b])):
+        h = (metric_colors or {}).get(b) or COLORS[len(hues) % len(COLORS)]
+        if h in used:
+            h = next((c for c in COLORS if c not in used), h)
+        hues[b] = h
+        used.add(h)
+    for b, ss in groups.items():
+        several = len({(s.descriptor.rollup or "").lower() for s in ss}) > 1
+        for s in ss:
+            f = STAT_SHADE.get((s.descriptor.rollup or "").lower(), 0.0) if several else 0.0
+            colors[(s.fqn, s.scope_key)] = shade(hues[b], f)
 
     entries = []
     if styled:
@@ -251,9 +305,12 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
                                          s.scope_key in listed) for s in live}
     else:
         keys = [(s.fqn, s.scope_key) for s in live]
+        by_key_scope = {(s.fqn, s.scope_key): s.scope for s in live}
         shown, hidden = cap([(k, amount[k]) for k in keys])
         listed = set(shown)
-        colors.update(_distinct_colors(sorted(shown, key=lambda k: -amount[k]), colors))
+        # (Metric hues are distinct per group already; processes here.)
+        colors.update(_distinct_colors(sorted((k for k in shown if by_key_scope[k] == _mc.SCOPE_PROCESS),
+                                              key=lambda k: -amount[k]), colors))
         by_key = {(s.fqn, s.scope_key): s for s in live}
         for k in shown:
             label = series_label(by_key[k], projector, base=label_bases[k])

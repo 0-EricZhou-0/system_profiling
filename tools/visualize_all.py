@@ -336,6 +336,10 @@ def _trapz_cumulative(ts_ns: np.ndarray, vals: np.ndarray) -> np.ndarray:
 # Panel rendering
 # ---------------------------------------------------------------------------
 
+# Series line widths (the grey "+k more" ones thinner).
+SERIES_LINEWIDTH = 0.63
+OTHER_LINEWIDTH  = 0.42
+
 # panel_legend's line style index -> matplotlib linestyle.
 _METRIC_LINESTYLES = ["-", "--", ":", "-."]
 
@@ -348,7 +352,7 @@ LEGEND_HANDLE_EM   = 2.0    # handle length
 LEGEND_TEXTPAD_EM  = 0.6    # handle -> text
 LEGEND_COLSPACE_EM = 1.5    # between columns
 LEGEND_ROWSPACE_EM = 0.3    # between rows
-LEGEND_BORDER_EM   = 0.2    # legend box padding (frameless)
+LEGEND_BORDER_EM   = 0.4    # legend box padding (a light frame, as in v0.0.1)
 LEGEND_AXESPAD_EM  = 0.3    # legend bottom -> axes top
 LEGEND_TITLE_GAP_PT = 3.0   # legend top -> title baseline
 
@@ -433,7 +437,8 @@ def _legend_grid(labels: list[str], avail_width_pt: float) -> tuple[int, int]:
 
 def _plan_legend(panel, series_list: list[metric_layout.ResolvedSeries], kind: str,
                  projector: TraceProjector, projection: dict,
-                 pid_color_map: dict[int, str], avail_width_pt: float) -> _LegendPlan:
+                 pid_color_map: dict[int, str], avail_width_pt: float,
+                 metric_colors: dict | None = None) -> _LegendPlan:
     """Colours and legend entries of one panel (panel_legend.plan); a
     cumulative companion's entries carry its run totals."""
     if kind == "integrated":
@@ -442,9 +447,11 @@ def _plan_legend(panel, series_list: list[metric_layout.ResolvedSeries], kind: s
         p = panel_legend.plan(series_list, projector, projection, pid_color_map,
                               totals={k: float(c[-1]) if c.size else 0.0
                                       for k, (_t, c) in cums.items()},
-                              fmt_total=lambda v: f"{_fmt_plain(scale_fn(v))}{unit_sfx}")
+                              fmt_total=lambda v: f"{_fmt_plain(scale_fn(v))}{unit_sfx}",
+                              metric_colors=metric_colors)
     else:
-        p = panel_legend.plan(series_list, projector, projection, pid_color_map)
+        p = panel_legend.plan(series_list, projector, projection, pid_color_map,
+                              metric_colors=metric_colors)
     return _LegendPlan(p, avail_width_pt)
 
 
@@ -458,7 +465,8 @@ def _draw_legend(ax, plan: _LegendPlan) -> None:
                for lab, c, ls in plan.entries]
     fs = LEGEND_FONTSIZE
     ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
-              ncol=plan.ncol, fontsize=fs, frameon=False,
+              ncol=plan.ncol, fontsize=fs, frameon=True, framealpha=0.9,
+              edgecolor="#cccccc",
               borderaxespad=LEGEND_AXESPAD_EM, borderpad=LEGEND_BORDER_EM,
               handlelength=LEGEND_HANDLE_EM, handletextpad=LEGEND_TEXTPAD_EM,
               columnspacing=LEGEND_COLSPACE_EM, labelspacing=LEGEND_ROWSPACE_EM)
@@ -471,10 +479,10 @@ def _axes_width_pt(ax) -> float:
 def _plot_styled(ax, time_s, y, key, plan: _LegendPlan) -> None:
     color, ls, listed = plan.styles[key]
     if listed:
-        line, = ax.plot(time_s, y, color=color, linewidth=0.9, linestyle=ls,
+        line, = ax.plot(time_s, y, color=color, linewidth=SERIES_LINEWIDTH, linestyle=ls,
                         zorder=plan.zorder[key])
     else:
-        line, = ax.plot(time_s, y, color=panel_legend.OTHER_COLOR, linewidth=0.6,
+        line, = ax.plot(time_s, y, color=panel_legend.OTHER_COLOR, linewidth=OTHER_LINEWIDTH,
                         linestyle=ls, zorder=1)
     line._series_key = key
 
@@ -915,7 +923,8 @@ def _render_process_timeline(ax, tl: _Timeline, t0_ns: int, xmax_s: float,
                       label="fork link (parent -> child)")]
     fs = LEGEND_FONTSIZE
     ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
-              ncol=len(handles), fontsize=fs, frameon=False,
+              ncol=len(handles), fontsize=fs, frameon=True, framealpha=0.9,
+              edgecolor="#cccccc",
               borderaxespad=LEGEND_AXESPAD_EM, borderpad=LEGEND_BORDER_EM,
               handlelength=LEGEND_HANDLE_EM, handletextpad=LEGEND_TEXTPAD_EM,
               columnspacing=LEGEND_COLSPACE_EM)
@@ -1268,9 +1277,11 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
     # Legends (above each panel): colours, entries and height, decided
     # now so each legend's height is reserved in the layout.
     legend_width_pt = (FIG_WIDTH - FIG_MARGIN_LEFT - FIG_MARGIN_RIGHT) * 72.0
+    metric_colors = panel_legend.metric_color_map([p for g in ("gpu", "system", "disk")
+                                                   for p in groups.get(g, [])])
     plans_by_group = {
         g: [_plan_legend(panel, series_list, kind, projector, proj,
-                         pid_color_map, legend_width_pt)
+                         pid_color_map, legend_width_pt, metric_colors)
             for panel, series_list, kind in panels]
         for g, panels in groups.items()}
 
