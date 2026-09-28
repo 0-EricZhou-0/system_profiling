@@ -29,7 +29,7 @@
 namespace cupti_profiler {
 
 struct CUPTI_PROFILER_API DiskProfilerConfig {
-    uint64_t samplingFrequencyHz = 50;              // 50 Hz
+    uint64_t samplingFrequencyHz = kDefaultDiskSamplingHz;     // 100 Hz
     std::vector<std::string> devices;   // block device names (e.g. "nvme0n1")
     // Processes to track per-process I/O (with optional display aliases —
     // see SystemProfilerConfig::Processes).

@@ -41,7 +41,7 @@ struct CUPTI_PROFILER_API ProfilerConfig {
     // device 0 only. All devices' samples are funneled into a single
     // GPUMetricsTrace stream tagged with `gpu_index`.
     std::vector<int> deviceIndices;
-    uint64_t samplingFrequencyHz = 10000;          // 10 kHz
+    uint64_t samplingFrequencyHz = kDefaultGpuSamplingHz;   // 100 Hz
     size_t hwBufferSize = 512 * 1024 * 1024;    // 512 MB
     // Counter-data image capacity, in samples, for ONE decode pass (the
     // image is re-initialized after every pass; ~16 KB of host RAM per

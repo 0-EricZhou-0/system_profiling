@@ -47,11 +47,11 @@ Every machine- or user-specific value is an argument:
 | `--vllm` | `vllm` (on `PATH`) | the `vllm` executable |
 | `--host`, `--port` | `127.0.0.1`, `8000` | where the server listens |
 | `--output-dir` | `vllm_serving_profile` | trace directory; the figure is `<dir>/vllm_serving.png` unless `--png` |
-| `--system-hz`, `--disk-hz` | 50, 50 | sampling rates (the library's defaults) |
+| `--system-hz`, `--disk-hz` | 100, 100 | sampling rates (the library's defaults) |
 | `--scan-interval-ms` | 100 | descendant tracking scan interval |
 | `--flush-ms` | 5000 | flush interval of every probe |
 | `--disk-device` | every whole block device in `/sys/block` | devices for the per-device panel (repeatable) |
-| `--gpu`, `--gpu-device`, `--gpu-hz` | off, 0, 500 | GPU PM sampling from the launcher |
+| `--gpu`, `--gpu-device`, `--gpu-hz` | off, 0, 1000 | GPU PM sampling from the launcher (the library's default is 100 Hz; 100–1000 Hz cost the same) |
 | `--load-seconds` | 90 | duration of the request load |
 | `--ready-timeout` | 900 | seconds to wait for `/v1/models` |
 | after `--` | — | passed to `vllm serve` unchanged, e.g. `-- --max-model-len 4096` |

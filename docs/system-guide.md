@@ -372,10 +372,11 @@ public:
 ```cpp title:"lib/include/cupti_profiler/gpu_profiler.h"
 struct ProfilerConfig {
     std::vector<int> deviceIndices;             // empty = {0}
-    uint64_t samplingFrequencyHz = 10000;       // 10 kHz
+    uint64_t samplingFrequencyHz = 100;         // 0 = 100
     size_t hwBufferSize = 512 * 1024 * 1024;    // 512 MB
-    uint64_t maxSamples = 50000;
+    uint64_t maxSamples = 0;                    // 0 = sized for one decode pass
     std::vector<std::string> metrics;
+    uint64_t decodeIntervalMs = 1000;           // 0 = 1000
 
     uint64_t flushIntervalMs = 5000;            // 0 = 5000
     std::string outputFile;                     // empty = no file output
@@ -385,9 +386,10 @@ struct ProfilerConfig {
 | Field | Description |
 | ----- | ----------- |
 | `deviceIndices` | CUDA device ordinals to profile. One CUPTI PM-Sampling session is opened per index; samples from every device are funneled into a single trace and tagged with `gpu_index`. Empty defaults to `{0}` (device 0). |
-| `samplingFrequencyHz` | HW counter sampling rate in Hz |
-| `hwBufferSize` | GPU-side ring buffer size. 512 MB prevents overflow at 10 kHz |
-| `maxSamples` | Decode buffer capacity (per decode cycle, not total) |
+| `samplingFrequencyHz` | HW counter sampling rate in Hz. Default 100 Hz; 100–1000 Hz cost the same (see [GPU probe cost and placement](#gpu-probe-cost-and-placement)) |
+| `hwBufferSize` | GPU-side buffer the sampler writes to until the host decodes it. Must hold two decode intervals of samples (checked at `Configure()` at 16 KiB per sample; measured 4–7 KB with 1–4 metrics on H100); an overflow is counted and warned about, and CUPTI returns no samples after it. 512 MB holds over a minute at 1 kHz |
+| `maxSamples` | Counter-data image capacity, in samples, for **one decode pass** (re-initialized after each pass), ~16 KB of host RAM per slot with 4 metrics. 0 (default) = `ceil(rate × decodeInterval × 1.25) + 64`, e.g. 689 at 500 Hz. Smaller than a pass loses samples (CUPTI 13.3 returns invalid samples once the image fills); counted in the trace's `GpuDecodeStats` |
+| `decodeIntervalMs` | How often the host collects the samples the GPU buffered: one decode pass per interval. Default 1000 ms. `flushIntervalMs` must not be less |
 | `metrics` | CUPTI metric names to collect. Must fit in a single pass. The same set is applied to every device in `deviceIndices`. |
 | `flushIntervalMs` | How often to write accumulated samples to disk (one write per flush). 0 = 5000 ms. Every probe flushes periodically; there is no flush-at-end-only mode, which would buffer the whole run in memory |
 | `outputFile` | Path to the output `.pb` file. Empty disables file output |
@@ -485,7 +487,7 @@ A profiler config with an empty `Processes` vector falls back to **system-wide s
 
 ```cpp title:"<cupti_profiler/system_profiler.h>"
 struct SystemProfilerConfig {
-    uint64_t samplingFrequencyHz = 50;           // 50 Hz default
+    uint64_t samplingFrequencyHz = 100;          // 100 Hz default
     std::vector<TrackedProcess> Processes;       // empty = system-wide only
     uint64_t flushIntervalMs = 5000;
     std::string outputFile;                      // e.g. "system_metrics.pb"
@@ -507,7 +509,7 @@ public:
 
 | Field | Description |
 | ----- | ----------- |
-| `samplingFrequencyHz` | How often `/proc/stat` and friends are polled. Default 50 Hz (a proto value of 0 means the same); see [Sampling frequency guidance](#sampling-frequency-guidance) for what each rate costs. |
+| `samplingFrequencyHz` | How often `/proc/stat` and friends are polled. Default 100 Hz (a proto value of 0 means the same); see [Sampling frequency guidance](#sampling-frequency-guidance) for what each rate costs. |
 | `Processes` | Initial PIDs (with optional aliases) to sample per-process. `Add/RemoveTrackedProcess` may grow or shrink this set mid-run. See `TrackedProcess`. |
 | `flushIntervalMs` | How often the in-memory sample buffer is serialized to `outputFile`. |
 | `outputFile` | Path to the system trace `.pb`. Resolved against `output_dir` when driven by `ProfilerSuite`. |
@@ -518,7 +520,7 @@ public:
 
 ```cpp title:"<cupti_profiler/disk_profiler.h>"
 struct DiskProfilerConfig {
-    uint64_t samplingFrequencyHz = 50;           // 50 Hz default
+    uint64_t samplingFrequencyHz = 100;          // 100 Hz default
     std::vector<std::string> devices;            // e.g. {"nvme0n1", "md0"}
     std::vector<TrackedProcess> Processes;       // empty = device-only
     uint64_t flushIntervalMs = 5000;
@@ -540,7 +542,7 @@ public:
 
 | Field | Description |
 | ----- | ----------- |
-| `samplingFrequencyHz` | Polling rate for `/proc/diskstats`, `/sys/block/<dev>/inflight` and every tracked PID's `/proc/<pid>/io`. Default 50 Hz (a proto value of 0 means the same). |
+| `samplingFrequencyHz` | Polling rate for `/proc/diskstats`, `/sys/block/<dev>/inflight` and every tracked PID's `/proc/<pid>/io`. Default 100 Hz (a proto value of 0 means the same). |
 | `devices` | Block devices to sample. Names match `/sys/block/<name>/`. Use `lsblk` or `cat /proc/diskstats` to enumerate. |
 | `Processes` | PIDs to sample for `/proc/<pid>/io` (all five byte counters). Empty = device-only sampling. |
 | `flushIntervalMs` / `outputFile` | Same semantics as `SystemProfilerConfig`. |
@@ -670,7 +672,7 @@ gpu {
     enabled: true
     # One CUPTI session is opened per index. Empty = [0].
     device_indices: 0
-    sampling_frequency_hz: 10000
+    sampling_frequency_hz: 100
     metrics: "sm__cycles_active.avg.pct_of_peak_sustained_elapsed"
     metrics: "dram__read_throughput.avg.pct_of_peak_sustained_elapsed"
     output_file: "gpu_metrics.pb"
@@ -678,14 +680,14 @@ gpu {
 
 system {
     enabled: true
-    sampling_frequency_hz: 50
+    sampling_frequency_hz: 100
     processes { pid: 0 alias: "self" }       # 0 → resolved at LoadConfig time
     output_file: "system_metrics.pb"
 }
 
 disk {
     enabled: true
-    sampling_frequency_hz: 50
+    sampling_frequency_hz: 100
     devices: "nvme0n1"
     processes { pid: 0 alias: "self" }
     output_file: "disk_metrics.pb"
@@ -723,7 +725,7 @@ int main() {
 
     cupti_profiler::ProfilerConfig config;
     config.deviceIndices = {0};            // multi-device: {0, 1, ...}
-    config.samplingFrequencyHz = 10000;    // 10 kHz
+    config.samplingFrequencyHz = 1000;     // 1 kHz (default 100 Hz)
     config.outputFile = "my_trace.pb";
     config.flushIntervalMs = 5000;
     config.metrics = {
@@ -777,7 +779,7 @@ their config structs under [Public API reference](#public-api-reference).
 
 | Knob | Where | Default | What it does |
 |---|---|---|---|
-| `system.sampling_frequency_hz`, `disk.sampling_frequency_hz` | `.pbtxt` / proto `SystemProfilerConfig.sampling_frequency_hz` (2), `DiskProfilerConfig.sampling_frequency_hz` (2); C++ `SystemProfilerConfig::samplingFrequencyHz`, `DiskProfilerConfig::samplingFrequencyHz` | **50 Hz** both (unset or 0 = 50; until 2026-09-25: System 100, Disk 10) | Ticks per second of the System probe (`/proc/stat`, `/proc/meminfo`, every tracked PID) and of the Disk probe (`/proc/diskstats`, every tracked PID's `/proc/<pid>/io`). What each rate costs: [Sampling frequency guidance](#sampling-frequency-guidance) |
+| `system.sampling_frequency_hz`, `disk.sampling_frequency_hz` | `.pbtxt` / proto `SystemProfilerConfig.sampling_frequency_hz` (2), `DiskProfilerConfig.sampling_frequency_hz` (2); C++ `SystemProfilerConfig::samplingFrequencyHz`, `DiskProfilerConfig::samplingFrequencyHz` | **100 Hz** both (unset or 0 = 100; 2026-09-25 to 09-28: 50; before: System 100, Disk 10) | Ticks per second of the System probe (`/proc/stat`, `/proc/meminfo`, every tracked PID) and of the Disk probe (`/proc/diskstats`, every tracked PID's `/proc/<pid>/io`). What each rate costs: [Sampling frequency guidance](#sampling-frequency-guidance) |
 | `system.mode`, `disk.mode` | `.pbtxt` / proto `SystemProfilerConfig.mode` (6), `DiskProfilerConfig.mode` (7); C++ `SystemProfilerConfig::mode`, `DiskProfilerConfig::mode` | `SYSTEM_PROBE_MODE_LEGACY` (unset = LEGACY) | `SYSTEM_PROBE_MODE_SIDECAR` runs that probe's sampler and flush threads in the `cupti-profiler-sidecar` process instead of this one, so their CPU is not charged to the workload. One sidecar serves both probes. See [Sidecar mode](#sidecar-mode) |
 | `sidecar_cpus` | `.pbtxt` / proto `ProfilerSuiteConfig.sidecar_cpus` (9, repeated) | empty = no pinning | CPUs the sidecar and all its threads are pinned to. A CPU outside this process's allowed set fails `Configure()` with `SidecarAffinityFailed`. Ignored, with a note, when no probe is in SIDECAR mode |
 | `CUPTI_PROFILER_SIDECAR` | environment variable, read at `Configure()` | unset | Path of the sidecar binary to run instead of the built-in one. Used only if it is an executable regular file; otherwise the built-in path is used silently |
@@ -1615,8 +1617,9 @@ Each line is annotated with its type, so `grep Counter` / `grep Ratio` / `grep T
 
 | Interval | Frequency | Overhead | Use case |
 | -------- | --------- | -------- | -------- |
-| 1,000,000 ns | 1 kHz | Negligible | Long-running production monitoring |
-| 100,000 ns | 10 kHz | Low | General profiling (default) |
+| 10,000,000 ns | 100 Hz | Fixed cost (below) | Default |
+| 1,000,000 ns | 1 kHz | Same as 100 Hz (measured) | Finer time resolution; ~10× the trace size |
+| 100,000 ns | 10 kHz | Not measured here | High-resolution analysis |
 | 10,000 ns | 100 kHz | Moderate | High-resolution analysis |
 | 1,000 ns | 1 MHz | High | Short bursts only — risk of HW buffer overflow |
 
@@ -1725,8 +1728,8 @@ Symptom when permissions are missing: `disk_metrics.pb` is produced, per-device 
 
 | Profile | Default | Notes |
 | ------- | ------- | ----- |
-| `system` (CPU + memory) | 50 Hz | Per-process CPU% needs roughly ≥ 50 Hz to resolve sub-second bursts. |
-| `disk` (devices + per-PID I/O) | 50 Hz | `/proc/diskstats` updates slowly; per-PID I/O rates benefit from the same rate as CPU. |
+| `system` (CPU + memory) | 100 Hz | Per-process CPU% needs roughly ≥ 50 Hz to resolve sub-second bursts. |
+| `disk` (devices + per-PID I/O) | 100 Hz | `/proc/diskstats` updates slowly; per-PID I/O rates benefit from the same rate as CPU. |
 | `events` | n/a | No periodic sampling — it's an inline log. Just choose `flush_interval_ms`. |
 
 **What a rate costs** (measured 2026-09-25 with the vLLM example's
@@ -1738,8 +1741,8 @@ exact, from `getrusage` across `stop()`; the split from per-thread
 
 | System = Disk rate | sidecar, % of one core | system sampler | disk sampler | discovery | runs |
 |---|---|---|---|---|---|
-| 100 Hz | 12.0 | 5.5 | 5.3 | 1.1 | 2 |
-| **50 Hz** | **7.3** | 3.0 | 3.2 | 1.1 | 8 |
+| **100 Hz** | **12.0** | 5.5 | 5.3 | 1.1 | 2 |
+| 50 Hz | 7.3 | 3.0 | 3.2 | 1.1 | 8 |
 | 25 Hz | 5.0 | 1.8 | 1.9 | 1.2 | 2 |
 | 10 Hz | 3.1 | 0.8 | 1.0 | 1.2 | 2 |
 

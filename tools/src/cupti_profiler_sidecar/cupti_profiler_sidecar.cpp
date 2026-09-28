@@ -64,6 +64,7 @@
 #define SYS_pidfd_open 434   // same number on every architecture
 #endif
 
+#include <cupti_profiler/defaults.h>
 #include <cupti_profiler/profiler_error.h>
 #include <cupti_profiler/system_profiler.h>
 #include <cupti_profiler/testing.h>
@@ -330,7 +331,7 @@ int main(int argc, char** argv) {
     {
         cupti_profiler::SystemProfilerConfig sc;
         const auto& s = cfg.system();
-        sc.samplingFrequencyHz = s.sampling_frequency_hz() > 0 ? s.sampling_frequency_hz() : 50;
+        sc.samplingFrequencyHz = s.sampling_frequency_hz() > 0 ? s.sampling_frequency_hz() : kDefaultSystemSamplingHz;
         sc.flushIntervalMs     = s.flush_interval_ms();   // 0 = default
         sc.outputFile          = build_output_path(s.output_file());
         // sc.mode stays Legacy here — from the sidecar's POV, running
@@ -354,7 +355,7 @@ int main(int argc, char** argv) {
     {
         cupti_profiler::DiskProfilerConfig dc;
         const auto& d = cfg.disk();
-        dc.samplingFrequencyHz = d.sampling_frequency_hz() > 0 ? d.sampling_frequency_hz() : 50;
+        dc.samplingFrequencyHz = d.sampling_frequency_hz() > 0 ? d.sampling_frequency_hz() : kDefaultDiskSamplingHz;
         dc.flushIntervalMs     = d.flush_interval_ms();   // 0 = default
         dc.outputFile          = build_output_path(d.output_file());
         for (const auto& dev : d.devices()) dc.devices.push_back(dev);

@@ -10,7 +10,7 @@ to build on top of the protobuf-serialized traces.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ```text
-GPU PM samples (10 kHz)  ┐
+GPU PM samples (100 Hz)  ┐
 CPU + memory ticks       │
 Per-process CPU / RSS    ├──► five .pb files ──►  visualize_all.py / visualize_interactive.py
 Per-device disk I/O      │
@@ -28,7 +28,8 @@ Named regions + events   ┘
 - **PM Sampling, not kernel-replay.** No artificial slowdowns, no
   cuBLAS calls being run multiple times to gather counters. The
   workload runs at full speed; samples are streamed off the GPU's PM
-  buffer in the background. Default 10 kHz on Ampere+. See
+  buffer in the background. Default 100 Hz on Ampere+ (100–1000 Hz cost
+  the same; the rate sets time resolution and trace size). See
   [`docs/cupti-overhead-analysis.md`](docs/cupti-overhead-analysis.md)
   for what the overhead landscape looks like across CUPTI features.
 - **Multi-domain regions and events.** A `Generic` (host
@@ -224,9 +225,9 @@ SIDECAR = 2   # SYSTEM_PROBE_MODE_SIDECAR
 suite = cp.ProfilerSuite()
 cp.configure_suite(suite, {
     "output_dir": "server_run/",
-    "system": {"enabled": True, "sampling_frequency_hz": 50, "mode": SIDECAR,
+    "system": {"enabled": True, "sampling_frequency_hz": 100, "mode": SIDECAR,
                "output_file": "system_metrics.pb"},
-    "disk":   {"enabled": True, "sampling_frequency_hz": 50, "mode": SIDECAR,
+    "disk":   {"enabled": True, "sampling_frequency_hz": 100, "mode": SIDECAR,
                "output_file": "disk_metrics.pb"},
     "process_discovery": {"enabled": False, "scan_interval_ms": 100},
 })

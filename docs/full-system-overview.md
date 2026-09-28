@@ -127,10 +127,11 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | Field                  | Type       | Default       | Description                                      |
 | ---------------------- | ---------- | ------------- | ------------------------------------------------ |
 | `enabled`              | bool       | false         | Enable GPU profiling                             |
-| `device_index`         | int32      | 0             | CUDA device index                                |
-| `sampling_interval_ns` | uint64     | 100000        | HW counter sampling period (ns). 100000 = 10 kHz |
+| `device_indices`       | int32[]    | (empty = 0)   | CUDA device indices                              |
+| `sampling_frequency_hz`| uint64     | 100           | HW counter sampling rate in Hz (0 = 100)         |
 | `hw_buffer_size`       | uint64     | 536870912     | GPU ring buffer size (bytes). 512 MB default     |
-| `max_samples`          | uint64     | 50000         | Decode buffer capacity per cycle                 |
+| `decode_interval_ms`   | uint64     | 1000          | How often the host collects the buffered samples |
+| `max_samples`          | uint64     | 0 = auto      | Counter-data image per decode pass (0 = sized for the decode interval) |
 | `metrics`              | string[]   | (empty)       | CUPTI metric names. Must fit single pass         |
 | `flush_interval_ms`    | uint64     | 5000          | Periodic flush interval. 0 = 5000                |
 | `output_file`          | string     | (empty)       | Output `.pb` path                                |
@@ -140,7 +141,7 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | Field                  | Type       | Default | Description                                      |
 | ---------------------- | ---------- | ------- | ------------------------------------------------ |
 | `enabled`              | bool       | false   | Enable CPU + memory profiling                    |
-| `sampling_frequency_hz`| uint64     | 50      | Sampling rate in Hz (0 = 50)                     |
+| `sampling_frequency_hz`| uint64     | 100     | Sampling rate in Hz (0 = 100)                    |
 | `pids`                 | uint32[]   | (empty) | PIDs for per-process tracking. 0 = self          |
 | `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval. 0 = 5000                |
 | `output_file`          | string     | (empty) | Output `.pb` path                                |
@@ -150,7 +151,7 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | Field                  | Type       | Default | Description                                      |
 | ---------------------- | ---------- | ------- | ------------------------------------------------ |
 | `enabled`              | bool       | false   | Enable disk I/O profiling                        |
-| `sampling_frequency_hz`| uint64     | 50      | Sampling rate in Hz (0 = 50)                     |
+| `sampling_frequency_hz`| uint64     | 100     | Sampling rate in Hz (0 = 100)                    |
 | `devices`              | string[]   | (empty) | Block device names (e.g. `"nvme0n1"`, `"sda"`)  |
 | `pids`                 | uint32[]   | (empty) | PIDs for per-process I/O. 0 = self               |
 | `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval. 0 = 5000                |

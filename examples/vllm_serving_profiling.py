@@ -102,8 +102,6 @@ def suite_config(args):
             "enabled": True,
             "device_indices": [args.gpu_device],
             "sampling_frequency_hz": args.gpu_hz,
-            "hw_buffer_size": 512 * 1024 * 1024,
-            "max_samples": 50000,
             "metrics": GPU_METRICS,
             "flush_interval_ms": args.flush_ms,
             "output_file": "gpu_metrics.pb",
@@ -240,7 +238,7 @@ def print_process_table(table, cpu, t0_ns):
         print(f"{pid:>8} {tp.parent_pid:>8}  {kind:<10} {start:8.1f} {end} {cpu.get(pid, 0.0):8.2f}  {names}")
 
 
-def main():
+def parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="Qwen/Qwen3.5-0.8B", help="model to serve (default: %(default)s)")
     ap.add_argument("--vllm", default="vllm",
@@ -250,8 +248,8 @@ def main():
     ap.add_argument("--output-dir", default="vllm_serving_profile",
                     help="trace directory (default: %(default)s)")
     ap.add_argument("--png", default=None, help="figure path (default: <output-dir>/vllm_serving.png)")
-    ap.add_argument("--system-hz", type=int, default=50)
-    ap.add_argument("--disk-hz", type=int, default=50)
+    ap.add_argument("--system-hz", type=int, default=100)
+    ap.add_argument("--disk-hz", type=int, default=100)
     ap.add_argument("--flush-ms", type=int, default=5000,
                     help="flush interval of every probe (default: %(default)s)")
     ap.add_argument("--scan-interval-ms", type=int, default=100,
@@ -262,7 +260,8 @@ def main():
     ap.add_argument("--gpu", action="store_true",
                     help="also run GPU PM sampling in this launcher (device-wide counters)")
     ap.add_argument("--gpu-device", type=int, default=0)
-    ap.add_argument("--gpu-hz", type=int, default=500)
+    ap.add_argument("--gpu-hz", type=int, default=1000,
+                    help="GPU PM sampling rate (default: %(default)s; the library's default is 100)")
     ap.add_argument("--load-seconds", type=float, default=90.0,
                     help="duration of the request load, split into %d batches (default: %%(default)s)"
                          % len(BATCH_CONCURRENCY))
@@ -271,7 +270,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-render", action="store_true", help="skip visualize_all.py")
     ap.add_argument("vllm_args", nargs="*", help="after `--`: extra arguments for `vllm serve`")
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = parser().parse_args()
 
     vllm = shutil.which(args.vllm) or args.vllm
     os.makedirs(args.output_dir, exist_ok=True)

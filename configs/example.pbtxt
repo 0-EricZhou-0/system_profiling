@@ -12,9 +12,10 @@ gpu {
     # Multi-device sampling: list one entry per device to profile.
     # Empty = device 0. Same metrics list is applied across all devices.
     device_indices: 0
-    sampling_frequency_hz: 10000    # 10 kHz
-    hw_buffer_size: 536870912       # 512 MB
-    max_samples: 50000
+    sampling_frequency_hz: 100      # 100 Hz (the default; 0 or unset = 100)
+    hw_buffer_size: 536870912       # 512 MB (the default)
+    # decode_interval_ms: 1000      # host collects the buffered samples once a second (default)
+    # max_samples: 0                # counter-data image sized for one decode pass (default)
     # SM utilization as % of peak — emitted directly by CUPTI rather
     # than computed post-hoc from raw cycle counts (the new
     # descriptor-driven renderer plots metrics in their native unit).
@@ -35,13 +36,13 @@ gpu {
     # NVLink rx/tx throughput in bytes/sec.
     metrics: "nvlrx__bytes.sum.per_second"
     metrics: "nvltx__bytes.sum.per_second"
-    flush_interval_ms: 10000
+    flush_interval_ms: 5000         # the default; must be >= decode_interval_ms
     output_file: "gpu_metrics.pb"
 }
 
 system {
     enabled: true
-    sampling_frequency_hz: 50       # 50 Hz (the default; 0 or unset = 50)
+    sampling_frequency_hz: 100      # 100 Hz (the default; 0 or unset = 100)
     # Processes to track per-process. Each entry is { pid, alias } —
     # alias is optional (omit it for plain "PID xxx" labels in the
     # visualizer; otherwise the legend shows "<alias> (PID xxx)").
@@ -58,7 +59,7 @@ system {
 
 disk {
     enabled: true
-    sampling_frequency_hz: 50       # 50 Hz (the default; 0 or unset = 50)
+    sampling_frequency_hz: 100      # 100 Hz (the default; 0 or unset = 100)
     devices: "md0"
     devices: "nvme7n1"
     processes { pid: 0  alias: "self" }   # see `system` block above

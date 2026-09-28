@@ -67,7 +67,7 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("device_indices",        &ProfilerConfig::deviceIndices,
             "List of CUDA device ordinals to profile (empty = [0]).")
         .def_readwrite("sampling_frequency_hz", &ProfilerConfig::samplingFrequencyHz,
-            "PM sampling rate in Hz (default 10000).")
+            "PM sampling rate in Hz (default 100).")
         .def_readwrite("hw_buffer_size",        &ProfilerConfig::hwBufferSize,
             "CUPTI hardware buffer size in bytes (default 512 MiB).")
         .def_readwrite("max_samples",           &ProfilerConfig::maxSamples,
@@ -89,7 +89,7 @@ PYBIND11_MODULE(_native, m) {
         "Configuration for SystemProfiler — CPU + memory.")
         .def(py::init<>())
         .def_readwrite("sampling_frequency_hz", &SystemProfilerConfig::samplingFrequencyHz,
-            "Tick rate in Hz (default 50).")
+            "Tick rate in Hz (default 100).")
         .def_readwrite("processes",             &SystemProfilerConfig::Processes,
             "Processes to track per-process (list of TrackedProcess). "
             "Empty = system-wide only. PID 0 inside any entry is resolved "
@@ -103,7 +103,7 @@ PYBIND11_MODULE(_native, m) {
         "Configuration for DiskProfiler — per-device + per-process I/O.")
         .def(py::init<>())
         .def_readwrite("sampling_frequency_hz", &DiskProfilerConfig::samplingFrequencyHz,
-            "Tick rate in Hz (default 50).")
+            "Tick rate in Hz (default 100).")
         .def_readwrite("devices",               &DiskProfilerConfig::devices,
             "Block device names to track (e.g. ['nvme0n1', 'md0']).")
         .def_readwrite("processes",             &DiskProfilerConfig::Processes,

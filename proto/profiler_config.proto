@@ -35,7 +35,7 @@ message GPUProfilerConfig {
     // per index; the metric set in `metrics` is applied identically
     // across every device.
     repeated int32 device_indices = 2;
-    uint64 sampling_frequency_hz = 3;
+    uint64 sampling_frequency_hz = 3;   // 0 = 100 Hz
     uint64 hw_buffer_size = 4;
     // Counter-data image capacity per decode pass; 0 = sized for the
     // decode interval (see ProfilerConfig::maxSamples).
@@ -52,7 +52,7 @@ message GPUProfilerConfig {
 
 message SystemProfilerConfig {
     bool enabled = 1;
-    uint64 sampling_frequency_hz = 2;   // 0 = 50 Hz
+    uint64 sampling_frequency_hz = 2;   // 0 = 100 Hz
     // Processes to track per-process. Empty = system-wide only.
     // PIDs can also be added/removed mid-run via
     // ProfilerSuite::AddTrackedProcess/RemoveTrackedProcess.
@@ -66,7 +66,7 @@ message SystemProfilerConfig {
 
 message DiskProfilerConfig {
     bool enabled = 1;
-    uint64 sampling_frequency_hz = 2;   // 0 = 50 Hz
+    uint64 sampling_frequency_hz = 2;   // 0 = 100 Hz
     repeated string devices = 3;
     // See SystemProfilerConfig.processes for mid-run add/remove behavior.
     repeated TrackedProcessV2 processes = 4;

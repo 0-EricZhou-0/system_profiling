@@ -38,7 +38,7 @@ enum class SystemProbeMode {
 };
 
 struct CUPTI_PROFILER_API SystemProfilerConfig {
-    uint64_t samplingFrequencyHz = 50;              // 50 Hz
+    uint64_t samplingFrequencyHz = kDefaultSystemSamplingHz;   // 100 Hz
     // Processes to track per-process. Empty = system-wide only.
     // Each entry carries a PID and an optional display alias; visualizers
     // render labels as "<alias> (PID xxx)" when alias is non-empty,
