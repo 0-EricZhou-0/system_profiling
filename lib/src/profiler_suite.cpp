@@ -105,7 +105,8 @@ public:
     // Start() and Stop().
     bool running = false;
     bool stopped = false;
-    bool signalHandlers = false;    // installed by this suite's Start()
+    bool installSignalHandlers = true;   // ProfilerSuiteConfig.disable_signal_handlers
+    bool signalHandlers = false;         // installed by this suite's Start()
     std::mutex stopMutex;
     void Stop();
 
@@ -300,6 +301,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     m_impl->metricCatalogPath = proto.metric_catalog_path();
 
     m_impl->sidecarCpusSet = proto.sidecar_cpus_size() > 0;
+    m_impl->installSignalHandlers = !proto.disable_signal_handlers();
 
     // Descendant tracking — one setting for both system and disk.
     {
@@ -569,8 +571,10 @@ ProfilerError ProfilerSuite::Start() {
     m_impl->running = true;
     internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Suite, "ProfilerSuite",
                                   [impl = m_impl.get()] { impl->Stop(); });
-    internal::lifecycle::InstallSignalHandlers();
-    m_impl->signalHandlers = true;
+    if (m_impl->installSignalHandlers) {
+        internal::lifecycle::InstallSignalHandlers();
+        m_impl->signalHandlers = true;
+    }
 
     // Emit the manifest now so live tailers (e.g. visualize_interactive.py
     // --live) have a starting point. Stop() re-emits the identical content

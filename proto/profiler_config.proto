@@ -146,4 +146,14 @@ message ProfilerSuiteConfig {
     // SidecarAffinityFailed. Ignored, with a note, when no probe runs in
     // SIDECAR mode — the host's own affinity is never changed.
     repeated uint32 sidecar_cpus = 9;
+
+    // false (default): Start() installs handlers for the catchable
+    // signals whose default action ends the process (SIGTERM, SIGINT,
+    // SIGHUP, SIGQUIT, SIGSEGV, ...): on one, every probe is stopped and
+    // flushed, then the handler that was there before runs (or the
+    // default action), so the exit status is unchanged. true: no handler
+    // is installed and the host's signal dispositions are left alone; a
+    // fatal signal then loses what was not flushed yet (up to one flush
+    // interval). (proto3 bools default to false, hence the name.)
+    bool disable_signal_handlers = 10;
 }

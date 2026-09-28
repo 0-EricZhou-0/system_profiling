@@ -77,9 +77,16 @@ public:
     /// SidecarExited / SidecarBadHandshake if the sidecar did not answer.
     /// Every other enabled probe has still been started, so call Stop()
     /// as usual; the failed probe simply writes nothing.
+    ///
+    /// Unless ProfilerSuiteConfig.disable_signal_handlers is set, also
+    /// installs handlers for the catchable signals whose default action
+    /// ends the process: on one, the suite is stopped and flushed, then the
+    /// previous handler (or the default action) runs. Stop() removes them.
     ProfilerError Start();
 
-    /// Stop all enabled profilers.
+    /// Stop all enabled profilers: final GPU decode, every probe's last
+    /// flush, the sidecar's; trace files closed. Runs once, whichever of
+    /// the host or a signal comes first. Thread-safe.
     void Stop();
 
     /// Begin tracking a PID mid-run. Fans out to every enabled probe
