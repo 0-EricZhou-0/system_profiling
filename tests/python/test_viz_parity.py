@@ -56,7 +56,7 @@ def test_metric_line_styles_and_compact_legend(tmp_path):
     meta, layout = _trace(tmp_path)
     doc = visualize_interactive.build_static(meta, panel_layout=layout)
     [two] = [f for p, k, f in doc.panel_figs if p.title == "Two metrics"]
-    items = [it for lg in two.legend for it in lg.items]     # processes, then the style key
+    items = [it for lg in two.right + two.above for it in lg.items]   # processes, then the style key
     labels = [it.label.value for it in items]
     # 3 processes + 2 line styles, not 3 x 2 pairs
     assert len(labels) == 5, labels

@@ -1,7 +1,9 @@
 """Legends of the interactive visualizer's static page
-(tools/visualize_interactive.py): above each panel, never inside or
-beside the plot frame, capped at LEGEND_MAX_ENTRIES plus "+k more";
-the plot frame keeps its height whatever the legend's."""
+(tools/visualize_interactive.py): to the right of each panel's plot,
+one entry per row, never inside the frame (a line-style key on a row
+above it), capped at LEGEND_MAX_ENTRIES plus "+k more"; the plot frame
+keeps its height whatever the legend's, and every figure on the page
+reserves the same right border."""
 
 import pytest
 
@@ -25,14 +27,26 @@ def _labels(fig):
     return [it.label.value for it in legend.items]
 
 
-def test_legend_above_every_panel(tmp_path):
+def test_legend_right_of_every_panel(tmp_path):
     doc = _doc(tmp_path, 3)
     assert doc.panel_figs
     for panel, _kind, fig in doc.panel_figs:
-        legends = [r for r in fig.above if type(r).__name__ == "Legend"]
-        assert len(legends) == 1, panel.title
-        assert not [r for r in fig.center + fig.right if type(r).__name__ == "Legend"]
+        [legend] = [r for r in fig.right if type(r).__name__ == "Legend"]
+        assert not [r for r in fig.center + fig.above if type(r).__name__ == "Legend"], panel.title
+        assert legend.ncols == 1 and legend.spacing == 0                      # one per row, compact
+        assert legend.label_height == legend.glyph_height == visualize_interactive._LEGEND_ROW_PX
         assert fig.frame_height == visualize_interactive._FRAME_HEIGHT
+
+
+def test_one_right_border_on_the_page(tmp_path):
+    """Strips, timeline and panels reserve the same right border, room for
+    the widest legend, so frames and figures end at one x."""
+    doc = _doc(tmp_path, N + 3)
+    figs = list(doc.strips) + [doc.timeline] + [f for _p, _k, f in doc.panel_figs]
+    widest = max(visualize_interactive._legend_width_px([it.label.value for it in lg.items])
+                 for _p, _k, f in doc.panel_figs for lg in f.right)
+    assert widest > 200                                    # "CPU (sum)  [app/c9 (PID ...)]"
+    assert {f.min_border_right for f in figs} == {widest}
 
 
 def test_legend_capped_with_more_entry(tmp_path):

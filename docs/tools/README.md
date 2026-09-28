@@ -263,8 +263,11 @@ What you get:
   label rows make the band tall; fold the timeline with its ▾ to give the
   space back). Zoomed, a bar's label sits in the visible part of the bar
   and is hidden when it no longer fits there. Every figure on the page
-  has the same plot frame (left edge and width), so a time is at the
-  same x in the strips, the timeline and every panel.
+  has the same plot frame (left edge and width) and reserves the same
+  right border (room for the widest legend), so a time is at the same x
+  in the strips, the timeline and every panel, and the page has one
+  right edge. In a window too narrow for all of it, every frame narrows
+  alike.
 - **Foldable panels**: each panel, and the timeline, has a header with
   its title and a ▾/▸ control; collapsed, only the header row is left.
   *Collapse all* / *Expand all* sit at the top of the sticky band. Works
@@ -299,10 +302,13 @@ What you get:
   panels with several metrics per process, with a legend of processes
   plus line styles; discovered processes labelled `child of <pid>`;
   statistic labels; legend entries that name the series only.
-- **Click-to-hide legend entries**; legends sit **above** each panel,
-  capped as in `visualize_all.py` (ten entries plus `+k more`, which
-  hides or shows all the grey lines at once). The plot frame has a
-  fixed height, so a long legend adds height instead of squeezing it.
+- **Click-to-hide legend entries**; a panel's legend sits **to the
+  right** of its plot, one entry per compact row, capped as in
+  `visualize_all.py` (ten entries plus `+k more`, which hides or shows
+  all the grey lines at once); a line-style key (several metrics per
+  process or device) stays on one row above the plot. The plot frame has
+  a fixed size, so a legend never squeezes it. (The PNG keeps its
+  legends above the panels.)
 - **Y-axis clamps** with dashed reference lines at the theoretical
   peak (100% SM Util, `max_warps_per_sm` for Active Warps, peak DRAM /
   PCIe / NVLink BW, installed RAM total), labelled `Peak: …` as in

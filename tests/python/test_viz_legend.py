@@ -160,9 +160,8 @@ def test_style_key_own_legend_bokeh(tmp_path):
     io = [(k, f) for p, k, f in doc.panel_figs if p.series_glob == "proc__io_?char.*"]
     assert {k for k, _f in io} == {"metric", "cumulative"}
     for kind, f in io:
-        legends = [r for r in f.above if type(r).__name__ == "Legend"]
-        assert len(legends) == 2
-        procs, key = legends                       # the key added last: stacked on top
+        [key] = [r for r in f.above if type(r).__name__ == "Legend"]      # a row above the plot
+        [procs] = [r for r in f.right if type(r).__name__ == "Legend"]    # the processes right of it
         assert [it.label.value for it in key.items] == KEY and key.ncols == len(KEY)
         labels = [it.label.value for it in procs.items]
         assert len(labels) == 2 and all("PID" in l and "rchar" not in l and "wchar" not in l

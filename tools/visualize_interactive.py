@@ -461,20 +461,41 @@ _THEMES = {
 _THEME = "light"
 
 
-# Legends sit above their panel (outside the plot frame), in as many
-# columns as the widest label allows across the frame. Which entries:
-# panel_legend (at most LEGEND_MAX_ENTRIES, the rest drawn in
-# OTHER_COLOR and toggled together by one "+k more" entry).
+# A panel's series legend sits to the right of the plot frame, one entry
+# per row, rows _LEGEND_ROW_PX apart; its line-style key (a panel with
+# several metrics per process or device) on one row above the plot.
+# Which entries: panel_legend (at most LEGEND_MAX_ENTRIES, the rest
+# drawn in OTHER_COLOR and toggled together by one "+k more" entry), so
+# a legend is at most 11 rows, within the frame's height.
+#
+# Every figure on the page reserves the same right border, the widest
+# series legend's (estimated from the longest label, over rather than
+# under), so the page has one right edge as well as one frame. In a
+# window too narrow for it all, Bokeh narrows every frame alike, so they
+# stay aligned.
 _LEGEND_FONT_PX   = 8 * 96 / 72   # 8pt
-_LEGEND_CHAR_EM   = 0.45          # average glyph width of the UI font, in em
-_LEGEND_ENTRY_PAD = 20 + 5 + 3 + 10   # glyph_width + label_standoff + spacing + slack
+_LEGEND_CHAR_EM   = 0.52          # the UI font's glyph width, in em, over (measured 0.46)
+_LEGEND_ROW_PX    = 12
+_LEGEND_ENTRY_PAD = 20 + 5 + 2 * 4 + 2 * 1 + 10   # glyph + standoff + padding + border + slack
+_LEGEND_MARGIN    = 8             # between the frame and the legend
 
 
-def _legend_ncols(labels: list[str]) -> int:
+def _legend_width_px(labels: list[str]) -> int:
+    """Upper estimate of a one-column legend's width, margin included."""
     if not labels:
-        return 1
+        return 0
     widest = max(len(lab) for lab in labels) * _LEGEND_CHAR_EM * _LEGEND_FONT_PX
-    return max(1, min(len(labels), int(_FRAME_WIDTH // (widest + _LEGEND_ENTRY_PAD))))
+    return int(widest + _LEGEND_ENTRY_PAD + _LEGEND_MARGIN + 0.5)
+
+
+def _reserve_right(figs: list) -> int:
+    """Give every figure the same right border: room for the widest
+    series legend among them (those in fig.right). Returns it (px)."""
+    width = max([_legend_width_px([it.label.value for it in r.items])
+                 for f in figs for r in f.right if isinstance(r, Legend)] + [0])
+    for f in figs:
+        f.min_border_right = width
+    return width
 
 
 # Series line widths (70% of the earlier 1.2 / 0.8; the static PNG's
@@ -486,21 +507,24 @@ _OTHER_LINE_WIDTH  = 0.56
 _METRIC_DASHES = ["solid", "dashed", "dotted", "dashdot"]
 
 
-def _legend_above(fig, items: list[tuple[str, list]], key: list | None = None) -> None:
-    """Legend above the plot: items = [(label, renderers)]; an entry's
-    swatch draws every renderer's glyph, the last on top. Click an entry
-    to hide its lines. `key` (the line-style entries, same form) goes on
-    a row of its own, above the rest."""
-    def legend(entries, ncols):
-        return Legend(items=[LegendItem(label=lab, renderers=list(rs)) for lab, rs in entries],
-                      ncols=ncols, location="top_left", click_policy="hide",
-                      label_text_font_size="8pt", padding=4, margin=2,
-                      spacing=3, border_line_color="#cccccc", border_line_alpha=1.0)
+def _legend(entries: list, ncols: int, **kw) -> "Legend":
+    return Legend(items=[LegendItem(label=lab, renderers=list(rs)) for lab, rs in entries],
+                  ncols=ncols, location="top_left", click_policy="hide",
+                  label_text_font_size="8pt", padding=4, border_line_color="#cccccc",
+                  border_line_alpha=1.0, **kw)
+
+
+def _legend_right(fig, items: list[tuple[str, list]], key: list | None = None) -> None:
+    """A panel's legend: items = [(label, renderers)] to the right of the
+    plot, one per row; an entry's swatch draws every renderer's glyph,
+    the last on top. Click an entry to hide its lines. `key` (the
+    line-style entries, same form) on one row above the plot."""
     if items:
-        fig.add_layout(legend(items, _legend_ncols([lab for lab, _rs in items])), "above")
+        fig.add_layout(_legend(items, 1, margin=_LEGEND_MARGIN, spacing=0,
+                               label_height=_LEGEND_ROW_PX, glyph_height=_LEGEND_ROW_PX),
+                       "right")
     if key:
-        # Added after, so Bokeh stacks it farther from the plot: on top.
-        fig.add_layout(legend(key, len(key)), "above")
+        fig.add_layout(_legend(key, len(key), margin=2, spacing=3), "above")
 
 
 def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> tuple[list, list]:
@@ -694,7 +718,7 @@ def _build_panel(
         unit_suffix=ylabel,
     )
 
-    _legend_above(fig, legend_items, legend_key)
+    _legend_right(fig, legend_items, legend_key)
     return fig, cds_by_key
 
 
@@ -848,7 +872,7 @@ def _build_cumulative_panel(
         unit_suffix=ylabel,
     )
 
-    _legend_above(fig, legend_items, legend_key)
+    _legend_right(fig, legend_items, legend_key)
     return fig, cds_by_key
 
 
@@ -1135,7 +1159,9 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     fig.add_tools(HoverTool(renderers=bars, tooltips=[
         ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),
         ("start", "@start{0.000}s"), ("end", "@end{0.000}s")]))
-    _legend_above(fig, [(lab, [r]) for lab, r in shown])
+    # What the bars' styles mean: a key, above the lanes like a panel's.
+    fig.add_layout(_legend([(lab, [r]) for lab, r in shown], len(shown), margin=2, spacing=3),
+                   "above")
     fig.legend[0].click_policy = "none"
     return fig
 
@@ -1679,6 +1705,8 @@ def _build_static_document(
     # construction time inside _make_plot_tools.
     for f in strips + figs:
         f.toolbar.logo = None
+    # One right border on the page: the frames end at one x, the figures too.
+    _reserve_right(strips + ([timeline_fig] if timeline_fig is not None else []) + figs)
 
     # Wrap both strips in their own Column with spacing=0 so there's
     # no transparent gap between them during scroll, and make THAT
