@@ -164,7 +164,7 @@ reads **58% above** the kernel (`CpuTail.ambiguous_cpu_ns` carries the
 excess). In such a run's figure the per-process legends list the ten most
 active processes and a `+k more` entry for the rest, drawn in grey.
 
-### Checked on nine runs
+### Checked on eleven runs
 
 Six runs at earlier defaults (System and Disk 100 Hz, GPU 1000 Hz with the
 old collection loop; two without `--gpu`, then two pairs alternating), one at
