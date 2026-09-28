@@ -195,26 +195,34 @@ def metric_color_map(panels) -> dict:
     return out
 
 
-def end_lines(series_list, projection: dict, projector, p: "Plan", unit: int) -> list:
-    """For a per-process gauge panel (bytes, not bytes/s: RSS, VMS, ...):
-    each process that exited ends in a dashed vertical line from 0 up to
-    its last measured value, in its colour, so its end reads as an end
-    (its last samples during the exit carry no value: the probe records
-    them as missing). Returns [(key, t_ns, value, color)] for the series
-    of processes the trace saw exit."""
-    if unit != _mc.UNIT_BYTES:
-        return []
+END_LINE_COLOR = "black"   # the PNG's; the Bokeh page uses its theme's ink
+
+
+def wants_end_lines(kind: str, unit: int) -> bool:
+    """Exit end lines go on every cumulative panel and on per-process
+    gauges (a level, not a rate: bytes such as RSS, counts)."""
+    return kind in ("integrated", "cumulative") or unit in (_mc.UNIT_BYTES, _mc.UNIT_COUNT)
+
+
+def end_lines(series_list, plotted: dict, projector, p: "Plan") -> list:
+    """Each process that exited ends in a dashed vertical line from 0 up
+    to its series' last value at that series' last time, so its end reads
+    as an end (the series itself stops at its last value; a gauge's last
+    samples during the exit carry no value). plotted: (fqn, scope_key) ->
+    (ts_ns, values) as drawn (a cumulative panel: the running totals).
+    Returns [(key, t_ns, value)] for the per-process series of processes
+    the trace saw exit (listed or grey alike)."""
     exited = {r.pid for r in projector.process_table.values() if r.end_time_ns}
     out = []
     for s in series_list:
         k = (s.fqn, s.scope_key)
-        if s.scope != _mc.SCOPE_PROCESS or int(s.scope_key) not in exited or k not in p.styles:
+        if (s.scope != _mc.SCOPE_PROCESS or int(s.scope_key) not in exited
+                or k not in p.styles or k not in plotted):
             continue
-        ts, vals = projection[k]
-        ok = np.flatnonzero(np.isfinite(vals.astype(np.float64)))
+        ts, vals = plotted[k]
+        ok = np.flatnonzero(np.isfinite(np.asarray(vals, dtype=np.float64)))
         if ok.size:
-            color, _st, listed = p.styles[k]
-            out.append((k, int(ts[ok[-1]]), float(vals[ok[-1]]), color if listed else OTHER_COLOR))
+            out.append((k, int(ts[ok[-1]]), float(vals[ok[-1]])))
     return out
 
 

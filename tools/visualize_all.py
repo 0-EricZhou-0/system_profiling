@@ -521,6 +521,7 @@ def _render_metric_panel(
     display_hz: float = 0.0,
     plan: _LegendPlan | None = None,
     fit_to_data: bool = False,
+    exit_lines: bool = True,
 ) -> None:
     if plan is None:
         plan = _plan_legend(panel, series_list, "metric", projector, projection,
@@ -555,13 +556,9 @@ def _render_metric_panel(
     for key, ts_ns, vals in plotted:
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
         _plot_styled(ax, time_s, scale_fn(vals), key, plan)
-    # Per-process gauges: each exited process's end, dashed, 0 -> last value.
-    for key, t_ns, v, color in panel_legend.end_lines(series_list, projection, projector,
-                                                      plan.source, unit):
-        x = (t_ns - t0_ns) / 1e9
-        line, = ax.plot([x, x], [0.0, scale_fn(v)], color=color, linestyle="--",
-                        linewidth=SERIES_LINEWIDTH, zorder=plan.zorder.get(key, 1))
-        line._end_line = key
+    if exit_lines and panel_legend.wants_end_lines("metric", unit):
+        _draw_end_lines(ax, series_list, {k: (t, v) for k, t, v in plotted}, projector,
+                        plan, t0_ns, scale_fn)
 
     peak_scaled = None
     data_max = units.largest(v for _k, _t, v in plotted)
@@ -610,6 +607,18 @@ def _render_metric_panel(
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
 
+def _draw_end_lines(ax, series_list, plotted: dict, projector, plan, t0_ns: int,
+                    scale_fn) -> None:
+    """Each exited process's end: dashed, black, 0 -> its series' last
+    value (panel_legend.end_lines)."""
+    for key, t_ns, v in panel_legend.end_lines(series_list, plotted, projector, plan.source):
+        x = (t_ns - t0_ns) / 1e9
+        line, = ax.plot([x, x], [0.0, scale_fn(v)], color=panel_legend.END_LINE_COLOR,
+                        linestyle="--", linewidth=SERIES_LINEWIDTH,
+                        zorder=plan.zorder.get(key, 1) + 0.5)
+        line._end_line = key
+
+
 def _render_integrated_panel(
     ax,
     panel,
@@ -621,6 +630,7 @@ def _render_integrated_panel(
     sample_freq_hz: float = 0.0,
     display_hz: float = 0.0,
     plan: _LegendPlan | None = None,
+    exit_lines: bool = True,
 ) -> None:
     """Companion to _render_metric_panel — plots ∫ y dt of each series.
 
@@ -647,6 +657,8 @@ def _render_integrated_panel(
         ts_plot, cum_plot = _decimate_to_hz(ts_ns, cum, sample_freq_hz, display_hz)
         time_s = (ts_plot.astype(np.int64) - t0_ns) / 1e9
         _plot_styled(ax, time_s, scale_fn(cum_plot), key, plan)
+    if exit_lines and panel_legend.wants_end_lines("integrated", mc_pb.UNIT_UNSPECIFIED):
+        _draw_end_lines(ax, series_list, cums, projector, plan, t0_ns, scale_fn)
 
     ax.set_ylim(bottom=0.0)
     for axis in (ax.xaxis, ax.yaxis):
@@ -1166,6 +1178,11 @@ def main() -> int:
                              "value; the Peak is then written as 'Peak: <value> "
                              "(off-scale)' instead of drawn. Default: off (the "
                              "axis reaches the Peak).")
+    parser.add_argument("--no-exit-lines", action="store_true",
+                        help="Don't end each exited process's series in a "
+                             "dashed line down to 0 (per-process gauge and "
+                             "cumulative panels); the series just stops at "
+                             "its last value.")
     parser.add_argument("--unit-scale-factor", type=_unit_scale_factor,
                         default=units.DEFAULT_SCALE_FACTOR, metavar="F",
                         help="Byte-unit threshold: an axis (and the footer "
@@ -1190,7 +1207,8 @@ def main() -> int:
                             smooth_window_s=args.smooth_window_s,
                             display_hz=args.display_hz,
                             unit_scale_factor=args.unit_scale_factor,
-                            fit_axis_to_data=args.fit_axis_to_data)
+                            fit_axis_to_data=args.fit_axis_to_data,
+                            exit_lines=not args.no_exit_lines)
     if rendered is None:
         return 1
 
@@ -1219,11 +1237,12 @@ class Rendered:
 def build_figure(metadata, *, catalog=None, panel_layout=None,
                  smooth_window_s: float = 0.0, display_hz: float = 0.0,
                  unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR,
-                 fit_axis_to_data: bool = False):
+                 fit_axis_to_data: bool = False, exit_lines: bool = True):
     """Render the trace whose session_metadata.pb is `metadata` into a
     matplotlib figure (not saved). Returns a Rendered, or None when there
     is nothing to plot. unit_scale_factor: see units.py (ValueError < 1).
-    fit_axis_to_data: see --fit-axis-to-data."""
+    fit_axis_to_data: see --fit-axis-to-data; exit_lines: see
+    --no-exit-lines."""
     units.set_scale_factor(unit_scale_factor)
     metadata_path = Path(metadata).resolve()
     _log(f"loading session metadata from {metadata_path}")
@@ -1418,7 +1437,7 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
                     ax, panel, series_list, projector, proj,
                     t0_ns=t0_ns, pid_color_map=pid_color_map,
                     sample_freq_hz=sample_freq_for[group_key],
-                    display_hz=display_hz, plan=plan)
+                    display_hz=display_hz, plan=plan, exit_lines=exit_lines)
                 continue
             _render_metric_panel(
                 ax, panel, series_list, projector, proj,
@@ -1429,6 +1448,7 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
                 display_hz=display_hz,
                 plan=plan,
                 fit_to_data=fit_axis_to_data,
+                exit_lines=exit_lines,
             )
 
     # ---------------- Strips + overlays ----------------

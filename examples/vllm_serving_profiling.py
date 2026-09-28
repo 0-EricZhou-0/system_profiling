@@ -279,6 +279,9 @@ def parser():
     ap.add_argument("--fit-axis-to-data", action="store_true",
                     help="passed to visualize_all.py: fit a panel's y-axis to its data when its "
                          "ceiling is far above it (see docs/tools/README.md)")
+    ap.add_argument("--no-exit-lines", action="store_true",
+                    help="passed to visualize_all.py: no dashed line at each exited process's "
+                         "end (see docs/tools/README.md)")
     ap.add_argument("--unit-scale-factor", type=float, default=2.0,
                     help="byte-unit threshold passed to visualize_all.py (default: %(default)s; "
                          "see docs/tools/README.md)")
@@ -361,7 +364,8 @@ def main():
                         os.path.join(args.output_dir, "session_metadata.pb"), "-o", png,
                         "--panel-layout", PANELS,
                         "--unit-scale-factor", str(args.unit_scale_factor)]
-                       + (["--fit-axis-to-data"] if args.fit_axis_to_data else []), check=True)
+                       + (["--fit-axis-to-data"] if args.fit_axis_to_data else [])
+                       + (["--no-exit-lines"] if args.no_exit_lines else []), check=True)
         print("figure:", png)
 
 

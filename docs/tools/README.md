@@ -168,10 +168,15 @@ process's memory down, `/proc/<pid>/statm` reads RSS 0 though its pidfd
 still says alive. The System probe checks the exit evidence at that
 reading (`/proc/<pid>/stat` gone, zombie, or `PF_EXITING`) and records
 the sample's memory as missing (NaN) instead of 0 — its CPU is kept; a
-process that frees its memory while alive keeps its real drop. On the
-per-process memory panels (bytes, e.g. RSS), each process that exited
-ends in a dashed vertical line in its colour from 0 up to its last
-measured value.
+process that frees its memory while alive keeps its real drop.
+
+**Exit lines.** On every per-process gauge panel (a level: bytes such as
+RSS, counts) and every cumulative panel, each process that exited ends in
+a dashed vertical line from 0 up to its series' last value at its end:
+black in the PNG, the theme's ink on the Bokeh page (black; #E0E0E0 in
+the dark theme). `--no-exit-lines` (both tools; passed through by
+`examples/vllm_serving_profiling.py`) leaves them out: the series then just
+stops at its last value, it is never drawn down to 0.
 
 **Session stop** (Bokeh page only; the PNG has no stop mark). Every
 metric panel, rate and cumulative, has a dashed vertical line marked

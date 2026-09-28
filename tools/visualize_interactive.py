@@ -410,6 +410,10 @@ _RENDER_BACKEND = "canvas"
 # peak-reference line isn't drawn right at the plot edge.
 _YLIM_HEADROOM = 1.10
 
+# --no-exit-lines turns this off (see panel_legend.end_lines). Set by
+# main() / build_static().
+_EXIT_LINES = True
+
 # --fit-axis-to-data (see units.OFFSCALE_FACTOR). Set by main() / build_static().
 _FIT_AXIS = False
 
@@ -528,6 +532,19 @@ def _legend_right(fig, items: list[tuple[str, list]], key: list | None = None) -
                        "right")
     if key:
         fig.add_layout(_legend(key, len(key), margin=2, spacing=3), "above")
+
+
+def _draw_end_lines(fig, series_list, plotted: dict, projector, p: panel_legend.Plan,
+                    t0_ns: int, scale_fn) -> None:
+    """Each exited process's end: a dashed line from 0 to its series' last
+    value, in the theme's ink (black light, #E0E0E0 dark), one segment
+    glyph for the panel (panel_legend.end_lines)."""
+    ends = panel_legend.end_lines(series_list, plotted, projector, p)
+    if ends:
+        x = [(t - t0_ns) / 1e9 for _k, t, _v in ends]
+        fig.segment(x0=x, x1=x, y0=[0.0] * len(ends), y1=[scale_fn(v) for _k, _t, v in ends],
+                    line_color=_THEMES[_THEME]["ink"], line_dash="dashed",
+                    line_width=_SERIES_LINE_WIDTH, name="end-lines")
 
 
 def _draw_plan(fig, p: panel_legend.Plan, sources: dict) -> tuple[list, list]:
@@ -688,13 +705,8 @@ def _build_panel(
             x=time_s, y=scale_fn(vals.astype(np.float64)),
         ))
     legend_items, legend_key = _draw_plan(fig, plan, cds_by_key)
-    # Per-process gauges: each exited process's end, dashed, 0 -> last value.
-    ends = panel_legend.end_lines(series_list, projection, projector, plan, unit)
-    if ends:
-        x = [(t - t0_ns) / 1e9 for _k, t, _v, _c in ends]
-        fig.segment(x0=x, x1=x, y0=[0.0] * len(ends), y1=[scale_fn(v) for _k, _t, v, _c in ends],
-                    line_color=[c for _k, _t, _v, c in ends], line_dash="dashed",
-                    line_width=_SERIES_LINE_WIDTH, name="end-lines")
+    if _EXIT_LINES and panel_legend.wants_end_lines("metric", unit):
+        _draw_end_lines(fig, series_list, projection, projector, plan, t0_ns, scale_fn)
 
     # Peak reference line + y-range. When the panel has a known peak,
     # pin the view to [0, peak*headroom] with hard bounds so pan/zoom
@@ -884,6 +896,8 @@ def _build_cumulative_panel(
         cds_by_key[key] = ColumnDataSource(data=dict(x=time_s, y=scale_fn(cum)))
         cumulative_projection[key] = (ts_ns, cum)
     legend_items, legend_key = _draw_plan(fig, plan, cds_by_key)
+    if _EXIT_LINES and panel_legend.wants_end_lines("cumulative", mc_pb.UNIT_UNSPECIFIED):
+        _draw_end_lines(fig, series_list, cumulative_projection, projector, plan, t0_ns, scale_fn)
 
     # Cumulative curves are non-negative monotonic — clamp the floor
     # at 0 and let the upper auto-fit.
@@ -1746,15 +1760,16 @@ def static_page(metadata, **kw) -> str:
 def build_static(metadata, *, catalog=None, panel_layout=None,
                  smooth_window_s: float = 0.0, display_hz: float = 0.0,
                  unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR,
-                 fit_axis_to_data: bool = False):
+                 fit_axis_to_data: bool = False, exit_lines: bool = True):
     """Load the trace whose session_metadata.pb is `metadata` and build
     the static page's Bokeh document (not written). Returns a
     StaticDocument, or None when there is nothing to render.
     unit_scale_factor: see units.py (ValueError < 1); fit_axis_to_data:
-    see --fit-axis-to-data."""
-    global _FIT_AXIS
+    see --fit-axis-to-data; exit_lines: see --no-exit-lines."""
+    global _FIT_AXIS, _EXIT_LINES
     units.set_scale_factor(unit_scale_factor)
     _FIT_AXIS = fit_axis_to_data
+    _EXIT_LINES = exit_lines
     metadata_path = Path(metadata).resolve()
     meta = _load_session_metadata(metadata_path)
     cat = (metric_catalog.load_catalog(catalog) if catalog
@@ -2042,7 +2057,7 @@ def _unit_scale_factor(text: str) -> float:
 
 
 def main() -> int:
-    global _RENDER_BACKEND, _THEME, _FIT_AXIS
+    global _RENDER_BACKEND, _THEME, _FIT_AXIS, _EXIT_LINES
     parser = argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("metadata", help="Path to session_metadata.pb")
@@ -2066,6 +2081,11 @@ def main() -> int:
     parser.add_argument("--allow-websocket-origin", action="append", default=None,
                         help="Live mode: extra origin allowed for the Bokeh "
                              "WebSocket. Repeatable. Default: '*' (any).")
+    parser.add_argument("--no-exit-lines", action="store_true",
+                        help="Don't end each exited process's series in a "
+                             "dashed line down to 0 (per-process gauge and "
+                             "cumulative panels); the series just stops at "
+                             "its last value.")
     parser.add_argument("--fit-axis-to-data", action="store_true",
                         help="Size a panel's y-axis to its data when its "
                              "ceiling (the Peak line) is more than "
@@ -2114,6 +2134,7 @@ def main() -> int:
     _THEME = args.theme
     units.set_scale_factor(args.unit_scale_factor)   # static and live mode alike
     _FIT_AXIS = args.fit_axis_to_data
+    _EXIT_LINES = not args.no_exit_lines
 
     metadata_path = Path(args.metadata).resolve()
     if args.live:
