@@ -79,7 +79,7 @@ function assignRows(items, lo, hi, pad, maxRows, maxShift) {
 
 function placeBarLabels(bars, lo, hi, widthUnits, textWidth, pad, maxRows, maxShift) {
   pad = pad || 0.0;
-  maxRows = maxRows === undefined ? 64 : maxRows;
+  maxRows = maxRows === undefined ? 64 : maxRows;          // null: no limit
   const per = widthUnits / Math.max(hi - lo, 1e-12);
   const out = new Array(bars.length).fill(null);
   let outside = [];                               // [index, anchor, text, width, visible]
@@ -91,14 +91,16 @@ function placeBarLabels(bars, lo, hi, widthUnits, textWidth, pad, maxRows, maxSh
     if (fit !== undefined) out[i] = ["in", fit, (a + b) / 2, (a + b) / 2, -1];
     else outside.push([i, (a + b) / 2, texts[0], textWidth(texts[0]), vis]);
   });
-  if (maxRows < 1)
+  if (maxRows !== null && maxRows < 1)
     outside = [];                                 // no label rows
   while (outside.length) {
     const items = outside.map(([_i, anc, _t, w]) => [(anc - lo) * per, w]);
-    const [rows, centres] = assignRows(items, 0.0, widthUnits, pad, maxRows, maxShift);
+    const cap = maxRows === null ? outside.length : maxRows;
+    const [rows, centres] = assignRows(items, 0.0, widthUnits, pad, cap, maxShift);
     const loads = new Array(Math.max(...rows) + 1).fill(0.0);
-    rows.forEach((r, k) => { loads[r] += items[k][1] + pad; });
-    if (Math.max(...loads) <= widthUnits) {
+    const count = new Array(loads.length).fill(0);
+    rows.forEach((r, k) => { loads[r] += items[k][1] + pad; count[r] += 1; });
+    if (loads.every((ld, r) => ld <= widthUnits || count[r] === 1)) {
       outside.forEach(([i, anc, text], k) => { out[i] = ["out", text, lo + centres[k] / per, anc, rows[k]]; });
       break;
     }

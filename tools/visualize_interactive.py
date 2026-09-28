@@ -967,14 +967,18 @@ _LABEL_SPREAD_JS = (_HERE / "label_spread.js").read_text()
 
 
 def _bar_labels(fig, x_range, key: str, bars: list, placed: list, *, row_y0: float,
-                row_h: float, max_rows: int, char_px: float, pad: float,
+                row_h: float, max_rows: int | None, char_px: float, pad: float,
                 max_shift: float | None, font: str, in_color: str, out_color: str,
-                leader_color: str) -> None:
+                leader_color: str, grow: dict | None = None) -> None:
     """Draw `placed` (label_spread.place_bar_labels of `bars` at the full
     view) and re-place it in JS on every x-range change. bars: dicts with
     left, right, texts (the preferred text first), y_in (a label's y on its
     bar), y_anchor (where its leader starts); off-bar row r is centred at
-    row_y0 + r * row_h (y grows downward: the y ranges are reversed)."""
+    row_y0 + r * row_h (y grows downward: the y ranges are reversed).
+    max_rows None: no row limit; then `grow` (fig, rows, height_of_rows:
+    y extent for n rows, px_per_unit) lets a view that needs more rows than
+    the figure has make it taller (never shorter: a resize costs a layout
+    pass)."""
     ins = dict(x=[], y=[], text=[])
     outs = dict(x=[], y=[], text=[])
     leads = dict(x0=[], y0=[], x1=[], y1=[])
@@ -1007,7 +1011,10 @@ def _bar_labels(fig, x_range, key: str, bars: list, placed: list, *, row_y0: flo
     relayout = CustomJS(args=dict(rng=x_range, bars=bar_src, ins=in_src, outs=out_src,
                                   lead=lead_src, key=key, W=_FRAME_WIDTH, char=char_px,
                                   pad=pad, cap=max_rows, shift=max_shift, y0=row_y0, rh=row_h,
-                                  wait=_RELAYOUT_DEBOUNCE_MS),
+                                  wait=_RELAYOUT_DEBOUNCE_MS,
+                                  gfig=(grow or {}).get("fig"), grows=(grow or {}).get("rows", 0),
+                                  gbase=(grow or {}).get("base", 0.0),
+                                  grow_h=(grow or {}).get("row", 0.0), gpx=(grow or {}).get("px", 0.0)),
                         code=_LABEL_SPREAD_JS + """
         const run = () => {
             const t = performance.now(), d = bars.data;
@@ -1024,6 +1031,16 @@ def _bar_labels(fig, x_range, key: str, bars: list, placed: list, *, row_y0: flo
                 E.x0.push(p[3]); E.y0.push(d.y_anchor[i]); E.x1.push(p[2]); E.y1.push(y - rh * 0.42);
             });
             ins.data = I; outs.data = O; lead.data = E;
+            if (gfig) {                      // grow the figure for more label rows
+                const rows = (window.cuptiLabelRows = window.cuptiLabelRows || {});
+                const need = placed.reduce((m, p) => (p && p[0] === "out" ? Math.max(m, p[4] + 1) : m), 0);
+                if (need > (rows[key] || grows)) {
+                    rows[key] = need;
+                    const h = gbase + need * grow_h;
+                    gfig.y_range.start = h;
+                    gfig.frame_height = Math.round(h * gpx);
+                }
+            }
             (window.cuptiRelayoutMs = window.cuptiRelayoutMs || {})[key] = performance.now() - t;
         };
         const timers = (window.cuptiRelayoutTimers = window.cuptiRelayoutTimers || {});
@@ -1178,8 +1195,12 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
     # bar where the label fits at the full view, else in rows under the
     # lanes with a leader, spread so none overlaps another.
     text_px = lambda t: len(t) * _TIMELINE_CHAR_PX
-    placed, n_rows = process_timeline.place_labels(procs, lanes, t0_ns, t_end_ns,
-                                                   _FRAME_WIDTH, text_px, pad_units=10.0)
+    # Laid out for the page's first view: the shared DataRange1d's default
+    # padding (range_padding 0.1, half each side; the start clamped at 0 by
+    # its bounds). The JS relayout takes over on every change.
+    placed, n_rows = process_timeline.place_labels(
+        procs, lanes, t0_ns, t_end_ns, _FRAME_WIDTH, text_px, pad_units=10.0,
+        view_end_s=(t_end_ns - t0_ns) / 1e9 * 1.05)
     height = process_timeline.height_in_lanes(n_lanes, n_rows)
     tools, box_zoom, wheel_zoom = _make_plot_tools()
     fig = figure(
@@ -1257,9 +1278,12 @@ def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: 
                          ("in" if lab.row < 0 else "out", lab.text, lab.x_s, lab.anchor_s, lab.row))
     _bar_labels(fig, x_range, "timeline", tl_bars, tl_placed,
                 row_y0=process_timeline.label_row_y(n_lanes, 0), row_h=process_timeline.LABEL_ROW,
-                max_rows=n_rows, char_px=_TIMELINE_CHAR_PX, pad=10.0,
+                max_rows=None, char_px=_TIMELINE_CHAR_PX, pad=10.0,
                 max_shift=process_timeline.LABEL_MAX_SHIFT * _FRAME_WIDTH, font="7pt",
-                in_color="white", out_color=theme["label"], leader_color=theme["leader"])
+                in_color="white", out_color=theme["label"], leader_color=theme["leader"],
+                grow=dict(fig=fig, rows=n_rows, px=_LANE_PX,
+                          base=n_lanes + process_timeline.LABEL_GAP,
+                          row=process_timeline.LABEL_ROW))
     # At the pointer, as on the region strip (a bar's centre can be off-screen).
     fig.add_tools(HoverTool(renderers=bars, point_policy="follow_mouse", tooltips=[
         ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),

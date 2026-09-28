@@ -177,6 +177,16 @@ def _burst(n=120):
     return rows
 
 
+def test_no_label_left_out_however_many_rows():
+    """A burst too dense for 16 rows: rows are added, every process keeps
+    its label (no row limit on the timeline)."""
+    procs = pt.build(_table(_burst(600)), 0, 60 * S)
+    lanes, _n = pt.pack_lanes(procs)
+    labels, rows = pt.place_labels(procs, lanes, 0, 60 * S, 1400.0, lambda t: len(t) * 3.6)
+    assert {lab.key for lab in labels} == {p.key for p in procs}
+    assert rows > 16
+
+
 def test_every_process_labelled_without_overlap():
     procs = pt.build(_table(_burst()), 0, 60 * S)
     lanes, n = pt.pack_lanes(procs)
@@ -185,7 +195,7 @@ def test_every_process_labelled_without_overlap():
     labels, rows = pt.place_labels(procs, lanes, 0, 60 * S, width, tw)   # default spacing
     assert {lab.key for lab in labels} == {p.key for p in procs}
     out = [lab for lab in labels if lab.row >= 0]
-    assert out and 1 <= rows <= pt.LABEL_MAX_ROWS
+    assert out and rows >= 1
     per_s = width / 60
     for r in range(rows):
         iv = sorted((lab.x_s * per_s - tw(lab.text) / 2, lab.x_s * per_s + tw(lab.text) / 2)

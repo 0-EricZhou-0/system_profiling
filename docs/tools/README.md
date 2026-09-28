@@ -131,13 +131,11 @@ under the lanes, joined to its bar by a thin grey leader drawn beneath
 the bars. The outside labels never overlap one another or a bar: they
 are spread along the axis, at least 8 pt apart and the first row clear
 of the lowest lane by more than half a lane (`tools/label_spread.py`,
-the same routine the event and region strips use) in as many rows as it takes — up to 16 —
+the same routine the event and region strips use) in as many rows as it takes
 for each to sit within 8% of the axis width of its bar; a burst of
 short-lived compilers (a cold vLLM start, ~90 processes in a few
-seconds) becomes a few rows of labels near the burst. If even 16 rows
-cannot hold them all, the labels of the narrowest bars are left out
-(the hover still names them) rather than overlap
-(`label_spread.place_bar_labels`).
+seconds) becomes a few rows of labels near the burst. No process is
+left unlabelled (`label_spread.place_bar_labels` with no row limit).
 Listed roots are outlined solid, orphans — discovered processes whose
 parent is not in the trace — dashed. A thin line with a dot on the
 parent's bar marks each fork: from the parent's bar at the child's start

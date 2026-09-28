@@ -102,8 +102,8 @@ def assign_rows(items: list[tuple[float, float]], lo: float, hi: float,
 
 
 def place_bar_labels(bars: list[tuple[float, float, list[str]]], lo: float, hi: float,
-                     width_units: float, text_width, pad: float = 0.0, max_rows: int = 64,
-                     max_shift: float | None = None) -> list:
+                     width_units: float, text_width, pad: float = 0.0,
+                     max_rows: int | None = 64, max_shift: float | None = None) -> list:
     """Labels for bars (and points: left == right) seen through the view
     [lo, hi] (data units) drawn width_units wide. bars: [(left, right,
     texts)], texts in order of preference. Each bar gets, in input order:
@@ -117,9 +117,11 @@ def place_bar_labels(bars: list[tuple[float, float, list[str]]], lo: float, hi: 
       None                            the bar is out of view, or its label
                                       finds no room.
 
-    Off-bar labels: assign_rows over the view's width, at most max_rows
-    rows, so none overlaps another; when they cannot all fit, those of the
-    narrowest visible bars are left out until the rest do. x in data units.
+    Off-bar labels: assign_rows over the view's width, so none overlaps
+    another. max_rows None: as many rows as it takes, nothing left out (a
+    label alone in its row always fits); else at most max_rows rows, and
+    when they cannot all fit, those of the narrowest visible bars are left
+    out until the rest do. x in data units.
     tools/label_spread.js is the same, line for line, for the Bokeh page."""
     per = width_units / max(hi - lo, 1e-12)
     out: list = [None] * len(bars)
@@ -134,15 +136,17 @@ def place_bar_labels(bars: list[tuple[float, float, list[str]]], lo: float, hi: 
             out[i] = ("in", fit, (a + b) / 2, (a + b) / 2, -1)
         else:
             outside.append((i, (a + b) / 2, texts[0], text_width(texts[0]), vis))
-    if max_rows < 1:
+    if max_rows is not None and max_rows < 1:
         outside = []                              # no label rows
     while outside:
         items = [((anc - lo) * per, w) for _i, anc, _t, w, _v in outside]
-        rows, centres = assign_rows(items, 0.0, width_units, pad, max_rows, max_shift)
-        loads = [0.0] * (max(rows) + 1)
+        cap = len(outside) if max_rows is None else max_rows
+        rows, centres = assign_rows(items, 0.0, width_units, pad, cap, max_shift)
+        loads, count = [0.0] * (max(rows) + 1), [0] * (max(rows) + 1)
         for r, (_c, w) in zip(rows, items):
             loads[r] += w + pad
-        if max(loads) <= width_units:
+            count[r] += 1
+        if all(ld <= width_units or n == 1 for ld, n in zip(loads, count)):
             for (i, anc, text, _w, _v), r, c in zip(outside, rows, centres):
                 out[i] = ("out", text, lo + c / per, anc, r)
             break

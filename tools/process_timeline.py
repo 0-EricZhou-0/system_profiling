@@ -147,29 +147,31 @@ class ProcessLabel:
     row: int                   # -1: inside its bar; else its row under the lanes
 
 
-LABEL_MAX_ROWS = 16      # outside-label rows at most
 LABEL_MAX_SHIFT = 0.08   # a label within this fraction of the axis width of its bar, rows allowing
 
 
 def place_labels(procs: list[TimelineProcess], lanes: dict, t0_ns: int, t_end_ns: int,
-                 width_units: float, text_width, pad_units: float = 8.0) -> tuple[list, int]:
+                 width_units: float, text_width, pad_units: float = 8.0,
+                 view_end_s: float | None = None) -> tuple[list, int]:
     """A label for every process: `comm (pid)` inside its bar where it
     fits (else `comm` alone); otherwise outside, in rows under the lanes,
     joined to the bar by a leader. The outside labels are spread with
     label_spread.assign_rows over the width of the axis, so none overlaps
     another, and none overlaps a bar (they are under the lanes): as many
-    rows as it takes (up to LABEL_MAX_ROWS) for each to stay within
-    LABEL_MAX_SHIFT of the axis width from its bar; beyond that, the
-    narrowest bars' labels are left out (label_spread.place_bar_labels).
+    rows as it takes for each to stay within LABEL_MAX_SHIFT of the axis
+    width from its bar; no label is ever left out
+    (label_spread.place_bar_labels, max_rows None).
     Units:
     whatever text_width(text) and width_units measure the axis width in
-    (points, pixels). Returns (labels, number of label rows)."""
+    (points, pixels). view_end_s: the view's end (s from t0) when the axis
+    runs past the trace (the Bokeh page's padding); default the trace's end.
+    Returns (labels, number of label rows)."""
     import label_spread
     span_s = max((t_end_ns - t0_ns) / 1e9, 1e-9)
     bars = [((p.start_ns - t0_ns) / 1e9, (p.end_ns - t0_ns) / 1e9,
              [f"{p.comm} ({p.pid})", p.comm]) for p in procs]
     placed = label_spread.place_bar_labels(
-        bars, 0.0, span_s, width_units, text_width, pad_units, max_rows=LABEL_MAX_ROWS,
+        bars, 0.0, span_s if view_end_s is None else view_end_s, width_units, text_width, pad_units, max_rows=None,
         max_shift=LABEL_MAX_SHIFT * width_units)
     labels, rows = [], []
     for p, pl in zip(procs, placed):

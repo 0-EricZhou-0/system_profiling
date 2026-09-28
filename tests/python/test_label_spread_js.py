@@ -32,7 +32,7 @@ def _cases(n=300):
         lo = rng.uniform(0, 0.6 * span) if k % 2 else 0.0
         hi = lo + rng.uniform(0.05, 1.0) * (span - lo)
         cases.append(dict(bars=bars, lo=lo, hi=hi, width=rng.choice([300.0, 860.0]),
-                          pad=rng.choice([0.0, 6.0, 10.0]), max_rows=rng.choice([0, 1, 2, 7, 16]),
+                          pad=rng.choice([0.0, 6.0, 10.0]), max_rows=rng.choice([None, 0, 1, 2, 7, 16]),
                           max_shift=rng.choice([None, 0.08 * 860.0])))
     return cases
 
@@ -74,7 +74,7 @@ def test_off_bar_labels_never_overlap():
         rows: dict = {}
         for p in placed:
             if p and p[0] == "out":
-                assert p[4] < c["max_rows"]
+                assert c["max_rows"] is None or p[4] < c["max_rows"]
                 w = len(p[1]) * CHAR
                 x = (p[2] - c["lo"]) * per
                 rows.setdefault(p[4], []).append((x - w / 2, x + w / 2))
@@ -83,3 +83,14 @@ def test_off_bar_labels_never_overlap():
             for (a0, a1), (b0, _b1) in zip(spans, spans[1:]):
                 assert a1 + c["pad"] <= b0 + 1e-6
             assert spans[0][0] >= -1e-6 and spans[-1][1] <= c["width"] + 1e-6
+
+
+def test_no_row_limit_labels_every_bar_in_view():
+    """max_rows None (the process timeline): every bar in view gets a label."""
+    for c in _cases(120):
+        bars = [tuple(b[:2]) + (b[2],) for b in c["bars"]]
+        placed = label_spread.place_bar_labels(bars, c["lo"], c["hi"], c["width"],
+                                               lambda t: len(t) * CHAR, c["pad"], None,
+                                               c["max_shift"])
+        for (left, right, _t), p in zip(bars, placed):
+            assert (p is None) == (left > c["hi"] or right < c["lo"])

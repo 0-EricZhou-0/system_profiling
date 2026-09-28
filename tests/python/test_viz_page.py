@@ -65,6 +65,10 @@ def test_labels_re_placed_on_every_view(tmp_path):
             [cb] = [c for c in cbs[change] if c.args.get("key") == key]
             assert "function placeBarLabels" in cb.code and "setTimeout(run, wait)" in cb.code
             assert cb.args["wait"] == vi._RELAYOUT_DEBOUNCE_MS
+            if key == "timeline":                  # no row limit; the figure grows instead
+                assert cb.args["cap"] is None and cb.args["gfig"] is doc.timeline
+            else:
+                assert cb.args["cap"] == vi._STRIP_ROWS and cb.args["gfig"] is None
     assert _texts(regions, "regions-on-bar") == ["load"]
     assert _texts(regions, "regions-off-bar") == ["a rather long region name"]
     assert _texts(events, "events-on-bar") == []                     # a point holds no label
