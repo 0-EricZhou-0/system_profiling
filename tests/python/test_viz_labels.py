@@ -118,3 +118,26 @@ def test_display_names(fqn, label):
     d = descriptor(fqn)
     s = metric_layout.ResolvedSeries(d.fqn, d.scope, 1, d)
     assert metric_layout.disambiguate_short_labels([s])[(d.fqn, 1)] == label
+
+
+def test_default_title_names_what_the_series_share(tmp_path):
+    pytest.importorskip("matplotlib")
+    import matplotlib
+    matplotlib.use("Agg")
+    import viz_trace
+    import visualize_all
+    rd, wr = "pcie__read_bytes.sum.per_second", "pcie__write_bytes.sum.per_second"
+    rx, tx = "nvlrx__bytes.sum.per_second", "nvltx__bytes.sum.per_second"
+    assert metric_layout.shared_title([_gpu(rd), _gpu(wr)]) == "PCIe Bytes / s (sum)"
+    assert metric_layout.shared_title([_gpu(rx), _gpu(tx)]) == "NVLink Bytes / s (sum)"
+    assert metric_layout.shared_title([_gpu(rd)]) == "PCIe Read Bytes / s (sum)"
+    meta = viz_trace.write_trace(str(tmp_path / "t"), [viz_trace.proc(10, discovered=False)],
+                                 gpu_fqns=[rd, wr, "sm__cycles_active.avg.pct_of_peak_sustained_elapsed"])
+    r = visualize_all.build_figure(meta)
+    titles = {p.series_glob: ax.get_title(loc="left") for p, _s, k, ax in r.panel_axes if k == "metric"}
+    assert titles["pcie__*_bytes.sum.per_second"] == "PCIe Bytes / s (sum)"
+    assert titles["sm__cycles_active.*.pct_of_peak_*"] == "SM Utilization (%)"   # layout title wins
+    pytest.importorskip("bokeh")
+    import visualize_interactive
+    doc = visualize_interactive.build_static(meta)
+    assert "PCIe Bytes / s (sum)" in [t for _f, _b, t in doc.folds]

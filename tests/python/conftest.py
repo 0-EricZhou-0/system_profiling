@@ -13,3 +13,16 @@ sys.path.insert(0, os.path.join(_REPO, "build", "python"))
 
 # Generated protobuf modules: generated/proto/{events,session_metadata,profiler_config}_pb2.py
 sys.path.insert(0, os.path.join(_REPO, "generated", "proto"))
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _close_matplotlib_figures():
+    """The visualizer tests build figures (visualize_all.build_figure);
+    close them after each test so they do not pile up."""
+    yield
+    plt = sys.modules.get("matplotlib.pyplot")
+    if plt is not None:
+        plt.close("all")

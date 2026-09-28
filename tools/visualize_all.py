@@ -499,18 +499,13 @@ def _plot_styled(ax, time_s, y, key, plan: _LegendPlan) -> None:
 
 
 def _panel_title(panel, series_list: list[metric_layout.ResolvedSeries]) -> str:
-    """Use the pbtxt-supplied title verbatim if set; otherwise derive
-    one from the first resolved series. Falls through to the
-    descriptor's `description` (catalog-declared) before consulting
-    `metric_suffix.label_for(...)` (suffix-table derivation)."""
+    """The layout's title if it gives one; otherwise what the panel's
+    series share (metric_layout.shared_title)."""
     if panel.title:
         return panel.title
     if not series_list:
         return panel.series_glob
-    d = series_list[0].descriptor
-    if d.description:
-        return d.description
-    return metric_suffix.label_for(d.entity, d.counter, d.rollup, d.submetric)
+    return metric_layout.shared_title(series_list)
 
 
 def _render_metric_panel(

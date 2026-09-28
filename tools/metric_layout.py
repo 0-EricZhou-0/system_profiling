@@ -168,6 +168,32 @@ def statistic_suffix(d: MetricDescriptor) -> str:
     return f" ({_suffix.ROLLUP_LABELS[r]})" if r in _suffix.ROLLUP_LABELS else ""
 
 
+def shared_title(series_list: list[ResolvedSeries]) -> str:
+    """Default title of a panel whose layout gives none: for one metric,
+    its description (or suffix-derived label); for several, what their
+    suffix-derived labels share — the words present in every one, in
+    order ("PCIe Read Bytes / s (sum)" + "PCIe Write Bytes / s (sum)" ->
+    "PCIe Bytes / s (sum)")."""
+    if not series_list:
+        return ""
+    fqns = list(dict.fromkeys(s.fqn for s in series_list))
+    first = series_list[0].descriptor
+    if len(fqns) == 1:
+        return first.description or _suffix.label_for(first.entity, first.counter,
+                                                        first.rollup, first.submetric)
+    by_fqn = {s.fqn: s.descriptor for s in series_list}
+    titles = [_suffix.label_for(d.entity, d.counter, d.rollup, d.submetric).split()
+              for d in (by_fqn[f] for f in fqns)]
+    words = []
+    rest = [list(t) for t in titles[1:]]
+    for w in titles[0]:
+        if all(w in r for r in rest):
+            words.append(w)
+            for r in rest:
+                r.remove(w)
+    return " ".join(words) or " / ".join(" ".join(t) for t in titles)
+
+
 def disambiguate_short_labels(
     series_list: list[ResolvedSeries],
 ) -> dict[tuple[str, object], str]:
