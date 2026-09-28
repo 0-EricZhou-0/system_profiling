@@ -51,6 +51,7 @@ Every machine- or user-specific value is an argument:
 | `--scan-interval-ms` | 100 | descendant tracking scan interval |
 | `--flush-ms` | 5000 | flush interval of every probe |
 | `--disk-device` | every whole block device in `/sys/block` | devices for the per-device panel (repeatable) |
+| `--launcher-cpus` | not pinned | pin this launcher, which hosts the GPU probe, e.g. `8-15`; keep it off the L3 cache (CCD) of vLLM's cores, see [GPU probe cost and placement](../system-guide.md#gpu-probe-cost-and-placement) |
 | `--gpu`, `--gpu-device`, `--gpu-hz` | off, 0, 1000 | GPU PM sampling from the launcher (the library's default is 100 Hz; 100–1000 Hz cost the same) |
 | `--load-seconds` | 90 | duration of the request load |
 | `--ready-timeout` | 900 | seconds to wait for `/v1/models` |
@@ -158,13 +159,14 @@ every context on the GPU, vLLM's among them. Measured in this example's runs:
 
 SM activity follows vLLM's load, so **from a launcher the GPU panels are
 meaningful, device-wide**. It did not conflict with vLLM: every run started
-and served every request. **It does cost throughput**: at 500 Hz, in 12
-interleaved pairs against the same server with and without the probe
-(System and Disk at 50 Hz in both), vLLM served **6.9% fewer requests per
-second** (95% CI 4.8–9.0%) and mean time-to-first-token rose 23%; the
-launcher hosting the probe used 93% of one core throughout, competing with
-the server for CPUs — whether that or the counter collection is the cause
-was not isolated. `--gpu` is off by default.
+and served every request. What it costs, and where to put the launcher
+(off the L3 cache of vLLM's cores, `--launcher-cpus`): [GPU probe cost and
+placement](../system-guide.md#gpu-probe-cost-and-placement). Before
+2026-09-28 the probe's collection loop re-initialized an 817 MB buffer
+every ~60 ms, and at 500 Hz vLLM served 6.9% fewer requests per second;
+that loop is gone. `--gpu` is off by default. Comparing runs with and
+without `--gpu`: the probe's CUDA context itself makes a running vLLM
+~5–8% faster per step (same page), so control for it.
 
 What the launcher cannot give you: anything per context or per kernel
 (the counters are whole-device, so another job on the same GPU would show up

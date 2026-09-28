@@ -75,8 +75,14 @@ Each profiler runs independently with its own sampling frequency, flush interval
 │                                                   │
 │ ┌────────────────┐  ┌───────────────────────────┐ │
 │ │ Decode Thread  │  │ Flush Thread              │ │
-│ │ (HW buf drain) │  │ (periodic .pb write)      │ │
-│ └────────────────┘  └───────────────────────────┘ │
+│ │ (HW buf drain, │  │ (periodic .pb write)      │ │
+│ │  1/interval)   │  │                           │ │
+│ └───┬────────────┘  └───────────────────────────┘ │
+│ ┌───┴────────────┐                                │
+│ │ Eval Worker    │  two counter-data images:      │
+│ │ (evaluate,     │  decode into one while the     │
+│ │  re-init)      │  worker evaluates the other    │
+│ └────────────────┘                                │
 └───────────────────────────────────────────────────┘
 ```
 
@@ -137,9 +143,10 @@ Both subsystems run a single thread that samples and serializes inline — there
 GPU Performance Monitor HW counters
         ↓  (sampled at configurable interval)
 512 MB GPU ring buffer
-        ↓  (drained every 5 ms by decode thread)
+        ↓  (drained once per decode_interval_ms, 1 s, by the decode thread,
+        ↓   DecodeData until END_OF_RECORDS, into one of two counter-data images)
 cuptiPmSamplingDecodeData() → raw counter samples
-        ↓
+        ↓  (the eval worker, while the next decode uses the other image)
 cuptiProfilerHostEvaluateToGpuValues() → metric doubles
         ↓
 SamplerRange vector (mutex-protected, host memory)
@@ -773,12 +780,19 @@ python tools/visualize_single.py -i my_trace.pb -o my_trace.png
 ## Configuration reference: sidecar mode, descendant tracking, process table
 
 Every knob these features added, where it lives, and its default, plus
-the System and Disk sampling rates. The other longer-standing fields
-(flush intervals, output files, devices, GPU metrics) are described with
-their config structs under [Public API reference](#public-api-reference).
+the sampling rates, the GPU probe's collection knobs, the flush intervals
+and signal handling. The other longer-standing fields (output files,
+devices, GPU metrics) are described with their config structs under
+[Public API reference](#public-api-reference).
 
 | Knob | Where | Default | What it does |
 |---|---|---|---|
+| `gpu.sampling_frequency_hz` | `.pbtxt` / proto `GPUProfilerConfig.sampling_frequency_hz` (3); C++ `ProfilerConfig::samplingFrequencyHz` | **100 Hz** (unset or 0 = 100; until 2026-09-28: 10 kHz) | PM samples per second. 100–1000 Hz cost the same; see [GPU probe cost and placement](#gpu-probe-cost-and-placement) |
+| `gpu.decode_interval_ms` | proto `GPUProfilerConfig.decode_interval_ms` (9); C++ `ProfilerConfig::decodeIntervalMs` | **1000 ms** (0 = 1000; until 2026-09-28: a fixed 5 ms) | How often the host collects the samples the GPU buffered: one decode pass (drain the hardware buffer, evaluate) per interval. The wait is interruptible: `stop()` does not wait it out |
+| `gpu.max_samples` | proto `GPUProfilerConfig.max_samples` (5); C++ `ProfilerConfig::maxSamples` | **0 = sized for one decode pass**: `ceil(rate × decode_interval × 1.25) + 64` (e.g. 189 / 689 / 1314 at 100 / 500 / 1000 Hz and 1 s; until 2026-09-28: 50000) | Capacity of the counter-data image, in samples, per decode pass; two such images (double-buffered), ~16 KB of host RAM per slot with 4 metrics. An explicit value is used as is; one below a decode pass gets a warning, because CUPTI loses samples once the image fills (counted in `GpuDecodeStats`) |
+| `gpu.hw_buffer_size` | proto `GPUProfilerConfig.hw_buffer_size` (4); C++ `ProfilerConfig::hwBufferSize` | 512 MiB | GPU-side buffer. Must hold two decode intervals of samples at up to 16 KiB each, or `Configure()` fails with `InvalidConfig` |
+| `flush_interval_ms` (every probe) | proto `GPUProfilerConfig.flush_interval_ms` (7), `SystemProfilerConfig` (4), `DiskProfilerConfig` (5), `EventsProfilerConfig` (2); C++ `flushIntervalMs` of each config struct | **5000 ms** for every probe (0 = 5000; until 2026-09-28 the GPU's 0 meant "write only at stop()", its struct default was 10 s) | How often each probe writes its buffered samples, one write per flush. No probe has a flush-at-end-only mode. GPU: must not be less than `decode_interval_ms` (`InvalidConfig`). A flush slower than the interval is warned about, rate-limited, and counted (`FlushStats.slow_flushes`); nothing is dropped |
+| `disable_signal_handlers` | proto `ProfilerSuiteConfig.disable_signal_handlers` (10) | `false` = handlers installed | See [Stopping, signals and process exit](#stopping-signals-and-process-exit). `true` leaves the host's signal dispositions untouched |
 | `system.sampling_frequency_hz`, `disk.sampling_frequency_hz` | `.pbtxt` / proto `SystemProfilerConfig.sampling_frequency_hz` (2), `DiskProfilerConfig.sampling_frequency_hz` (2); C++ `SystemProfilerConfig::samplingFrequencyHz`, `DiskProfilerConfig::samplingFrequencyHz` | **100 Hz** both (unset or 0 = 100; 2026-09-25 to 09-28: 50; before: System 100, Disk 10) | Ticks per second of the System probe (`/proc/stat`, `/proc/meminfo`, every tracked PID) and of the Disk probe (`/proc/diskstats`, every tracked PID's `/proc/<pid>/io`). What each rate costs: [Sampling frequency guidance](#sampling-frequency-guidance) |
 | `system.mode`, `disk.mode` | `.pbtxt` / proto `SystemProfilerConfig.mode` (6), `DiskProfilerConfig.mode` (7); C++ `SystemProfilerConfig::mode`, `DiskProfilerConfig::mode` | `SYSTEM_PROBE_MODE_LEGACY` (unset = LEGACY) | `SYSTEM_PROBE_MODE_SIDECAR` runs that probe's sampler and flush threads in the `cupti-profiler-sidecar` process instead of this one, so their CPU is not charged to the workload. One sidecar serves both probes. See [Sidecar mode](#sidecar-mode) |
 | `sidecar_cpus` | `.pbtxt` / proto `ProfilerSuiteConfig.sidecar_cpus` (9, repeated) | empty = no pinning | CPUs the sidecar and all its threads are pinned to. A CPU outside this process's allowed set fails `Configure()` with `SidecarAffinityFailed`. Ignored, with a note, when no probe is in SIDECAR mode |
@@ -791,7 +805,49 @@ their config structs under [Public API reference](#public-api-reference).
 | `adopt_orphans()` | Python `cupti_profiler.adopt_orphans()`; C++ `EnableChildSubreaper()` (`<cupti_profiler/child_subreaper.h>`) | off; the library never sets it | Makes the calling process (the launcher) a child subreaper, so orphaned descendants are re-parented to it, and reaps those discovery saw adopted. See [what it changes](#what-changes-when-adopt_orphans-is-enabled) |
 | `CUPTI_PROFILER_PROC_ROOT` | environment variable | unset = `/proc` | **Test-only, not supported.** Directory read instead of `/proc` for the process-table reads (`children`, `stat`, `comm`). See [the hook](#testing-hook-cupti_profiler_proc_root) |
 | kill-after-read hook | C++ `testing::KillAfterNextRead(pid, probe)` (`<cupti_profiler/testing.h>`); Python `_native._testing_kill_after_next_read(pid, probe)`; for the sidecar, environment variable `CUPTI_PROFILER_TEST_KILL_AFTER_READ=<system\|disk>:<pid>:<n>` | disarmed | **Test-only, not supported.** Kills `pid` right after the System or Disk probe reads it (in-process: the next read; sidecar: its n-th read, armed at sidecar startup) and marks that reading foreign, to show the read-then-verify order discards it. Disarmed: one atomic load per reading |
+| slow writer, backlog report period | C++ `testing::SetFlushDelayMs(ms)`, `testing::SetBacklogReportPeriodMs(ms)` (`<cupti_profiler/testing.h>`); Python `_native._testing_set_flush_delay_ms(ms)`, `_testing_set_backlog_report_period_ms(ms)` | off, 30000 ms | **Test-only, not supported.** Every in-process periodic flush takes `ms` longer; the rate-limited backlog summary period |
 | flush gate | C++ `<cupti_profiler/testing.h>`; Python `_native._testing_arm_flush_gate()`, `_testing_wait_flush_held()`, `_testing_release_flush_gate()` | disarmed | **Test-only, not supported.** Holds an in-process flush between writing and committing removals. See [the hook](#testing-hook-flush-gate) |
+
+### Stopping, signals and process exit
+
+`stop()` ends every probe: the GPU's final decode, every probe's last
+flush, the sidecar's final flush, the session manifest. It runs once,
+whichever comes first of:
+
+- **the host calling `stop()`**. It returns promptly: every sample, flush
+  and decode thread waits on a condition variable that `stop()` wakes;
+- **a fatal signal** (unless `disable_signal_handlers`). `start()`
+  installs handlers for the catchable signals whose default action ends
+  the process: SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1/2, SIGALRM,
+  SIGPIPE, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGIO, SIGPWR, and the
+  crash signals SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT, SIGSYS. The
+  handler hands the flush to a normal thread and waits for it (up to 10 s;
+  2 s for a crash), then runs the handler that was there before (Python's
+  SIGINT still raises `KeyboardInterrupt`), or restores the default action
+  and re-raises, so the exit status and any core dump are unchanged. A
+  second signal during the flush exits at once. Ignored signals stay
+  ignored. The library's own threads block these signals, so the handler
+  runs on one of the host's threads. A handler the host installs after
+  `start()` replaces this one for that signal. `stop()` puts the previous
+  dispositions back. SIGKILL and SIGSTOP cannot be caught: up to one flush
+  interval of samples is lost then;
+- **process exit without `stop()`**: the Python package's `atexit` hook,
+  or for a bare C `exit()` / return from `main`, the library's own
+  `std::atexit` handler, stops everything still running, with one
+  `[cupti-profiler] warning: stop() was not called; ...` line. `_exit()`
+  runs neither;
+- **the suite (or a standalone probe) being destroyed while running**,
+  with the same warning.
+
+In SIDECAR mode the sidecar also stops on its own, final flush included,
+on its own terminating signals and when the host process exits (it holds
+a pidfd on it).
+
+**Decode health.** Every GPU trace frame carries `GpuDecodeStats` per
+device: decode calls, samples kept, samples missing between two kept ones,
+invalid samples dropped, counter-data-image-full and hardware-buffer
+overflow counts. A clean run has all loss counters at 0; anything else is
+also printed as a `[cupti-profiler] warning:`.
 
 Fixed behaviour, not configurable: exit detection (a pidfd per tracked
 process, polled every sample tick) is always on; `comm` is re-read every
@@ -1754,12 +1810,50 @@ of it. vLLM's throughput with the 50 Hz sidecar attached was **−0.43%**
 server and request set); every latency mean moved by less than 1.4% at the
 CI's far end.
 
-**GPU probe.** The GPU probe runs in the calling process, not the sidecar.
-In the vLLM example at 500 Hz (2026-09-25, 12 interleaved pairs, same setup
-plus `--gpu`), serving throughput dropped **6.9%** (95% CI 4.8–9.0%) and
-mean TTFT rose 23%, while the launcher hosting the probe used 93% of one
-core during load. Whether that CPU (competing with vLLM for the job's
-CPUs) or the counter collection itself is the cause was not isolated.
+### GPU probe cost and placement
+
+The GPU probe runs in the calling process (the launcher), not in the
+sidecar: a decode thread (`cupti-decode<N>`) collects what the GPU's PM
+sampler buffered once per `decode_interval_ms` (1 s), a worker
+(`cupti-eval<N>`) evaluates the samples, and a flush thread
+(`cupti-gpu-flush`) writes them every `flush_interval_ms` (5 s).
+
+**What it costs** (measured 2026-09-27/28 against a warm vLLM 0.29 server,
+`Qwen3.5-0.8B` on an H100 NVL, deterministic load, paired runs; details in
+the phase 6b/7 measurements):
+
+| | S64 decode (ITL) | prefill / TTFT | GPU power |
+|---|---|---|---|
+| PM sampling itself, launcher off vLLM's L3 | **+0.16–0.18%** | **≈ +1%** | +18 W |
+| same, at 100, 500 and 1000 Hz | the same (a fixed "PM sampling on" cost, not per sample) | the same | the same |
+
+- **The rate does not change the cost** from 100 to 1000 Hz. Choose it for
+  time resolution and trace size: about 4 / 20 / 40 kB/s at 100 / 500 /
+  1000 Hz with 4 metrics.
+- **Keep the process that hosts the GPU probe off vLLM's L3 cache.** On
+  these AMD EPYC nodes 8 cores share one L3 (a CCD). With the collection
+  loop the library had until 2026-09-28 (an 817 MB counter-data image
+  re-initialized every ~60 ms, 92% of a core), the launcher on vLLM's CCD
+  slowed vLLM by **+7.5% (S64 ITL) and +10–16% (TTFT)**; the same launcher
+  on another CCD or the other NUMA node cost **+0.13% / +0.19%**. The
+  collection is now a pass per second into a small image (under 2% of a
+  core at 1 kHz), but the placement advice stands: whatever the host
+  process does, it should not share an L3 with the serving engine. Find
+  the L3 of each CPU with `lscpu -e` (the `L3` column of `CACHE`) or
+  `/sys/devices/system/cpu/cpu<N>/cache/index3/shared_cpu_list`, and pin
+  the launcher with `taskset`/`sched_setaffinity` (the vLLM example has
+  `--launcher-cpus`).
+- **A CUDA context changes vLLM's speed.** The first CUDA context created
+  anywhere on the node after a process has its own (another process's, on
+  either GPU, or one created and destroyed in the process itself) makes
+  that process's back-to-back kernels start sooner (the gap between kernels
+  in a stream drops from ~300 ns to ~100 ns), permanently for that
+  process: vLLM serves ~5–8% faster per decode step afterwards. The GPU
+  probe's own context does this to a vLLM that was started before it. So a
+  profiler-vs-no-profiler comparison must control for it: create and
+  destroy one CUDA context after every measured process has created its
+  own (after the server is ready), in both arms, and again after every
+  server restart. The cause is in the driver and was not found.
 
 ---
 

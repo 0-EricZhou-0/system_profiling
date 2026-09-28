@@ -30,23 +30,42 @@ enum SystemProbeMode {
 }
 
 message GPUProfilerConfig {
+    // Run the GPU probe (CUPTI PM sampling, device-wide counters) in this
+    // process. It needs a CUDA-capable device and CUPTI.
     bool enabled = 1;
     // Empty = device 0. Otherwise CUPTI PM Sampling opens one session
     // per index; the metric set in `metrics` is applied identically
     // across every device.
     repeated int32 device_indices = 2;
-    uint64 sampling_frequency_hz = 3;   // 0 = 100 Hz
+    // PM samples per second. 0 = 100 Hz. 100-1000 Hz cost the same
+    // (docs/system-guide.md "GPU probe cost and placement"); the rate
+    // sets time resolution and trace size.
+    uint64 sampling_frequency_hz = 3;
+    // Bytes of the GPU-side buffer the sampler writes to until the host
+    // decodes it. 0 = 512 MiB. Must hold two decode intervals of samples
+    // at up to 16 KiB each (measured 4-7 KB with 1-4 metrics on H100), or
+    // Configure() fails with InvalidConfig. An overflow is counted in
+    // GpuDecodeStats.hw_buffer_overflows; CUPTI returns no samples after it.
     uint64 hw_buffer_size = 4;
-    // Counter-data image capacity per decode pass; 0 = sized for the
-    // decode interval (see ProfilerConfig::maxSamples).
+    // Capacity, in samples, of the counter-data image one decode pass
+    // decodes into (two images, double-buffered; ~16 KB of host RAM per
+    // sample slot with 4 metrics). 0 = sized for the decode interval:
+    // ceil(sampling_frequency_hz x decode_interval_ms / 1000 x 1.25) + 64.
+    // Smaller than one pass loses samples: CUPTI 13.3 returns invalid
+    // samples once the image fills (counted in GpuDecodeStats).
     uint64 max_samples = 5;
+    // CUPTI metric names; they must fit one pass. The same set on every
+    // device; each GPUSample's values[] follow this order.
     repeated string metrics = 6;
     // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
+    // Must not be less than decode_interval_ms (Configure() fails with
+    // InvalidConfig).
     uint64 flush_interval_ms = 7;
+    // GPU trace (GPUMetricsTrace frames), relative to output_dir.
     string output_file = 8;
     // How often the host collects the samples the GPU buffered (one
-    // decode pass per interval). 0 = 1000 ms. flush_interval_ms must not
-    // be less than this (Configure() fails with InvalidConfig).
+    // decode pass per interval). 0 = 1000 ms. The wait is interruptible:
+    // Stop() does not wait it out.
     uint64 decode_interval_ms = 9;
 }
 

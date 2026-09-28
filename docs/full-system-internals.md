@@ -271,7 +271,8 @@ Each profiler follows the same 2-thread pattern:
 
 The GPU profiler has the same conceptual structure but uses CUPTI-specific APIs:
 
-- **Decode thread** (equivalent to sample thread): calls `cuptiPmSamplingDecodeData()` every 5 ms, evaluates metrics via `cuptiProfilerHostEvaluateToGpuValues()`
+- **Decode thread** (equivalent to sample thread): once per `decode_interval_ms` (1 s), calls `cuptiPmSamplingDecodeData()` until the hardware buffer is drained, into one of two counter-data images
+- **Eval worker**: evaluates each decoded image's samples via `cuptiProfilerHostEvaluateToGpuValues()` and re-initializes it, while the next decode uses the other image
 - **Flush thread**: drains evaluated `SamplerRange` samples, writes length-delimited `GpuMetricsTrace`
 
 ### Synchronization

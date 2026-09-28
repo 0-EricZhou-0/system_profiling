@@ -51,3 +51,4 @@ def test_vllm_example_defaults():
     cfg = ex.suite_config(ex.parser().parse_args(["--gpu"]))
     assert cfg["gpu"]["sampling_frequency_hz"] == 1000
     assert "max_samples" not in cfg["gpu"]      # sized by the library
+

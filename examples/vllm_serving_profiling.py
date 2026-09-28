@@ -260,6 +260,10 @@ def parser():
     ap.add_argument("--gpu", action="store_true",
                     help="also run GPU PM sampling in this launcher (device-wide counters)")
     ap.add_argument("--gpu-device", type=int, default=0)
+    ap.add_argument("--launcher-cpus", default=None,
+                    help="pin this launcher (and the GPU probe's threads, which it hosts) to these "
+                         "CPUs, e.g. 8-15; keep them off the L3 cache (CCD) of vLLM's cores "
+                         "(default: not pinned)")
     ap.add_argument("--gpu-hz", type=int, default=1000,
                     help="GPU PM sampling rate (default: %(default)s; the library's default is 100)")
     ap.add_argument("--load-seconds", type=float, default=90.0,
@@ -273,8 +277,21 @@ def parser():
     return ap
 
 
+def cpu_list(text):
+    """'8-11,16' -> {8, 9, 10, 11, 16}"""
+    cpus = set()
+    for part in text.split(","):
+        a, _, b = part.strip().partition("-")
+        cpus.update(range(int(a), int(b or a) + 1))
+    return cpus
+
+
 def main():
     args = parser().parse_args()
+    if args.launcher_cpus:
+        # Before the suite exists, so every probe thread inherits it.
+        os.sched_setaffinity(0, cpu_list(args.launcher_cpus))
+        print("launcher pinned to CPUs", sorted(os.sched_getaffinity(0)), flush=True)
 
     vllm = shutil.which(args.vllm) or args.vllm
     os.makedirs(args.output_dir, exist_ok=True)
