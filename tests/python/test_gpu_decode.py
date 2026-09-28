@@ -29,6 +29,7 @@ def test_complete_at_1khz(tmp_path):
     st = decode_stats(frames)
     assert st is not None and st.samples == len(ts)
     assert (st.samples_lost, st.invalid_samples, st.counter_data_full, st.hw_buffer_overflows) == (0, 0, 0, 0)
+    assert st.empty_samples <= 2   # CUPTI's zero-length start marker(s), not data
     assert not warnings(err), warnings(err)
 
 

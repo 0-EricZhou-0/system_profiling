@@ -81,8 +81,16 @@ public:
     }
 
 private:
-    // Drop invalid samples; count the ones missing between two kept ones.
+    // Drop empty and invalid samples; count the ones missing between two
+    // kept ones.
     void Keep(SamplerRange&& sr) {
+        // Zero length, at a real time: CUPTI 13.3 returns one or two,
+        // stamped at the start of sampling, in the decode after
+        // cuptiPmSamplingStop. They cover no time; not a loss.
+        if (sr.startTimestamp == sr.endTimestamp && sr.startTimestamp != 0) {
+            stats_.emptySamples.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         if ((sr.startTimestamp == 0 && sr.endTimestamp == 0) ||
             (lastEndNs_ != 0 && sr.endTimestamp <= lastEndNs_)) {
             stats_.invalidSamples.fetch_add(1, std::memory_order_relaxed);

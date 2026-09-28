@@ -22,6 +22,7 @@ struct DecodeStats {
     std::atomic<uint64_t> samples{0};
     std::atomic<uint64_t> counterDataFull{0};
     std::atomic<uint64_t> invalidSamples{0};
+    std::atomic<uint64_t> emptySamples{0};
     std::atomic<uint64_t> samplesLost{0};
     std::atomic<uint64_t> hwBufferOverflows{0};
 };

@@ -59,4 +59,8 @@ message GpuDecodeStats {
     // Decodes that reported a hardware-buffer overflow. After the
     // first, CUPTI returns no more samples for this device.
     uint64 hw_buffer_overflows = 7;
+    // Zero-length samples (start == end, a real time) CUPTI returned;
+    // dropped. CUPTI 13.3 returns one or two, stamped at the start of
+    // sampling, in the last decode after sampling stops. Not a loss.
+    uint64 empty_samples       = 8;
 }
