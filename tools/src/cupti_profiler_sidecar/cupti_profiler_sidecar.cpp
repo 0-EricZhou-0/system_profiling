@@ -29,9 +29,11 @@
 //     also works when a process the host forked still holds the control
 //     pipe open, so EOF never comes;
 //   * the control pipe reaches EOF;
-//   * it receives SIGTERM or SIGINT. They are blocked in every thread
-//     and read from a signalfd in the control loop, so the handling runs
-//     on the main thread, outside signal context.
+//   * it receives SIGTERM, SIGINT, SIGHUP, SIGQUIT or another signal
+//     whose default action terminates it (SIGPIPE aside). They are
+//     blocked in every thread and read from a signalfd in the control
+//     loop, so the handling runs on the main thread, outside signal
+//     context.
 // SIGPIPE is ignored: a status write to a host that is gone fails with
 // EPIPE instead of killing the sidecar before it has flushed.
 //
@@ -126,14 +128,14 @@ const char* WakeName(Wake w, int signo) {
         case Wake::Message:    return "message";
         case Wake::Eof:        return "control pipe closed by the host";
         case Wake::HostExited: return "host process exited";
-        case Wake::Signal:     return signo == SIGINT ? "SIGINT" : "SIGTERM";
+        case Wake::Signal:     return ::strsignal(signo);
     }
     return "?";
 }
 
 struct Control {
     int hostFd = -1;   // pidfd on the host; -1 = EOF is the only exit signal
-    int sigFd  = -1;   // signalfd for SIGTERM + SIGINT
+    int sigFd  = -1;   // signalfd for the stop signals (kStopSignals)
     int signo  = 0;    // the signal that ended the loop
 };
 
@@ -204,20 +206,24 @@ int main(int argc, char** argv) {
     // Test-only (CUPTI_PROFILER_TEST_KILL_AFTER_READ); unset does nothing.
     cupti_profiler::testing::ArmKillAfterReadFromEnv();
 
-    // SIGTERM/SIGINT -> graceful stop. Blocked before any thread exists,
-    // so every probe thread inherits the mask and the signal is only
-    // ever consumed here, through the signalfd.
+    // Every signal whose default action terminates the process (except
+    // SIGPIPE, ignored above) -> graceful stop, final flush included.
+    // Blocked before any thread exists, so every probe thread inherits
+    // the mask and the signal is only ever consumed here, through the
+    // signalfd. SIGKILL cannot be caught: up to one flush interval of
+    // samples is lost then.
     Control ctl;
     {
         sigset_t stopSignals;
         sigemptyset(&stopSignals);
-        sigaddset(&stopSignals, SIGTERM);
-        sigaddset(&stopSignals, SIGINT);
+        for (int s : {SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1, SIGUSR2, SIGALRM, SIGXCPU,
+                      SIGXFSZ, SIGVTALRM, SIGPROF, SIGIO, SIGPWR})
+            sigaddset(&stopSignals, s);
         ::pthread_sigmask(SIG_BLOCK, &stopSignals, nullptr);
         ctl.sigFd = ::signalfd(-1, &stopSignals, SFD_CLOEXEC);
         if (ctl.sigFd < 0) {
             std::cerr << "[sidecar] signalfd: " << std::strerror(errno)
-                      << " — SIGTERM/SIGINT will not flush\n";
+                      << " — stop signals will not flush\n";
             ::pthread_sigmask(SIG_UNBLOCK, &stopSignals, nullptr);
         }
     }

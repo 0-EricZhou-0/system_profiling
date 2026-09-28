@@ -1,5 +1,6 @@
 #include <cupti_profiler/profiler_suite.h>
 
+#include "lifecycle.h"
 #include "metric_catalog.h"
 #include "metric_catalog_builtins.h"
 #include "process_discovery.h"
@@ -99,6 +100,15 @@ public:
     bool started        = false;   // the sidecar takes messages only after MSG_START
     void SyncHostReaper();
 
+    // Stop() may come from the host, the signal flusher or the exit
+    // hook; stopMutex + stopped make it run once. running: between
+    // Start() and Stop().
+    bool running = false;
+    bool stopped = false;
+    bool signalHandlers = false;    // installed by this suite's Start()
+    std::mutex stopMutex;
+    void Stop();
+
     // Walk a parsed ProfilerSuiteConfig and populate this Impl. Shared
     // between the .pbtxt path (LoadConfig) and the serialized-bytes path
     // used by language bindings (LoadConfigFromBytes).
@@ -112,7 +122,9 @@ public:
 };
 
 ProfilerSuite::ProfilerSuite() : m_impl(std::make_unique<Impl>()) {}
-ProfilerSuite::~ProfilerSuite() = default;
+ProfilerSuite::~ProfilerSuite() {
+    if (m_impl) internal::lifecycle::Unregister(m_impl.get());
+}
 ProfilerSuite::ProfilerSuite(ProfilerSuite&&) noexcept = default;
 ProfilerSuite& ProfilerSuite::operator=(ProfilerSuite&&) noexcept = default;
 
@@ -551,6 +563,15 @@ ProfilerError ProfilerSuite::Start() {
     m_impl->started = true;
     m_impl->SyncHostReaper();
 
+    // From here a catchable fatal signal stops the suite (final GPU
+    // decode, every probe's flush, the sidecar's) before it takes its
+    // course. See lifecycle.cpp.
+    m_impl->running = true;
+    internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Suite, "ProfilerSuite",
+                                  [impl = m_impl.get()] { impl->Stop(); });
+    internal::lifecycle::InstallSignalHandlers();
+    m_impl->signalHandlers = true;
+
     // Emit the manifest now so live tailers (e.g. visualize_interactive.py
     // --live) have a starting point. Stop() re-emits the identical content
     // atomically.
@@ -558,7 +579,14 @@ ProfilerError ProfilerSuite::Start() {
     return result;
 }
 
-void ProfilerSuite::Stop() {
+void ProfilerSuite::Stop() { m_impl->Stop(); }
+
+void ProfilerSuite::Impl::Stop() {
+    std::lock_guard<std::mutex> stopLock(stopMutex);
+    internal::lifecycle::StopScope stopping;
+    if (stopped) return;
+    stopped = true;
+    auto* m_impl = this;
     // Fire off the shutdown signal to EVERY sample thread —
     // in-process AND the sidecar — as early as possible, so they all
     // wind down in parallel with our slow local teardown below. The
@@ -612,6 +640,12 @@ void ProfilerSuite::Stop() {
         m_impl->diskProfiler.Stop();
 
     m_impl->WriteSessionManifest();
+    running = false;
+    if (signalHandlers) {
+        internal::lifecycle::RemoveSignalHandlers();
+        signalHandlers = false;
+    }
+    internal::lifecycle::Unregister(this);
 }
 
 void ProfilerSuite::AddTrackedProcess(uint32_t pid, std::string alias) {

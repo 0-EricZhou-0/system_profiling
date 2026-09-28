@@ -1,4 +1,5 @@
 #include "process_discovery.h"
+#include "lifecycle.h"
 
 #include <cupti_profiler/child_subreaper.h>
 
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <iostream>
+#include <pthread.h>
 #include <poll.h>
 #include <unistd.h>
 
@@ -139,6 +141,8 @@ void ProcessDiscovery::Stop() {
 }
 
 void ProcessDiscovery::Run() {
+    lifecycle::BlockSignalsInThisThread();
+    ::pthread_setname_np(::pthread_self(), "cupti-discover");
     std::cerr << "[discovery] scanning every " << settings_.intervalMs << " ms ("
               << (settings_.recursive ? "recursive" : "direct children only")
               << ")\n";

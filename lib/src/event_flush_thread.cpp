@@ -1,4 +1,5 @@
 #include "event_flush_thread.h"
+#include "lifecycle.h"
 #include "delimited_write.h"
 
 #include <cupti_profiler/event_profiler.h>
@@ -61,6 +62,7 @@ void EventFlushThreadFunc(EventTracker& generic,
                           EventPendingFlushStats& pending,
                           std::mutex& pendingMutex)
 {
+    lifecycle::BlockSignalsInThisThread();
     ::pthread_setname_np(::pthread_self(), "cupti-evt-flush");
     uint64_t prevFlushNs = 0;
     // Stop() wakes the wait; the final flush is Stop()'s.

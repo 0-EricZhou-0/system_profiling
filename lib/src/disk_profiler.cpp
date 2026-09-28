@@ -1,5 +1,6 @@
 #include <cupti_profiler/disk_profiler.h>
 
+#include "lifecycle.h"
 #include "stop_signal.h"
 #include "disk_readers.h"
 #include "proc_readers.h"
@@ -19,6 +20,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <pthread.h>
 #include <optional>
 #include <thread>
 #include <unistd.h>
@@ -60,6 +62,9 @@ public:
 
     bool configured = false;
     bool running = false;
+    // Serializes Stop() (the host, the signal flusher and the exit hook
+    // may all call it).
+    std::mutex stopMutex;
 
     // Previous snapshots, each with the steady-clock instant it was read:
     // rates divide by the actual time since then, not the nominal sample
@@ -288,6 +293,8 @@ void DiskProfiler::Start() {
 
     m_impl->stopSample.Reset();
     m_impl->sampleThread = std::thread([this]() {
+        internal::lifecycle::BlockSignalsInThisThread();
+        ::pthread_setname_np(::pthread_self(), "cupti-dsk-samp");
         auto& impl = *m_impl;
 
         const auto period = std::chrono::microseconds(1000000 / impl.config.samplingFrequencyHz);
@@ -550,6 +557,8 @@ void DiskProfiler::Start() {
     }
 
     m_impl->running = true;
+    internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Probe, "DiskProfiler",
+                                  [this] { Stop(); });
     std::cout << "[Disk] Profiler started\n";
 }
 
@@ -562,6 +571,8 @@ void DiskProfiler::SignalStop() {
 }
 
 void DiskProfiler::Stop() {
+    std::lock_guard<std::mutex> stopLock(m_impl->stopMutex);
+    internal::lifecycle::StopScope stopping;
     if (!m_impl->running) return;
 
     m_impl->stopSample.Set();
@@ -607,6 +618,7 @@ void DiskProfiler::Stop() {
     }
 
     m_impl->running = false;
+    internal::lifecycle::Unregister(m_impl.get());
 }
 
 } // namespace cupti_profiler

@@ -1,4 +1,5 @@
 #include "decode_thread.h"
+#include "lifecycle.h"
 
 #include <pthread.h>
 
@@ -121,6 +122,7 @@ public:
 private:
     void Work() {
         char name[16];
+        lifecycle::BlockSignalsInThisThread();
         std::snprintf(name, sizeof(name), "cupti-eval%u", device_.gpuIndex);
         ::pthread_setname_np(::pthread_self(), name);
         for (;;) {
@@ -235,6 +237,7 @@ void DecodeThreadFunc(std::array<std::vector<uint8_t>, 2>& counterDataImages,
                       CUptiResult& result)
 {
     char name[16];
+    lifecycle::BlockSignalsInThisThread();
     std::snprintf(name, sizeof(name), "cupti-decode%u", device.gpuIndex);
     ::pthread_setname_np(::pthread_self(), name);
 

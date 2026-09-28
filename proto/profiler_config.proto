@@ -24,7 +24,8 @@ enum SystemProbeMode {
     // Out-of-process sidecar (cupti-profiler-sidecar) running the same
     // /proc readers. Needs no capability for targets owned by the same
     // uid. It stops gracefully, final flush included, when the host
-    // process exits or on SIGTERM/SIGINT.
+    // process exits or on SIGTERM, SIGINT, SIGHUP or another signal whose
+    // default action terminates it.
     SYSTEM_PROBE_MODE_SIDECAR = 2;
 }
 

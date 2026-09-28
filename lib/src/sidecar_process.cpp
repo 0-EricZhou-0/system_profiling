@@ -1,4 +1,5 @@
 #include "sidecar_process.h"
+#include "lifecycle.h"
 #include "sidecar_protocol.h"
 
 #include <cupti_profiler/child_subreaper.h>
@@ -213,6 +214,7 @@ ProfilerError SidecarProcess::Spawn() {
     // Reap adopted orphans the sidecar reports — only if this process
     // opted in with EnableChildSubreaper(); otherwise drain and ignore.
     notice_reader_ = std::thread([fd = notice_from_child_] {
+        lifecycle::BlockSignalsInThisThread();
         AdoptedExitNotice n;
         while (ReadAll(fd, &n, sizeof(n))) {
             if (ChildSubreaperEnabled()) ReapAdoptedChild(-1, n.pid, n.startTime);
@@ -251,7 +253,7 @@ std::string SidecarProcess::DescribeExit() {
     if (WIFEXITED(status)) {
         return "exited with status " + std::to_string(WEXITSTATUS(status)) +
                (WEXITSTATUS(status) == 0
-                    ? " (it stops cleanly, final flush included, on SIGTERM/SIGINT "
+                    ? " (it stops cleanly, final flush included, on SIGTERM/SIGINT/SIGHUP "
                       "or when its control pipe closes)"
                     : "");
     }

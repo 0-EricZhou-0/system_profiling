@@ -1,5 +1,6 @@
 #include <cupti_profiler/gpu_profiler.h>
 
+#include "lifecycle.h"
 #include "stop_signal.h"
 #include "cupti_pm_sampling.h"
 #include "profiler_host_internal.h"
@@ -166,6 +167,10 @@ public:
 
     bool configured = false;
     bool running = false;
+    // Serializes Stop() (the host, the signal flusher and the exit hook
+    // may all call it).
+    std::mutex stopMutex;
+    GpuProfiler* owner = nullptr;   // the object Stop() is called on
 };
 
 GpuProfiler::GpuProfiler() : m_impl(std::make_unique<Impl>()) {}
@@ -174,8 +179,17 @@ GpuProfiler::~GpuProfiler() {
         Stop();
     }
 }
-GpuProfiler::GpuProfiler(GpuProfiler&&) noexcept = default;
-GpuProfiler& GpuProfiler::operator=(GpuProfiler&&) noexcept = default;
+GpuProfiler::GpuProfiler(GpuProfiler&& o) noexcept : m_impl(std::move(o.m_impl)) {
+    if (m_impl) m_impl->owner = this;
+}
+GpuProfiler& GpuProfiler::operator=(GpuProfiler&& o) noexcept {
+    if (this != &o) {
+        if (m_impl && m_impl->running) Stop();
+        m_impl = std::move(o.m_impl);
+        if (m_impl) m_impl->owner = this;
+    }
+    return *this;
+}
 
 void GpuProfiler::Configure(const ProfilerConfig& requested) {
     ProfilerConfig resolved = requested;
@@ -435,6 +449,9 @@ void GpuProfiler::Start() {
     }
 
     m_impl->running = true;
+    m_impl->owner = this;
+    internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Probe, "GpuProfiler",
+                                  [impl = m_impl.get()] { impl->owner->Stop(); });
 
     std::cout << "\n=== PM sampling started at "
               << m_impl->config.samplingFrequencyHz << " Hz across "
@@ -442,6 +459,8 @@ void GpuProfiler::Start() {
 }
 
 void GpuProfiler::Stop() {
+    std::lock_guard<std::mutex> stopLock(m_impl->stopMutex);
+    internal::lifecycle::StopScope stopping;
     if (!m_impl->running) return;
 
     // Stop sampling on every device.
@@ -519,6 +538,7 @@ void GpuProfiler::Stop() {
     }
 
     m_impl->running = false;
+    internal::lifecycle::Unregister(m_impl.get());
 }
 
 std::vector<SamplerRange> GpuProfiler::DrainSamples() {

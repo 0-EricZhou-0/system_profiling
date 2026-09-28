@@ -1,4 +1,5 @@
 #include "flush_thread.h"
+#include "lifecycle.h"
 #include "delimited_write.h"
 
 #include "gpu_metrics.pb.h"
@@ -108,6 +109,7 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
                      PendingFlushStats& pending,
                      std::mutex& pendingMutex)
 {
+    lifecycle::BlockSignalsInThisThread();
     ::pthread_setname_np(::pthread_self(), "cupti-gpu-flush");
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;

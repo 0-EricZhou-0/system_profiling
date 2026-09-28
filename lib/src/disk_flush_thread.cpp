@@ -1,4 +1,5 @@
 #include "disk_flush_thread.h"
+#include "lifecycle.h"
 #include "delimited_write.h"
 #include "testing_hooks.h"
 #include "discovery_stats_proto.h"
@@ -247,6 +248,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
                          DiskPendingFlushStats& pending,
                          std::mutex& pendingMutex)
 {
+    lifecycle::BlockSignalsInThisThread();
     ::pthread_setname_np(::pthread_self(), "cupti-dsk-flush");
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;

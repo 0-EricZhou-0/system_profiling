@@ -1,5 +1,6 @@
 #include <cupti_profiler/system_profiler.h>
 
+#include "lifecycle.h"
 #include "stop_signal.h"
 #include "proc_readers.h"
 #include "system_flush_thread.h"
@@ -17,6 +18,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <pthread.h>
 #include <thread>
 #include <unistd.h>
 #include <optional>
@@ -52,6 +54,9 @@ public:
 
     bool configured = false;
     bool running = false;
+    // Serializes Stop() (the host, the signal flusher and the exit hook
+    // may all call it).
+    std::mutex stopMutex;
 
     // Previous snapshots for delta computation
     internal::CPUStatSnapshot prevCPU;
@@ -275,6 +280,8 @@ void SystemProfiler::Start() {
     // Launch sample thread
     m_impl->stopSample.Reset();
     m_impl->sampleThread = std::thread([this]() {
+        internal::lifecycle::BlockSignalsInThisThread();
+        ::pthread_setname_np(::pthread_self(), "cupti-sys-samp");
         auto& impl = *m_impl;
         long pageSize = internal::GetPageSize();
 
@@ -447,6 +454,8 @@ void SystemProfiler::Start() {
     }
 
     m_impl->running = true;
+    internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Probe, "SystemProfiler",
+                                  [this] { Stop(); });
     std::cout << "[System] Profiler started\n";
 }
 
@@ -459,6 +468,8 @@ void SystemProfiler::SignalStop() {
 }
 
 void SystemProfiler::Stop() {
+    std::lock_guard<std::mutex> stopLock(m_impl->stopMutex);
+    internal::lifecycle::StopScope stopping;
     if (!m_impl->running) return;
 
     // Signal if not already signaled
@@ -506,6 +517,7 @@ void SystemProfiler::Stop() {
     }
 
     m_impl->running = false;
+    internal::lifecycle::Unregister(m_impl.get());
 }
 
 } // namespace cupti_profiler

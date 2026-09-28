@@ -1,4 +1,5 @@
 #include "system_flush_thread.h"
+#include "lifecycle.h"
 #include "delimited_write.h"
 #include "discovery_stats_proto.h"
 #include "tracked_process_proto.h"
@@ -265,6 +266,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
                            SystemPendingFlushStats& pending,
                            std::mutex& pendingMutex)
 {
+    lifecycle::BlockSignalsInThisThread();
     ::pthread_setname_np(::pthread_self(), "cupti-sys-flush");
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;

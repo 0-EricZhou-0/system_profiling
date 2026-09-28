@@ -1,5 +1,6 @@
 #include <cupti_profiler/event_profiler.h>
 
+#include "lifecycle.h"
 #include "stop_signal.h"
 #include "event_tracker_internal.h"
 #include "event_flush_thread.h"
@@ -44,6 +45,10 @@ public:
 
     bool configured = false;
     bool running = false;
+    // Serializes Stop() (the host, the signal flusher and the exit hook
+    // may all call it).
+    std::mutex stopMutex;
+    EventProfiler* owner = nullptr;   // the object Stop() is called on
 };
 
 EventProfiler::EventProfiler() : m_impl(std::make_unique<Impl>()) {
@@ -53,8 +58,17 @@ EventProfiler::EventProfiler() : m_impl(std::make_unique<Impl>()) {
 EventProfiler::~EventProfiler() {
     if (m_impl && m_impl->running) Stop();
 }
-EventProfiler::EventProfiler(EventProfiler&&) noexcept = default;
-EventProfiler& EventProfiler::operator=(EventProfiler&&) noexcept = default;
+EventProfiler::EventProfiler(EventProfiler&& o) noexcept : m_impl(std::move(o.m_impl)) {
+    if (m_impl) m_impl->owner = this;
+}
+EventProfiler& EventProfiler::operator=(EventProfiler&& o) noexcept {
+    if (this != &o) {
+        if (m_impl && m_impl->running) Stop();
+        m_impl = std::move(o.m_impl);
+        if (m_impl) m_impl->owner = this;
+    }
+    return *this;
+}
 
 EventTracker& EventProfiler::GetGenericTracker() { return *m_impl->generic; }
 EventTracker& EventProfiler::GetGpuTracker()     { return *m_impl->gpu; }
@@ -105,6 +119,9 @@ void EventProfiler::Start() {
     }
 
     m_impl->running = true;
+    m_impl->owner = this;
+    internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Probe, "EventProfiler",
+                                  [impl = m_impl.get()] { impl->owner->Stop(); });
     std::cout << "[Events] Profiler started\n";
 }
 
@@ -114,6 +131,8 @@ void EventProfiler::SignalStop() {
 }
 
 void EventProfiler::Stop() {
+    std::lock_guard<std::mutex> stopLock(m_impl->stopMutex);
+    internal::lifecycle::StopScope stopping;
     if (!m_impl->running) return;
     m_impl->stopFlush.Set();
     if (m_impl->flushThread.joinable()) m_impl->flushThread.join();
@@ -169,6 +188,7 @@ void EventProfiler::Stop() {
     }
 
     m_impl->running = false;
+    internal::lifecycle::Unregister(m_impl.get());
 }
 
 } // namespace cupti_profiler
