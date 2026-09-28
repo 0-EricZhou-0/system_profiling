@@ -86,7 +86,12 @@ public:
 
     /// Stop all enabled profilers: final GPU decode, every probe's last
     /// flush, the sidecar's; trace files closed. Runs once, whichever of
-    /// the host or a signal comes first. Thread-safe.
+    /// the host, a signal, process exit or the destructor comes first.
+    /// Thread-safe. If it was never called, the suite is stopped at
+    /// process exit (exit() / return from main; the Python package does it
+    /// from atexit, before interpreter teardown) or when destroyed, with a
+    /// "[cupti-profiler] warning:" saying so. Not after _exit() or
+    /// SIGKILL.
     void Stop();
 
     /// Begin tracking a PID mid-run. Fans out to every enabled probe
@@ -113,5 +118,11 @@ private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 };
+
+/// Stop every suite and probe of this process that is still running,
+/// with a "[cupti-profiler] warning: stop() was not called ..." line for
+/// each. The library runs it from a std::atexit handler; the Python
+/// package from its atexit hook (earlier, with the interpreter intact).
+CUPTI_PROFILER_API void StopRunningAtExit();
 
 } // namespace cupti_profiler

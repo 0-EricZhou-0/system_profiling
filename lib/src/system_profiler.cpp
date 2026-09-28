@@ -223,7 +223,10 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
 
 SystemProfiler::SystemProfiler() : m_impl(std::make_unique<Impl>()) {}
 SystemProfiler::~SystemProfiler() {
-    if (m_impl && m_impl->running) Stop();
+    if (m_impl && m_impl->running) {
+        internal::lifecycle::WarnNotStopped("SystemProfiler", "when it was destroyed");
+        Stop();
+    }
 }
 
 void SystemProfiler::Configure(const SystemProfilerConfig& config) {

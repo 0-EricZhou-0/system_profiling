@@ -176,6 +176,7 @@ public:
 GpuProfiler::GpuProfiler() : m_impl(std::make_unique<Impl>()) {}
 GpuProfiler::~GpuProfiler() {
     if (m_impl && m_impl->running) {
+        internal::lifecycle::WarnNotStopped("GpuProfiler", "when it was destroyed");
         Stop();
     }
 }

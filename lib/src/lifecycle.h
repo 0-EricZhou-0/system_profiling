@@ -29,6 +29,17 @@ void Unregister(const void* key);
 /// probes). Returns the kinds stopped, in order.
 std::vector<std::string> StopAll();
 
+/// Process exit with something still running (stop() never called):
+/// stop it all and print one "[cupti-profiler] warning:" line per object
+/// stopped. Run by a std::atexit handler (registered at the first
+/// Register) and by the Python package's atexit hook, which comes first.
+/// Does nothing in a forked child.
+void StopAtExit();
+
+/// "[cupti-profiler] warning: stop() was not called; the <kind> was
+/// stopped <when> and its traces flushed".
+void WarnNotStopped(const char* kind, const char* when);
+
 /// Marks a Stop() in progress on this thread: a signal that arrives then
 /// does not ask for another flush (it could not start until this one
 /// ends) but waits for this one when it runs on another thread.

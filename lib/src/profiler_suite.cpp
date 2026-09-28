@@ -124,8 +124,15 @@ public:
 
 ProfilerSuite::ProfilerSuite() : m_impl(std::make_unique<Impl>()) {}
 ProfilerSuite::~ProfilerSuite() {
-    if (m_impl) internal::lifecycle::Unregister(m_impl.get());
+    if (!m_impl) return;
+    if (m_impl->running && !m_impl->stopped) {
+        internal::lifecycle::WarnNotStopped("ProfilerSuite", "when it was destroyed");
+        m_impl->Stop();
+    }
+    internal::lifecycle::Unregister(m_impl.get());
 }
+
+void StopRunningAtExit() { internal::lifecycle::StopAtExit(); }
 ProfilerSuite::ProfilerSuite(ProfilerSuite&&) noexcept = default;
 ProfilerSuite& ProfilerSuite::operator=(ProfilerSuite&&) noexcept = default;
 

@@ -234,7 +234,10 @@ void DiskProfiler::NoteAdoptedExit(uint32_t pid, uint64_t startTimeTicks) {
 
 DiskProfiler::DiskProfiler() : m_impl(std::make_unique<Impl>()) {}
 DiskProfiler::~DiskProfiler() {
-    if (m_impl && m_impl->running) Stop();
+    if (m_impl && m_impl->running) {
+        internal::lifecycle::WarnNotStopped("DiskProfiler", "when it was destroyed");
+        Stop();
+    }
 }
 
 void DiskProfiler::Configure(const DiskProfilerConfig& config) {

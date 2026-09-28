@@ -353,6 +353,10 @@ PYBIND11_MODULE(_native, m) {
                                                               : testing::ReadProbe::System);
           },
           py::arg("pid"), py::arg("probe") = "system");
+    m.def("_stop_running_at_exit", &StopRunningAtExit,
+        "Stop every running suite/probe, warning that stop() was not called. "
+        "Registered with atexit by the package; not for direct use.",
+        py::call_guard<py::gil_scoped_release>());
     m.def("child_subreaper_enabled", &ChildSubreaperEnabled,
         "True once enable_child_subreaper() has succeeded in this process.");
 

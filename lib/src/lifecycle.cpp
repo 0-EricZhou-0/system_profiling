@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cerrno>
 #include <csignal>
+#include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -69,6 +70,7 @@ std::atomic<int>   g_stopping{0};        // Stop()s in progress
 std::atomic<pid_t> g_stoppingTid{0};     // thread of the latest one
 std::atomic<bool>  g_flushing{false};    // a handler is waiting for a flush
 std::atomic<pid_t> g_ownerPid{0};        // the process whose flusher it is
+std::atomic<pid_t> g_registryPid{0};     // the process that registered
 
 struct sigaction g_prev[NSIG];
 bool             g_ours[NSIG];
@@ -211,7 +213,19 @@ bool StartFlusher() {
 
 } // namespace
 
+void OnExit() { StopAtExit(); }
+
 void Register(const void* key, Order order, const char* kind, std::function<void()> stop) {
+    // Exit hook, once. Registered at the first Start(), after the CUDA
+    // runtime registered its own teardown (Configure() initialized it),
+    // so it runs before that (atexit is LIFO); the registry is leaked,
+    // so it outlives every static destructor.
+    static std::once_flag hook;
+    std::call_once(hook, [] {
+        RegistryMutex();
+        g_registryPid.store(::getpid());
+        std::atexit(OnExit);
+    });
     std::lock_guard<std::mutex> lk(RegistryMutex());
     Registry().push_back({key, order, kind, std::move(stop)});
     g_running.store(static_cast<int>(Registry().size()));
@@ -244,6 +258,18 @@ std::vector<std::string> StopAll() {
         stopped.push_back(e.kind);
     }
     return stopped;
+}
+
+void WarnNotStopped(const char* kind, const char* when) {
+    std::fprintf(stderr, "[cupti-profiler] warning: stop() was not called; the %s was stopped %s "
+                         "and its traces flushed\n", kind, when);
+}
+
+void StopAtExit() {
+    // A forked child that exits normally must not join threads it does
+    // not have.
+    if (::getpid() != g_registryPid.load()) return;
+    for (const auto& kind : StopAll()) WarnNotStopped(kind.c_str(), "at process exit");
 }
 
 StopScope::StopScope() {

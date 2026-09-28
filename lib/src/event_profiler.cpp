@@ -56,7 +56,10 @@ EventProfiler::EventProfiler() : m_impl(std::make_unique<Impl>()) {
     m_impl->gpu     = std::unique_ptr<EventTracker>(new EventTracker(EventTracker::Domain::GPU));
 }
 EventProfiler::~EventProfiler() {
-    if (m_impl && m_impl->running) Stop();
+    if (m_impl && m_impl->running) {
+        internal::lifecycle::WarnNotStopped("EventProfiler", "when it was destroyed");
+        Stop();
+    }
 }
 EventProfiler::EventProfiler(EventProfiler&& o) noexcept : m_impl(std::move(o.m_impl)) {
     if (m_impl) m_impl->owner = this;

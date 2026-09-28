@@ -25,6 +25,16 @@ from ._native import (
 )
 from ._stream import CudaStream
 
+import atexit as _atexit
+
+# stop() not called before the interpreter exits: stop and flush every
+# running suite/probe here, with a warning. atexit runs before the
+# interpreter tears anything down, and the native call releases the GIL
+# (no profiler thread takes it), so this cannot deadlock. The library's
+# own std::atexit handler covers a bare C exit() (it runs later, and
+# finds nothing left to stop after this).
+_atexit.register(_native._stop_running_at_exit)
+
 __all__ = [
     "ProfilerSuite",
     "GpuProfiler",
