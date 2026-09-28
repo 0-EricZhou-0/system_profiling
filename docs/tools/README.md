@@ -290,6 +290,10 @@ What you get:
   its title and a ▾/▸ control; collapsed, only the header row is left.
   *Collapse all* / *Expand all* sit at the top of the sticky band. Works
   in the saved HTML without a server (not remembered across reloads).
+  A fold hides the panel by CSS, so only the page below it moves: on the
+  cold vLLM page ~50 ms to fold and ~110 ms to unfold a panel, ~0.5 s /
+  ~1 s to collapse / expand all (hiding by Bokeh's `visible` re-laid out
+  the whole page: ~1.1 s a panel, 6.6–8.5 s for all).
 - **Room to scroll the last panel up**: a window's height of empty page
   (the page background, either theme) follows the last panel and the
   footer, so the last panel can sit right under the sticky band.

@@ -1459,6 +1459,19 @@ _FOLD_CSS = (".bk-btn {{ text-align: left; font-weight: bold; color: {fg}; "
              "border: none; background: transparent; padding: 2px 4px; }}")
 
 
+# Folding hides a figure by its CSS display (fig.styles), not fig.visible:
+# a visibility change makes Bokeh lay out and repaint the whole document
+# (measured on the cold vLLM page: ~1 s a toggle; by CSS: ~30 ms).
+_FOLD_FN_JS = """
+    const folded = (f) => !!(f.styles && f.styles.display === "none");
+    // "" and not a deleted key: Bokeh sets the styles it is given and
+    // leaves a removed one on the element.
+    const setFolded = (f, hide) => {
+        f.styles = Object.assign({}, f.styles, {display: hide ? "none" : ""});
+    };
+"""
+
+
 def _fold(fig, title: str, css: "InlineStyleSheet"):
     """Header button of a foldable panel: '▾ title' expanded, '▸ title'
     collapsed (the figure hidden, the header kept). The button carries the
@@ -1468,16 +1481,17 @@ def _fold(fig, title: str, css: "InlineStyleSheet"):
     fig.title.text = ""
     btn = Button(label="\u25be " + title, sizing_mode="stretch_width", height=24,
                  stylesheets=[css], name="fold")
-    btn.js_on_click(CustomJS(args=dict(fig=fig, btn=btn, title=title), code="""
-        fig.visible = !fig.visible;
-        btn.label = (fig.visible ? "\u25be " : "\u25b8 ") + title;
+    btn.js_on_click(CustomJS(args=dict(fig=fig, btn=btn, title=title), code=_FOLD_FN_JS + """
+        const hide = !folded(fig);
+        setFolded(fig, hide);
+        btn.label = (hide ? "\u25b8 " : "\u25be ") + title;
     """))
     return btn, column([btn, fig], spacing=0, sizing_mode="stretch_width")
 
 
-_FOLD_ALL_JS = """
+_FOLD_ALL_JS = _FOLD_FN_JS + """
     for (let i = 0; i < figs.length; i++) {
-        figs[i].visible = !collapse;
+        setFolded(figs[i], collapse);
         btns[i].label = (collapse ? "\u25b8 " : "\u25be ") + titles[i];
     }
 """
@@ -1532,11 +1546,12 @@ def _hotkeys_script(xr_id: str, t_end_s: float, folds: list) -> str:
     xr.start = a; xr.end = b;
   }}
   function foldAll() {{
-    const any = FOLDS.some(([f]) => model(f) && model(f).visible);
+    const shown = (f) => !(f.styles && f.styles.display === "none");
+    const any = FOLDS.some(([f]) => model(f) && shown(model(f)));
     for (const [f, b, t] of FOLDS) {{
       const fig = model(f), btn = model(b);
       if (!fig || !btn) continue;
-      fig.visible = !any;
+      fig.styles = Object.assign({{}}, fig.styles, {{display: any ? "none" : ""}});
       btn.label = (any ? "\u25b8 " : "\u25be ") + t;
     }}
   }}

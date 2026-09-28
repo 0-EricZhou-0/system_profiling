@@ -106,9 +106,20 @@ def test_every_panel_foldable_with_title_kept(tmp_path):
     for fig, btn, title in doc.folds:
         assert title and btn.label == "▾ " + title and fig.title.text == ""
         [cb] = btn.js_event_callbacks["button_click"]
-        assert "fig.visible = !fig.visible" in cb.code and cb.args["fig"] is fig
+        # folded by CSS display, not fig.visible (a whole-document relayout)
+        assert "setFolded(fig, hide)" in cb.code and cb.args["fig"] is fig
+        assert ".visible" not in cb.code
     names = [b.label for b in doc.band.children[0].children]
     assert names == ["Collapse all", "Expand all"]
+    for b in doc.band.children[0].children:
+        [cb] = b.js_event_callbacks["button_click"]
+        assert "setFolded(figs[i], collapse)" in cb.code and ".visible" not in cb.code
+    html = vi.static_page(_meta(tmp_path / "p"))
+    assert 'display: any ? "none" : ""' in html and "model(f).visible" not in html   # the 'c' key
+    # Shown again by display "", not by deleting the key (Bokeh keeps a
+    # removed style on the element: the panel stayed hidden).
+    [cb] = doc.folds[0][1].js_event_callbacks["button_click"]
+    assert 'display: hide ? "none" : ""' in cb.code and "delete st" not in cb.code
 
 
 def test_hotkeys_in_the_page(tmp_path):
