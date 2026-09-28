@@ -10,6 +10,8 @@
 // lifecycle.cpp for the rules the handler follows.
 #pragma once
 
+#include <cupti_profiler/profiler_error.h>   // CUPTI_PROFILER_API
+
 #include <functional>
 #include <string>
 #include <vector>
@@ -52,11 +54,12 @@ public:
 };
 
 /// Install the handlers (refcounted: one Install per Remove). The first
-/// call starts the flusher thread.
-void InstallSignalHandlers();
+/// call starts the flusher thread. Exported: the sidecar installs them
+/// too.
+CUPTI_PROFILER_API void InstallSignalHandlers();
 /// Put back each previous disposition whose handler is still ours, once
 /// the last installer has removed its handlers.
-void RemoveSignalHandlers();
+CUPTI_PROFILER_API void RemoveSignalHandlers();
 
 /// Block the asynchronous termination signals in the calling thread, so
 /// the kernel delivers them to one of the host's threads, never to a

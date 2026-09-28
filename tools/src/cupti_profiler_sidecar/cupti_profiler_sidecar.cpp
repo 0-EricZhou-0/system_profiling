@@ -34,6 +34,8 @@
 //     blocked in every thread and read from a signalfd in the control
 //     loop, so the handling runs on the main thread, outside signal
 //     context.
+// On a crash signal (SEGV, BUS, FPE, ILL, ABRT, SYS) it flushes its
+// probes, best effort within 2 s, and then dies of that signal.
 // SIGPIPE is ignored: a status write to a host that is gone fails with
 // EPIPE instead of killing the sidecar before it has flushed.
 //
@@ -78,6 +80,8 @@
 #include "sidecar_protocol.h"
 // Descendant tracking runs here, on the observer side, under SIDECAR.
 #include "process_discovery.h"
+// Flush on crash signals (the library's handlers; see below).
+#include "lifecycle.h"
 
 using namespace cupti_profiler;
 using namespace cupti_profiler::internal;
@@ -295,6 +299,12 @@ int main(int argc, char** argv) {
         }
         std::cerr << "[sidecar] pinned to CPU(s) " << list << "\n";
     }
+    // Crash signals (SEGV, BUS, FPE, ILL, ABRT, SYS): the library's
+    // handlers flush the running probes (best effort, bounded) and then
+    // take the default action, as in the host. The stop signals above
+    // stay blocked, so they still arrive through the signalfd. After the
+    // pinning: the handlers' flusher thread must inherit sidecar_cpus.
+    lifecycle::InstallSignalHandlers();
     if (!HasCapNetAdmin()) {
         std::cerr << "[sidecar] note: CAP_NET_ADMIN not held. Fine for the "
                      "current /proc backend + same-UID observation; the "
