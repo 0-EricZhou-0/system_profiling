@@ -151,8 +151,8 @@ orphans, those reap chains resolve: the trace's CPU for the whole tree was
 the ~65 processes shorter than a scan used. Without `adopt_orphans()` (the
 same run from a harness) the chains are flagged ambiguous and the trace
 reads **58% above** the kernel (`CpuTail.ambiguous_cpu_ns` carries the
-excess). Such a run's figure is hard to read: ~160 processes overflow the
-per-process panels' legends.
+excess). In such a run's figure the per-process legends list the ten most
+active processes and a `+k more` entry for the rest, drawn in grey.
 
 ### Checked on nine runs
 

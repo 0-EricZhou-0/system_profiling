@@ -55,6 +55,7 @@ import events_pb2  # noqa: E402
 import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
+import panel_legend  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 
@@ -369,6 +370,19 @@ _COLOR_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 # style. Panels with a single metric per process keep solid lines.
 _METRIC_LINESTYLES = ["-", "--", ":", "-."]
 
+# Legends sit above their panel, outside the axes, in as many columns
+# as the widest entry allows; the panel title sits above the legend.
+# Which entries are listed: panel_legend (at most LEGEND_MAX_ENTRIES,
+# the rest drawn grey and counted in a "+k more" entry).
+LEGEND_FONTSIZE    = 7
+LEGEND_HANDLE_EM   = 2.0    # handle length
+LEGEND_TEXTPAD_EM  = 0.6    # handle -> text
+LEGEND_COLSPACE_EM = 1.5    # between columns
+LEGEND_ROWSPACE_EM = 0.3    # between rows
+LEGEND_BORDER_EM   = 0.2    # legend box padding (frameless)
+LEGEND_AXESPAD_EM  = 0.3    # legend bottom -> axes top
+LEGEND_TITLE_GAP_PT = 3.0   # legend top -> title baseline
+
 
 def _series_linestyles(series_list: list[metric_layout.ResolvedSeries]) -> dict:
     fqns = list(dict.fromkeys(s.fqn for s in series_list if s.scope == mc_pb.SCOPE_PROCESS))
@@ -387,30 +401,241 @@ def _process_label(projector: TraceProjector, key) -> str:
     return f"{name}(PID {key}{found})"
 
 
-def _panel_legend(ax, series_list, projector, label_bases, linestyles, loc) -> None:
-    """With several metrics per process (line styles in use), a legend of
-    processes x metrics grows as their product; list each process's
-    colour once and each metric's line style once instead."""
-    styled = [s for s in series_list if linestyles[(s.fqn, s.scope_key)] != "-"]
-    if not styled:
-        ax.legend(loc=loc, fontsize=7, framealpha=0.85)
+def _integrated_axis(panel, series_list, projection):
+    """The cumulative companion's per-series run totals (full-resolution
+    trapezoid integral) and its axis formatter: (cums, scale_fn, ylabel),
+    cums keyed by (fqn, scope_key), series without samples left out."""
+    source_unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
+        else series_list[0].descriptor.unit
+    integrated_unit = _INTEGRATED_UNIT.get(source_unit, mc_pb.UNIT_UNSPECIFIED)
+    cums = {}
+    max_total = 0.0
+    for s in series_list:
+        ts_ns, vals = projection[(s.fqn, s.scope_key)]
+        if ts_ns.size == 0:
+            continue
+        cum = _trapz_cumulative(ts_ns, vals.astype(np.float64))
+        cums[(s.fqn, s.scope_key)] = (ts_ns, cum)
+        if cum.size and cum[-1] > max_total:
+            max_total = float(cum[-1])
+    scale_fn, ylabel = _format_unit_axis(integrated_unit,
+                                         peak_hint=max_total if max_total > 0 else None)
+    return cums, scale_fn, ylabel
+
+
+def _pid_color_map(panels, projection) -> dict[int, str]:
+    """PID -> colour, shared by every per-process panel so a process has
+    one colour throughout. Colours go by rank: the processes most active
+    in the first per-process panel (per-process CPU in both layouts)
+    first, the rest in the order they appear, so with more processes
+    than colours the busiest ones still get distinct colours."""
+    seen: list[int] = []
+    rank_act: dict[int, float] = {}
+    first_panel = None
+    for _p, series_list, kind in panels:
+        for s in series_list:
+            if s.scope != mc_pb.SCOPE_PROCESS:
+                continue
+            pid = int(s.scope_key)
+            if pid not in seen:
+                seen.append(pid)
+            if first_panel is None and kind == "metric":
+                first_panel = id(series_list)
+            if id(series_list) == first_panel:
+                rank_act[pid] = rank_act.get(pid, 0.0) + panel_legend.activity(
+                    *projection[(s.fqn, s.scope_key)])
+    order = sorted(range(len(seen)),
+                   key=lambda i: (seen[i] not in rank_act, -rank_act.get(seen[i], 0.0), i))
+    return {seen[i]: _COLOR_CYCLE[r % len(_COLOR_CYCLE)] for r, i in enumerate(order)}
+
+
+def _distinct_colors(keys_by_rank: list, colors: dict) -> dict:
+    """Colours for a panel's listed legend keys (most active first), each
+    its own: a key whose colour an earlier one already has gets the first
+    colour of the cycle not yet used in the panel."""
+    out, used = {}, set()
+    for k in keys_by_rank:
+        c = colors[k]
+        if c in used:
+            c = next((x for x in _COLOR_CYCLE if x not in used), c)
+        out[k] = c
+        used.add(c)
+    return out
+
+
+class _LegendPlan:
+    """Colours, line styles and legend entries of one panel, decided
+    before the figure is laid out so each panel's legend height can be
+    reserved above it.
+
+    styles:  (fqn, scope_key) -> (color, linestyle, listed); series not
+             listed in the legend are drawn in panel_legend.OTHER_COLOR.
+    entries: [(label, color, linestyle)] in legend order.
+    """
+
+    def __init__(self, styles: dict, entries: list, avail_width_pt: float):
+        self.styles = styles
+        self.entries = entries
+        self.ncol, self.nrows = _legend_grid([e[0] for e in entries], avail_width_pt)
+
+    @property
+    def height_pt(self) -> float:
+        """Height the legend takes above the axes, up to the title."""
+        if not self.entries:
+            return 0.0
+        fs = LEGEND_FONTSIZE
+        row = 1.25 * fs
+        return (self.nrows * row + (self.nrows - 1) * LEGEND_ROWSPACE_EM * fs
+                + 2 * LEGEND_BORDER_EM * fs + LEGEND_AXESPAD_EM * fs
+                + LEGEND_TITLE_GAP_PT)
+
+
+_TEXT_TO_PATH = None
+
+
+def _text_width_pt(text: str, fontsize: float) -> float:
+    global _TEXT_TO_PATH
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextToPath
+    if _TEXT_TO_PATH is None:
+        _TEXT_TO_PATH = TextToPath()
+    w, _h, _d = _TEXT_TO_PATH.get_text_width_height_descent(
+        text, FontProperties(size=fontsize), ismath=False)
+    return w
+
+
+def _legend_grid(labels: list[str], avail_width_pt: float) -> tuple[int, int]:
+    """(ncol, nrows) for a legend of `labels` spanning `avail_width_pt`:
+    as many equal columns as the widest entry allows."""
+    if not labels:
+        return 1, 0
+    fs = LEGEND_FONTSIZE
+    widest = max(_text_width_pt(lab, fs) for lab in labels)
+    entry = (LEGEND_HANDLE_EM + LEGEND_TEXTPAD_EM) * fs + widest
+    col = entry + LEGEND_COLSPACE_EM * fs
+    ncol = max(1, min(len(labels), int((avail_width_pt + LEGEND_COLSPACE_EM * fs) // col)))
+    return ncol, -(-len(labels) // ncol)
+
+
+def _plan_legend(panel, series_list: list[metric_layout.ResolvedSeries], kind: str,
+                 projector: TraceProjector, projection: dict,
+                 pid_color_map: dict[int, str], avail_width_pt: float) -> _LegendPlan:
+    """Colours and legend entries of one panel. Metric panels rank their
+    entries by activity (panel_legend.activity); cumulative companions
+    by run total, and their labels carry the totals."""
+    label_bases = metric_layout.disambiguate_short_labels(series_list)
+    linestyles = _series_linestyles(series_list)
+    styled = any(ls != "-" for ls in linestyles.values())
+    live = [s for s in series_list if projection[(s.fqn, s.scope_key)][0].size]
+
+    colors = {}
+    color_idx = 0
+    for s in live:
+        if s.scope == mc_pb.SCOPE_PROCESS and int(s.scope_key) in pid_color_map:
+            colors[(s.fqn, s.scope_key)] = pid_color_map[int(s.scope_key)]
+        else:
+            colors[(s.fqn, s.scope_key)] = _COLOR_CYCLE[color_idx % len(_COLOR_CYCLE)]
+            color_idx += 1
+
+    if kind == "integrated":
+        cums, scale_fn, ylabel = _integrated_axis(panel, series_list, projection)
+        amount = {k: float(c[-1]) if c.size else 0.0 for k, (_t, c) in cums.items()}
+        unit_sfx = f" {ylabel}" if ylabel else ""
+
+        def total(v):
+            return f"{_fmt_plain(scale_fn(v))}{unit_sfx}"
+    else:
+        amount = {(s.fqn, s.scope_key): panel_legend.activity(*projection[(s.fqn, s.scope_key)])
+                  for s in live}
+
+    entries = []
+    if styled:
+        # One entry per process (its colour) and one per metric (its line
+        # style), not every process x metric pair.
+        fqn_base = {s.fqn: label_bases[(s.fqn, s.scope_key)] for s in live}
+        procs: dict = {}
+        for s in live:
+            procs.setdefault(s.scope_key, []).append(s)
+        shown, hidden = panel_legend.cap(
+            [(k, sum(amount[(s.fqn, k)] for s in ss)) for k, ss in procs.items()])
+        listed = set(shown)
+        proc_act = {k: sum(amount[(s.fqn, k)] for s in ss) for k, ss in procs.items()}
+        pcolor = _distinct_colors(sorted(shown, key=lambda k: -proc_act[k]),
+                                  {k: colors[(procs[k][0].fqn, k)] for k in shown})
+        for ss in procs.values():
+            for s in ss:
+                if s.scope_key in pcolor:
+                    colors[(s.fqn, s.scope_key)] = pcolor[s.scope_key]
+        for k in shown:
+            label = _process_label(projector, k)
+            if kind == "integrated":
+                parts = [f"{label_bases[(s.fqn, k)]} {total(amount[(s.fqn, k)])}"
+                         for s in procs[k] if amount[(s.fqn, k)] > 0]
+                label += ": " + (", ".join(parts) if parts else "0")
+            entries.append((label, colors[(procs[k][0].fqn, k)], "-"))
+        if hidden:
+            label = panel_legend.more_label(len(hidden))
+            if kind == "integrated":
+                sums: dict = {}
+                for k in hidden:
+                    for s in procs[k]:
+                        sums[s.fqn] = sums.get(s.fqn, 0.0) + amount[(s.fqn, k)]
+                parts = [f"{fqn_base[f]} {total(v)}" for f, v in sums.items() if v > 0]
+                label += ": " + (", ".join(parts) if parts else "0")
+            entries.append((label, panel_legend.OTHER_COLOR, "-"))
+        for fqn, ls in dict.fromkeys((s.fqn, linestyles[(s.fqn, s.scope_key)]) for s in live):
+            entries.append((fqn_base[fqn], "black", ls))
+        styles = {(s.fqn, s.scope_key): (colors[(s.fqn, s.scope_key)],
+                                         linestyles[(s.fqn, s.scope_key)],
+                                         s.scope_key in listed) for s in live}
+    else:
+        keys = [(s.fqn, s.scope_key) for s in live]
+        shown, hidden = panel_legend.cap([(k, amount[k]) for k in keys])
+        listed = set(shown)
+        colors.update(_distinct_colors(sorted(shown, key=lambda k: -amount[k]), colors))
+        by_key = {(s.fqn, s.scope_key): s for s in live}
+        for k in shown:
+            label = _series_label(by_key[k], projector, base=label_bases[k])
+            if kind == "integrated":
+                label += f" = {total(amount[k])}"
+            entries.append((label, colors[k], linestyles[k]))
+        if hidden:
+            label = panel_legend.more_label(len(hidden))
+            if kind == "integrated":
+                label += f": {total(sum(amount[k] for k in hidden))}"
+            entries.append((label, panel_legend.OTHER_COLOR, "-"))
+        styles = {k: (colors[k], linestyles[k], k in listed) for k in keys}
+    return _LegendPlan(styles, entries, avail_width_pt)
+
+
+def _draw_legend(ax, plan: _LegendPlan) -> None:
+    """The plan's legend, above the axes (outside them), left-aligned."""
+    if not plan.entries:
         return
     from matplotlib.lines import Line2D
-    colors, styles = {}, {}
-    for line in ax.get_lines():
-        key = getattr(line, "_series_key", None)
-        if key is None:
-            continue
-        fqn, scope_key = key
-        colors.setdefault(scope_key, line.get_color())
-        styles.setdefault(fqn, line.get_linestyle())
-    base = {s.fqn: label_bases[(s.fqn, s.scope_key)] for s in series_list}
-    handles = [Line2D([], [], color=c, lw=1.5, label=_process_label(projector, k))
-               for k, c in colors.items()]
-    handles += [Line2D([], [], color="black", lw=1.0, linestyle=ls, label=base[f])
-                for f, ls in styles.items()]
-    ax.legend(handles=handles, loc=loc, fontsize=7, framealpha=0.85,
-              ncol=2 if len(handles) > 8 else 1)
+    handles = [Line2D([], [], color=c, linestyle=ls,
+                      lw=1.0 if c == "black" else 1.5, label=lab)
+               for lab, c, ls in plan.entries]
+    fs = LEGEND_FONTSIZE
+    ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
+              ncol=plan.ncol, fontsize=fs, frameon=False,
+              borderaxespad=LEGEND_AXESPAD_EM, borderpad=LEGEND_BORDER_EM,
+              handlelength=LEGEND_HANDLE_EM, handletextpad=LEGEND_TEXTPAD_EM,
+              columnspacing=LEGEND_COLSPACE_EM, labelspacing=LEGEND_ROWSPACE_EM)
+
+
+def _axes_width_pt(ax) -> float:
+    return ax.get_position().width * ax.figure.get_figwidth() * 72.0
+
+
+def _plot_styled(ax, time_s, y, key, plan: _LegendPlan) -> None:
+    color, ls, listed = plan.styles[key]
+    if listed:
+        line, = ax.plot(time_s, y, color=color, linewidth=0.9, linestyle=ls, zorder=2)
+    else:
+        line, = ax.plot(time_s, y, color=panel_legend.OTHER_COLOR, linewidth=0.6,
+                        linestyle=ls, zorder=1)
+    line._series_key = key
 
 
 def _panel_title(panel, series_list: list[metric_layout.ResolvedSeries]) -> str:
@@ -439,8 +664,13 @@ def _render_metric_panel(
     t0_ns: int,
     pid_color_map: dict[int, str],
     display_hz: float = 0.0,
+    plan: _LegendPlan | None = None,
 ) -> None:
-    ax.set_title(_panel_title(panel, series_list), fontsize=10, loc="left")
+    if plan is None:
+        plan = _plan_legend(panel, series_list, "metric", projector, projection,
+                            pid_color_map, _axes_width_pt(ax))
+    ax.set_title(_panel_title(panel, series_list), fontsize=10, loc="left",
+                 pad=plan.height_pt or None)
     ax.grid(True, alpha=0.3)
 
     unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
@@ -449,19 +679,9 @@ def _render_metric_panel(
     scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
     ax.set_ylabel(ylabel)
 
-    label_bases = metric_layout.disambiguate_short_labels(series_list)
-    linestyles = _series_linestyles(series_list)
-
-    color_idx = 0
     for series in series_list:
-        if (series.scope == mc_pb.SCOPE_PROCESS
-                and int(series.scope_key) in pid_color_map):
-            color = pid_color_map[int(series.scope_key)]
-        else:
-            color = _COLOR_CYCLE[color_idx % len(_COLOR_CYCLE)]
-            color_idx += 1
-
-        ts_ns, vals = projection[(series.fqn, series.scope_key)]
+        key = (series.fqn, series.scope_key)
+        ts_ns, vals = projection[key]
         if ts_ns.size == 0:
             continue
 
@@ -475,12 +695,7 @@ def _render_metric_panel(
         ts_ns, vals = _decimate_to_hz(ts_ns, vals, sample_freq_hz, display_hz)
 
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
-        line, = ax.plot(time_s, scale_fn(vals),
-                        color=color, linewidth=0.9,
-                        linestyle=linestyles[(series.fqn, series.scope_key)],
-                        label=_series_label(series, projector,
-                                            base=label_bases[(series.fqn, series.scope_key)]))
-        line._series_key = (series.fqn, series.scope_key)
+        _plot_styled(ax, time_s, scale_fn(vals), key, plan)
 
     peak_scaled = None
     if peak_hint is not None and peak_hint > 0:
@@ -514,7 +729,7 @@ def _render_metric_panel(
         fmt.set_scientific(False)
         axis.set_major_formatter(fmt)
 
-    _panel_legend(ax, series_list, projector, label_bases, linestyles, "upper right")
+    _draw_legend(ax, plan)
     ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
@@ -529,105 +744,40 @@ def _render_integrated_panel(
     pid_color_map: dict[int, str],
     sample_freq_hz: float = 0.0,
     display_hz: float = 0.0,
+    plan: _LegendPlan | None = None,
 ) -> None:
     """Companion to _render_metric_panel — plots ∫ y dt of each series.
 
     Uses the panel's source unit (descriptor.unit, possibly overridden
     by panel.unit_override) and looks up the integrated unit in
     _INTEGRATED_UNIT. If the source unit isn't integrable, the panel
-    falls back to UNIT_UNSPECIFIED (no axis label, auto-scale).
+    falls back to UNIT_UNSPECIFIED (no axis label, auto-scale). Each
+    series' run total (from the full-resolution series) is in its
+    legend entry.
     """
-    source_unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
-        else series_list[0].descriptor.unit
-    integrated_unit = _INTEGRATED_UNIT.get(source_unit, mc_pb.UNIT_UNSPECIFIED)
+    if plan is None:
+        plan = _plan_legend(panel, series_list, "integrated", projector, projection,
+                            pid_color_map, _axes_width_pt(ax))
     title = _panel_title(panel, series_list) + "  (cumulative)"
-    ax.set_title(title, fontsize=10, loc="left")
+    ax.set_title(title, fontsize=10, loc="left", pad=plan.height_pt or None)
     ax.grid(True, alpha=0.3)
 
-    # First-pass max to size the byte-unit axis (KiB / MiB / GiB).
-    # Compute the cumulative arrays once, stash, plot.
-    max_total = 0.0
-    series_cumulatives: list[tuple[metric_layout.ResolvedSeries, np.ndarray, np.ndarray]] = []
-    for series in series_list:
-        ts_ns, vals = projection[(series.fqn, series.scope_key)]
-        if ts_ns.size == 0:
-            continue
-        cum = _trapz_cumulative(ts_ns, vals.astype(np.float64))
-        series_cumulatives.append((series, ts_ns, cum))
-        if cum.size and cum[-1] > max_total:
-            max_total = float(cum[-1])
-
-    scale_fn, ylabel = _format_unit_axis(integrated_unit,
-                                          peak_hint=max_total if max_total > 0 else None)
+    cums, scale_fn, ylabel = _integrated_axis(panel, series_list, projection)
     ax.set_ylabel(ylabel)
 
-    label_bases = metric_layout.disambiguate_short_labels(series_list)
-    linestyles = _series_linestyles(series_list)
-
-    color_idx = 0
-    for series, ts_ns, cum in series_cumulatives:
-        if (series.scope == mc_pb.SCOPE_PROCESS
-                and int(series.scope_key) in pid_color_map):
-            color = pid_color_map[int(series.scope_key)]
-        else:
-            color = _COLOR_CYCLE[color_idx % len(_COLOR_CYCLE)]
-            color_idx += 1
-        # Decimate the cumulative curve for display; the run-total
-        # annotation below uses cum[-1] which is computed from the
-        # full-resolution series, so the total stays faithful.
-        ts_plot, cum_plot = _decimate_to_hz(ts_ns, cum,
-                                            sample_freq_hz, display_hz)
+    for key, (ts_ns, cum) in cums.items():
+        # Decimate the cumulative curve for display; the run totals in
+        # the legend use cum[-1] of the full-resolution series.
+        ts_plot, cum_plot = _decimate_to_hz(ts_ns, cum, sample_freq_hz, display_hz)
         time_s = (ts_plot.astype(np.int64) - t0_ns) / 1e9
-        line, = ax.plot(time_s, scale_fn(cum_plot),
-                        color=color, linewidth=0.9,
-                        linestyle=linestyles[(series.fqn, series.scope_key)],
-                        label=_series_label(series, projector,
-                                            base=label_bases[(series.fqn, series.scope_key)]))
-        line._series_key = (series.fqn, series.scope_key)
-
-    # Annotate each series' run total at the right edge so the
-    # cumulative value is readable without squinting at the axis.
-    unit_sfx = f" {ylabel}" if ylabel else ""
-    if series_cumulatives and any(ls != "-" for ls in linestyles.values()):
-        # Several metrics per process: one line per process, listing
-        # its non-zero totals; processes with none are left out.
-        per_proc: dict = {}
-        for series, _ts, cum in series_cumulatives:
-            v = float(cum[-1]) if cum.size else 0.0
-            if v > 0:
-                per_proc.setdefault(series.scope_key, []).append(
-                    f"{label_bases[(series.fqn, series.scope_key)]} "
-                    f"{_fmt_plain(scale_fn(v))}{unit_sfx}")
-        total_label_lines = [f"{_process_label(projector, k)}: " + ", ".join(v)
-                             for k, v in per_proc.items()]
-        n_zero = len({s.scope_key for s, _t, _c in series_cumulatives}) - len(per_proc)
-        if n_zero:
-            total_label_lines.append(f"{n_zero} more process(es): 0")
-    elif series_cumulatives:
-        total_label_lines = []
-        for series, _ts, cum in series_cumulatives:
-            if cum.size == 0:
-                continue
-            total_label_lines.append(
-                f"{_series_label(series, projector, base=label_bases[(series.fqn, series.scope_key)])} = "
-                f"{_fmt_plain(scale_fn(float(cum[-1])))}"
-                f"{unit_sfx}"
-            )
-    if series_cumulatives:
-        if total_label_lines:
-            ax.text(0.99, 0.04, "\n".join(total_label_lines),
-                    transform=ax.transAxes, ha="right", va="bottom",
-                    fontsize=7, color="black",
-                    bbox=dict(facecolor="white", alpha=0.75,
-                              edgecolor="#cccccc", linewidth=0.5,
-                              boxstyle="round,pad=0.25"))
+        _plot_styled(ax, time_s, scale_fn(cum_plot), key, plan)
 
     ax.set_ylim(bottom=0.0)
     for axis in (ax.xaxis, ax.yaxis):
         fmt = ticker.ScalarFormatter(useOffset=False, useMathText=False)
         fmt.set_scientific(False)
         axis.set_major_formatter(fmt)
-    _panel_legend(ax, series_list, projector, label_bases, linestyles, "upper left")
+    _draw_legend(ax, plan)
     ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
@@ -1066,18 +1216,53 @@ def main() -> int:
                              "data so the displayed totals stay faithful.")
     args = parser.parse_args()
 
-    metadata_path = Path(args.metadata).resolve()
+    rendered = build_figure(args.metadata, catalog=args.catalog,
+                            panel_layout=args.panel_layout,
+                            smooth_window_s=args.smooth_window_s,
+                            display_hz=args.display_hz)
+    if rendered is None:
+        return 1
+
+    out_path = Path(args.output).resolve()
+    _log(f"saving to {out_path}")
+    rendered.fig.savefig(out_path, dpi=150)
+
+    legend_path = out_path.with_suffix(".legend.txt")
+    _write_legend_file(legend_path, out_path, rendered.resolved, rendered.projector)
+    _log(f"legend reference written to {legend_path}")
+
+    _log("done")
+    return 0
+
+
+class Rendered:
+    """build_figure's result: the figure, the resolved panels
+    ((panel, series_list, kind) in render order), the projector, and the
+    axes by role (`panel_axes`: (panel, series_list, kind, ax) per
+    metric panel, top to bottom; `region_ax`, `event_ax`)."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def build_figure(metadata, *, catalog=None, panel_layout=None,
+                 smooth_window_s: float = 0.0, display_hz: float = 0.0):
+    """Render the trace whose session_metadata.pb is `metadata` into a
+    matplotlib figure (not saved). Returns a Rendered, or None when there
+    is nothing to plot."""
+    metadata_path = Path(metadata).resolve()
     _log(f"loading session metadata from {metadata_path}")
     meta = _load_session_metadata(metadata_path)
 
-    if args.catalog:
-        catalog = metric_catalog.load_catalog(args.catalog)
-        _log(f"catalog: {len(catalog.metrics)} descriptors (from {args.catalog})")
+    if catalog:
+        catalog_path = catalog
+        catalog = metric_catalog.load_catalog(catalog_path)
+        _log(f"catalog: {len(catalog.metrics)} descriptors (from {catalog_path})")
     else:
         catalog = metric_catalog.load_catalog_from_session_metadata(meta)
         _log(f"catalog: {len(catalog.metrics)} descriptors (inlined)")
 
-    layout_path = Path(args.panel_layout) if args.panel_layout \
+    layout_path = Path(panel_layout) if panel_layout \
         else _HERE.parent / "configs" / "visualizer_panels.pbtxt"
     layout = metric_layout.load_panel_layout(layout_path)
     _log(f"layout: {len(layout.panels)} panels (from {layout_path})")
@@ -1090,7 +1275,7 @@ def main() -> int:
     proj = projector.project()
     if not proj:
         _log("no samples — nothing to plot")
-        return 1
+        return None
 
     t0_ns, t_end_ns = _first_last_ns(projector, proj)
     # Include events in the time range so the strips don't overflow.
@@ -1102,7 +1287,7 @@ def main() -> int:
         if t_end_ns is None or e > t_end_ns: t_end_ns = e
     if t0_ns is None or t_end_ns is None or t_end_ns <= t0_ns:
         _log("no plottable time range")
-        return 1
+        return None
     xmax_s = (t_end_ns - t0_ns) / 1e9
 
     # Resolve catalog index (with synthesized fallback for GPU FQNs)
@@ -1136,7 +1321,7 @@ def main() -> int:
                 resolved.append((panel, series, "integrated"))
     if not resolved:
         _log("no panels resolved any series")
-        return 1
+        return None
 
     # Group resolved panels by source probe.
     groups: dict[str, list] = {"gpu": [], "system": [], "disk": []}
@@ -1144,43 +1329,44 @@ def main() -> int:
         g = _panel_group(series, projector.fqn_to_probe)
         groups.setdefault(g, []).append((panel, series, kind))
 
-    # Stable PID color map: shared across every per-PID panel so the
-    # same PID renders in the same color everywhere.
-    pid_color_map: dict[int, str] = {}
-    seen_pids: list[int] = []
-    for _g, panels in groups.items():
-        for _p, series_list, _k in panels:
-            for s in series_list:
-                if s.scope == mc_pb.SCOPE_PROCESS:
-                    pid = int(s.scope_key)
-                    if pid not in pid_color_map:
-                        pid_color_map[pid] = _COLOR_CYCLE[len(seen_pids) % len(_COLOR_CYCLE)]
-                        seen_pids.append(pid)
+    pid_color_map = _pid_color_map([p for g in ("gpu", "system", "disk")
+                                    for p in groups.get(g, [])], proj)
+
+    # Legends (above each panel): colours, entries and height, decided
+    # now so each legend's height is reserved in the layout.
+    legend_width_pt = (FIG_WIDTH - FIG_MARGIN_LEFT - FIG_MARGIN_RIGHT) * 72.0
+    plans_by_group = {
+        g: [_plan_legend(panel, series_list, kind, projector, proj,
+                         pid_color_map, legend_width_pt)
+            for panel, series_list, kind in panels]
+        for g, panels in groups.items()}
 
     # ---------------- Build inches-based layout ----------------
-    sections: list[tuple[str, list[tuple[str, float]]]] = []
+    # Each entry: (kind, height, room reserved above it for its legend).
+    sections: list[tuple[str, list[tuple[str, float, float]]]] = []
 
-    annot_panels: list[tuple[str, float]] = []
+    annot_panels: list[tuple[str, float, float]] = []
     has_events  = bool(probes["events"]["events"])
     has_regions = bool(probes["events"]["regions"])
-    if has_events:  annot_panels.append(("event",  PANEL_HEIGHT_EVENT))
-    if has_regions: annot_panels.append(("region", PANEL_HEIGHT_REGION))
+    if has_events:  annot_panels.append(("event",  PANEL_HEIGHT_EVENT, 0.0))
+    if has_regions: annot_panels.append(("region", PANEL_HEIGHT_REGION, 0.0))
     if annot_panels:
         sections.append(("annot", annot_panels))
 
     for group_key in ("gpu", "system", "disk"):
         if groups.get(group_key):
             sections.append((group_key,
-                             [("metric", PANEL_HEIGHT_METRIC)] * len(groups[group_key])))
+                             [("metric", PANEL_HEIGHT_METRIC, plan.height_pt / 72.0)
+                              for plan in plans_by_group[group_key]]))
 
     has_footer = bool(probes["gpu"]["traces"] or probes["system"]["traces"]
                        or probes["disk"]["traces"])
     if has_footer:
-        sections.append(("footer", [("footer", PANEL_HEIGHT_FOOTER)]))
+        sections.append(("footer", [("footer", PANEL_HEIGHT_FOOTER, 0.0)]))
 
     if not sections:
         _log("nothing to render")
-        return 1
+        return None
 
     def _within_group_gap(prev_kind, kind):
         if prev_kind == "event" and kind == "region":
@@ -1191,7 +1377,7 @@ def main() -> int:
         return (SPACING_AFTER_REGION if prev_section[1][-1][0] == "region"
                 else SPACING_SECTION)
 
-    panel_h_sum = sum(h for _g, panels in sections for _k, h in panels)
+    panel_h_sum = sum(h + above for _g, panels in sections for _k, h, above in panels)
     small_sp_total = sum(_within_group_gap(panels[i-1][0], panels[i][0])
                           for _g, panels in sections for i in range(1, len(panels)))
     section_break_total = sum(_between_section_gap(sections[i-1], sections[i])
@@ -1212,10 +1398,10 @@ def main() -> int:
             gap = _between_section_gap(sections[si-1], sections[si])
             section_break_y_in.append(y_top_in - gap / 2)
             y_top_in -= gap
-        for pi, (panel_kind, h) in enumerate(panels):
+        for pi, (panel_kind, h, above) in enumerate(panels):
             if pi > 0:
                 y_top_in -= _within_group_gap(prev_kind, panel_kind)
-            y_top_in -= h
+            y_top_in -= above + h
             ax = fig.add_axes([left_frac, y_top_in / fig_h,
                                 width_frac, h / fig_h])
             placed.append((group_key, panel_kind, ax))
@@ -1241,22 +1427,24 @@ def main() -> int:
                        "system": probes["system"]["freq_hz"],
                        "disk": probes["disk"]["freq_hz"]}
     for group_key in ("gpu", "system", "disk"):
-        for ax, (panel, series_list, kind) in zip(
-                metric_axes_by_group[group_key], groups[group_key]):
+        for ax, (panel, series_list, kind), plan in zip(
+                metric_axes_by_group[group_key], groups[group_key],
+                plans_by_group[group_key]):
             if kind == "integrated":
                 _render_integrated_panel(
                     ax, panel, series_list, projector, proj,
                     t0_ns=t0_ns, pid_color_map=pid_color_map,
                     sample_freq_hz=sample_freq_for[group_key],
-                    display_hz=args.display_hz)
+                    display_hz=display_hz, plan=plan)
                 continue
             _render_metric_panel(
                 ax, panel, series_list, projector, proj,
                 sample_freq_hz=sample_freq_for[group_key],
-                smooth_window_s=args.smooth_window_s,
+                smooth_window_s=smooth_window_s,
                 t0_ns=t0_ns,
                 pid_color_map=pid_color_map,
-                display_hz=args.display_hz,
+                display_hz=display_hz,
+                plan=plan,
             )
 
     # ---------------- Strips + overlays ----------------
@@ -1416,16 +1604,12 @@ def main() -> int:
         if region_ax is not None:
             _spread_rotated_label_groups(region_ax, region_groups, renderer)
 
-    out_path = Path(args.output).resolve()
-    _log(f"saving to {out_path}")
-    fig.savefig(out_path, dpi=150)
-
-    legend_path = out_path.with_suffix(".legend.txt")
-    _write_legend_file(legend_path, out_path, resolved, projector)
-    _log(f"legend reference written to {legend_path}")
-
-    _log("done")
-    return 0
+    panel_axes = []
+    for g in ("gpu", "system", "disk"):
+        for ax, (panel, series_list, kind) in zip(metric_axes_by_group[g], groups[g]):
+            panel_axes.append((panel, series_list, kind, ax))
+    return Rendered(fig=fig, resolved=resolved, projector=projector,
+                    panel_axes=panel_axes, region_ax=region_ax, event_ax=event_ax)
 
 
 if __name__ == "__main__":

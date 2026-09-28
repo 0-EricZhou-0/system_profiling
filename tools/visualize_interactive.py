@@ -51,6 +51,7 @@ import session_metadata_pb2  # noqa: E402
 import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
+import panel_legend  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 from bokeh.application import Application  # noqa: E402
@@ -59,7 +60,7 @@ from bokeh.embed import file_html  # noqa: E402
 from bokeh.themes import built_in_themes  # noqa: E402
 from bokeh.layouts import column  # noqa: E402
 from bokeh.models import (BoxAnnotation, BoxZoomTool, ColumnDataSource,  # noqa: E402
-                          CustomJS, HoverTool, PanTool, Range1d,
+                          CustomJS, HoverTool, Legend, LegendItem, PanTool, Range1d,
                           ResetTool, SaveTool, Span, WheelZoomTool)
 from bokeh.palettes import Category10  # noqa: E402
 from bokeh.plotting import figure  # noqa: E402
@@ -447,6 +448,9 @@ _PALETTE = list(Category10[10])
 _BORDER_LEFT_PX  = 80
 _STRIP_LEFT_PX   = 98
 _FRAME_WIDTH     = 860
+# Plot-frame height of a metric panel; the title, the legend above and
+# the axis below add to it (so a long legend never squeezes the plot).
+_FRAME_HEIGHT    = 150
 
 
 # Bokeh `output_backend` applied to every figure. main() overrides via
@@ -492,6 +496,41 @@ _THEMES = {
     },
 }
 _THEME = "light"
+
+
+# Legends sit above their panel (outside the plot frame), in as many
+# columns as the widest label allows across the frame. Which entries:
+# panel_legend (at most LEGEND_MAX_ENTRIES, the rest drawn in
+# OTHER_COLOR and toggled together by one "+k more" entry).
+_LEGEND_FONT_PX   = 8 * 96 / 72   # 8pt
+_LEGEND_CHAR_EM   = 0.45          # average glyph width of the UI font, in em
+_LEGEND_ENTRY_PAD = 20 + 5 + 3 + 10   # glyph_width + label_standoff + spacing + slack
+
+
+def _legend_ncols(labels: list[str]) -> int:
+    if not labels:
+        return 1
+    widest = max(len(lab) for lab in labels) * _LEGEND_CHAR_EM * _LEGEND_FONT_PX
+    return max(1, min(len(labels), int(_FRAME_WIDTH // (widest + _LEGEND_ENTRY_PAD))))
+
+
+def _legend_above(fig, shown: list[tuple[str, object]], hidden: list,
+                  more_suffix: str = "") -> None:
+    """Legend above the plot: `shown` = [(label, renderer)], `hidden` =
+    renderers counted in one "+k more" entry (its label followed by
+    `more_suffix`). Click an entry to hide its line(s)."""
+    labels = [lab for lab, _r in shown]
+    items = [LegendItem(label=lab, renderers=[r]) for lab, r in shown]
+    if hidden:
+        labels.append(panel_legend.more_label(len(hidden)) + more_suffix)
+        items.append(LegendItem(label=labels[-1], renderers=list(hidden)))
+    if not items:
+        return
+    fig.add_layout(Legend(items=items, ncols=_legend_ncols(labels),
+                          location="top_left", click_policy="hide",
+                          label_text_font_size="8pt", padding=4, margin=2,
+                          spacing=3, border_line_alpha=0.0),
+                   "above")
 
 
 def _attach_unified_hover(
@@ -581,7 +620,7 @@ def _build_panel(
         title=_panel_title(panel, series_list),
         x_axis_label="time (s)",
         y_axis_label=ylabel,
-        width=1200, height=240, frame_width=_FRAME_WIDTH,
+        width=1200, frame_height=_FRAME_HEIGHT, frame_width=_FRAME_WIDTH,
         min_border_left=_BORDER_LEFT_PX,
         tools=tools,
         toolbar_location="left",
@@ -594,21 +633,29 @@ def _build_panel(
     fig = figure(**fig_kwargs)
 
     label_bases = metric_layout.disambiguate_short_labels(series_list)
+    live = [s for s in series_list if projection[(s.fqn, s.scope_key)][0].size]
+    listed, _hidden = panel_legend.cap(
+        [((s.fqn, s.scope_key), panel_legend.activity(*projection[(s.fqn, s.scope_key)]))
+         for s in live])
+    listed = set(listed)
 
     cds_by_key: dict[tuple, ColumnDataSource] = {}
-    for i, series in enumerate(series_list):
-        color = _PALETTE[i % len(_PALETTE)]
-        ts_ns, vals = projection[(series.fqn, series.scope_key)]
-        if ts_ns.size == 0:
-            continue
+    shown, hidden = [], []
+    for series in live:
+        key = (series.fqn, series.scope_key)
+        ts_ns, vals = projection[key]
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
         cds = ColumnDataSource(data=dict(
             x=time_s, y=scale_fn(vals.astype(np.float64)),
         ))
-        cds_by_key[(series.fqn, series.scope_key)] = cds
-        fig.line("x", "y", source=cds, color=color, line_width=1.2,
-                 legend_label=_series_label(series, projector,
-                                            base=label_bases[(series.fqn, series.scope_key)]))
+        cds_by_key[key] = cds
+        if key in listed:
+            r = fig.line("x", "y", source=cds, color=_PALETTE[len(shown) % len(_PALETTE)],
+                         line_width=1.2)
+            shown.append((_series_label(series, projector, base=label_bases[key]), r))
+        else:
+            hidden.append(fig.line("x", "y", source=cds, color=panel_legend.OTHER_COLOR,
+                                   line_width=0.8))
 
     # Peak reference line + y-range. When the panel has a known peak,
     # pin the view to [0, peak*headroom] with hard bounds so pan/zoom
@@ -639,16 +686,7 @@ def _build_panel(
         unit_suffix=ylabel,
     )
 
-    # Click-to-hide legend entries (only present if a glyph added one).
-    # Move the legend out of the plot area to the right so it never
-    # occludes the trace.
-    if fig.legend:
-        legend = fig.legend[0]
-        legend.click_policy = "hide"
-        legend.label_text_font_size = "8pt"
-        legend.location = "top_left"
-        fig.add_layout(legend, "right")
-
+    _legend_above(fig, shown, hidden)
     return fig, cds_by_key
 
 
@@ -673,6 +711,17 @@ def _trapz_cumulative(ts_ns: np.ndarray, vals: np.ndarray) -> np.ndarray:
     out[0]  = 0.0
     out[1:] = np.cumsum(inc)
     return out
+
+
+def _fmt_total(v: float) -> str:
+    """Plain (non-scientific) number for a run total."""
+    if v == int(v):
+        return f"{int(v):,}"
+    if abs(v) >= 100:
+        return f"{v:,.0f}"
+    if abs(v) >= 1:
+        return f"{v:.2f}".rstrip("0").rstrip(".")
+    return f"{v:.4f}".rstrip("0").rstrip(".")
 
 
 def _panel_has_cumulative_companion(panel,
@@ -724,12 +773,14 @@ def _build_cumulative_panel(
     # Cumulate on the full-resolution arrays for an accurate total,
     # then optionally decimate the (ts, cum) pair for display only.
     cumulatives: list[tuple[metric_layout.ResolvedSeries, np.ndarray, np.ndarray]] = []
+    full_totals: list[tuple[metric_layout.ResolvedSeries, np.ndarray]] = []
     max_total = 0.0
     for series in series_list:
         ts_ns, vals = projection[(series.fqn, series.scope_key)]
         if ts_ns.size == 0:
             continue
         cum = _trapz_cumulative(ts_ns, vals.astype(np.float64))
+        full_totals.append((series, cum))
         if cum.size and cum[-1] > max_total:
             max_total = float(cum[-1])
         if display_hz > 0 and source_hzs is not None:
@@ -746,7 +797,7 @@ def _build_cumulative_panel(
         title=f"{base_title}  (cumulative)",
         x_axis_label="time (s)",
         y_axis_label=ylabel,
-        width=1200, height=240, frame_width=_FRAME_WIDTH,
+        width=1200, frame_height=_FRAME_HEIGHT, frame_width=_FRAME_WIDTH,
         min_border_left=_BORDER_LEFT_PX,
         tools=tools,
         toolbar_location="left",
@@ -764,15 +815,29 @@ def _build_cumulative_panel(
     # Stash pre-cumulated values so the unified hover sees the
     # cumulative curve rather than the source rate.
     cumulative_projection: dict[tuple[str, object], tuple[np.ndarray, np.ndarray]] = {}
-    for i, (series, ts_ns, cum) in enumerate(cumulatives):
-        color = _PALETTE[i % len(_PALETTE)]
+    # Legend: the largest run totals (full resolution), each in its label.
+    totals = {(s.fqn, s.scope_key): float(c[-1]) if c.size else 0.0
+              for s, c in full_totals}
+    listed, _hidden = panel_legend.cap(list(totals.items()))
+    listed = set(listed)
+    unit_sfx = f" {ylabel}" if ylabel else ""
+    shown, hidden = [], []
+    hidden_total = 0.0
+    for series, ts_ns, cum in cumulatives:
+        key = (series.fqn, series.scope_key)
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
         cds = ColumnDataSource(data=dict(x=time_s, y=scale_fn(cum)))
-        cds_by_key[(series.fqn, series.scope_key)] = cds
-        cumulative_projection[(series.fqn, series.scope_key)] = (ts_ns, cum)
-        fig.line("x", "y", source=cds, color=color, line_width=1.2,
-                 legend_label=_series_label(series, projector,
-                                            base=label_bases[(series.fqn, series.scope_key)]))
+        cds_by_key[key] = cds
+        cumulative_projection[key] = (ts_ns, cum)
+        if key in listed:
+            r = fig.line("x", "y", source=cds, color=_PALETTE[len(shown) % len(_PALETTE)],
+                         line_width=1.2)
+            label = _series_label(series, projector, base=label_bases[key])
+            shown.append((f"{label} = {_fmt_total(scale_fn(totals[key]))}{unit_sfx}", r))
+        else:
+            hidden.append(fig.line("x", "y", source=cds, color=panel_legend.OTHER_COLOR,
+                                   line_width=0.8))
+            hidden_total += totals[key]
 
     # Cumulative curves are non-negative monotonic — clamp the floor
     # at 0 and let the upper auto-fit.
@@ -786,13 +851,8 @@ def _build_cumulative_panel(
         unit_suffix=ylabel,
     )
 
-    if fig.legend:
-        legend = fig.legend[0]
-        legend.click_policy = "hide"
-        legend.label_text_font_size = "8pt"
-        legend.location = "top_left"
-        fig.add_layout(legend, "right")
-
+    _legend_above(fig, shown, hidden,
+                  more_suffix=f": {_fmt_total(scale_fn(hidden_total))}{unit_sfx}")
     return fig, cds_by_key
 
 
@@ -1129,6 +1189,15 @@ def _inject_loading_overlay(html: str, n_figures: int) -> str:
 # Static rendering path
 # ---------------------------------------------------------------------------
 
+class StaticDocument:
+    """_build_static_document's result: the page's root layout, the
+    sticky strips (event, region) and the panels as (panel, kind, figure)
+    top to bottom, kind "metric" or "cumulative"."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
 def _render_static(
     projector: TraceProjector,
     layout: metric_layout.PanelLayout,
@@ -1142,10 +1211,58 @@ def _render_static(
     smooth_window_s: float,
     display_hz: float,
 ) -> None:
+    doc = _build_static_document(projector, layout, catalog_index, meta, metadata_path,
+                                 sample_freqs, probes_info, smooth_window_s, display_hz)
+    if doc is None:
+        return
+    theme = _THEMES[_THEME]
+    # file_html silently ignores theme string names — resolve to a
+    # Theme object via built_in_themes. None falls through to stock.
+    bokeh_theme = (built_in_themes[theme["bokeh_theme"]]
+                   if theme["bokeh_theme"] else None)
+    html = file_html(doc.root, INLINE, title=title, theme=bokeh_theme)
+    html = _inject_loading_overlay(html, doc.n_figures)
+    if doc.footer_text:
+        html = _inject_write_rate_footer(html, doc.footer_text, theme)
+    out_path.write_text(html)
+    _log(f"wrote {out_path}  ({out_path.stat().st_size // 1024} KiB; "
+         f"{doc.n_figures} panels)")
+
+
+def build_static(metadata, *, catalog=None, panel_layout=None,
+                 smooth_window_s: float = 0.0, display_hz: float = 0.0):
+    """Load the trace whose session_metadata.pb is `metadata` and build
+    the static page's Bokeh document (not written). Returns a
+    StaticDocument, or None when there is nothing to render."""
+    metadata_path = Path(metadata).resolve()
+    meta = _load_session_metadata(metadata_path)
+    cat = (metric_catalog.load_catalog(catalog) if catalog
+           else metric_catalog.load_catalog_from_session_metadata(meta))
+    layout_path = Path(panel_layout) if panel_layout \
+        else _HERE.parent / "configs" / "visualizer_panels.pbtxt"
+    layout = metric_layout.load_panel_layout(layout_path)
+    projector = TraceProjector(cat)
+    sample_freqs, probes_info = _ingest_probes(projector, meta, metadata_path)
+    return _build_static_document(projector, layout, metric_catalog.build_index(cat),
+                                  meta, metadata_path, sample_freqs, probes_info,
+                                  smooth_window_s, display_hz)
+
+
+def _build_static_document(
+    projector: TraceProjector,
+    layout: metric_layout.PanelLayout,
+    catalog_index: dict[str, mc_pb.MetricDescriptor],
+    meta: session_metadata_pb2.SessionMetadata,
+    metadata_path: Path,
+    sample_freqs: dict[str, int],
+    probes_info: dict[str, dict],
+    smooth_window_s: float,
+    display_hz: float,
+):
     proj = projector.project()
     if not proj:
         _log("no samples — nothing to render")
-        return
+        return None
     t0_ns = min(int(ts[0]) for ts, _ in proj.values() if ts.size > 0)
     t_end_ns = max(int(ts[-1]) for ts, _ in proj.values() if ts.size > 0)
     series_keys = list(proj.keys())
@@ -1195,6 +1312,7 @@ def _render_static(
 
     metric_figs: list = []
     figs: list = []
+    panel_figs: list = []
     shared_x = None
     for panel in layout.panels:
         series = metric_layout.resolve_panel_series(panel, catalog_index, series_keys)
@@ -1206,6 +1324,7 @@ def _render_static(
             shared_x = fig.x_range
         figs.append(fig)
         metric_figs.append(fig)
+        panel_figs.append((panel, "metric", fig))
         # Companion cumulative panel, directly below — opt-in per
         # panel via aggregation: PANEL_AGGREGATION_INTEGRATE. Uses the
         # unsmoothed `proj` so the integrated total is faithful; the
@@ -1221,6 +1340,7 @@ def _render_static(
                 display_hz=display_hz, source_hzs=source_hzs)
             figs.append(cum_fig)
             metric_figs.append(cum_fig)
+            panel_figs.append((panel, "cumulative", cum_fig))
         elif panel.aggregation == panels_pb.PANEL_AGGREGATION_INTEGRATE:
             _log(f"  panel {panel.title!r}: aggregation INTEGRATE set but "
                  "source unit has no integrated mapping — skipping companion")
@@ -1302,19 +1422,9 @@ def _render_static(
     # Bokeh version's widget layout), so we sidestep the widget layer.
     footer_text = _format_write_rate_footer(footer_rows) if footer_rows else None
 
-    all_figs = strips + figs  # for the loading-overlay panel count
     layout_root = column(layout_children, sizing_mode="stretch_width")
-    # file_html silently ignores theme string names — resolve to a
-    # Theme object via built_in_themes. None falls through to stock.
-    bokeh_theme = (built_in_themes[theme["bokeh_theme"]]
-                   if theme["bokeh_theme"] else None)
-    html = file_html(layout_root, INLINE, title=title, theme=bokeh_theme)
-    html = _inject_loading_overlay(html, len(all_figs))
-    if footer_text:
-        html = _inject_write_rate_footer(html, footer_text, theme)
-    out_path.write_text(html)
-    _log(f"wrote {out_path}  ({out_path.stat().st_size // 1024} KiB; "
-         f"{len(all_figs)} panels)")
+    return StaticDocument(root=layout_root, strips=strips, panel_figs=panel_figs,
+                          footer_text=footer_text, n_figures=len(strips) + len(figs))
 
 
 # ---------------------------------------------------------------------------

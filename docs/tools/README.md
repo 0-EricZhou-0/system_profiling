@@ -90,6 +90,18 @@ Quality / size knobs:
   display rate after smoothing. `0` (default) keeps the raw sampling
   rate. Useful for cutting render time on high-frequency GPU traces.
 
+**Legends** sit above each panel, outside the plot, under the panel
+title, in as many columns as the widest entry allows. A panel with more
+than ten series (a cold vLLM start tracks ~160 processes) lists the ten
+most active — by the time integral of the value; on a cumulative panel,
+by run total — and one `+k more` entry; the rest are drawn in light
+grey, so every colour in a legend names one line (ten = the length of
+the colour cycle). A process keeps one colour in every panel, the
+busiest processes getting distinct colours first; within a panel the
+listed entries never share a colour. Cumulative companion panels carry
+each series' run total in its legend entry (`+k more` carries theirs
+combined). Every series, listed or not, is in `<output>.legend.txt`.
+
 Panels in the default layout (auto-skipped when no series matches):
 SM Util → Active Warps/Cycle → DRAM Bandwidth → PCIe Bandwidth →
 NVLink Bandwidth → CPU Utilization → System Memory → Per-PID CPU →
@@ -154,9 +166,10 @@ What you get:
   one tooltip per panel listing every co-plotted series's value at
   the cursor x (interpolated where sampling rates differ). Triggers
   regardless of which legend entries are hidden.
-- **Click-to-hide legend entries**; legends are docked to the **right**
-  with their left edges aligned across panels (toolbar lives on the
-  left so the right column belongs to the legend).
+- **Click-to-hide legend entries**; legends sit **above** each panel,
+  capped as in `visualize_all.py` (ten entries plus `+k more`, which
+  hides or shows all the grey lines at once). The plot frame has a
+  fixed height, so a long legend adds height instead of squeezing it.
 - **Y-axis clamps** with dashed reference lines at the theoretical
   peak (100% SM Util, `max_warps_per_sm` for Active Warps, peak DRAM /
   PCIe / NVLink BW, installed RAM total).
