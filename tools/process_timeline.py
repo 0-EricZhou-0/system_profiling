@@ -159,31 +159,27 @@ def place_labels(procs: list[TimelineProcess], lanes: dict, t0_ns: int, t_end_ns
     label_spread.assign_rows over the width of the axis, so none overlaps
     another, and none overlaps a bar (they are under the lanes): as many
     rows as it takes (up to LABEL_MAX_ROWS) for each to stay within
-    LABEL_MAX_SHIFT of the axis width from its bar. Units:
+    LABEL_MAX_SHIFT of the axis width from its bar; beyond that, the
+    narrowest bars' labels are left out (label_spread.place_bar_labels).
+    Units:
     whatever text_width(text) and width_units measure the axis width in
     (points, pixels). Returns (labels, number of label rows)."""
     import label_spread
     span_s = max((t_end_ns - t0_ns) / 1e9, 1e-9)
-    per_s = width_units / span_s
-    labels, outside = [], []
-    for p in procs:
-        start = (p.start_ns - t0_ns) / 1e9
-        end = (p.end_ns - t0_ns) / 1e9
-        bar = (end - start) * per_s
-        full = f"{p.comm} ({p.pid})"
-        text = full if text_width(full) + pad_units < bar else p.comm
-        lab = ProcessLabel(key=p.key, text=text, lane=lanes[p.key],
-                           anchor_s=(start + end) / 2, x_s=(start + end) / 2, row=-1)
-        if text_width(text) + pad_units >= bar:
-            lab.text = full
-            outside.append(lab)
-        labels.append(lab)
-    rows, centres = label_spread.assign_rows(
-        [(lab.anchor_s * per_s, text_width(lab.text)) for lab in outside],
-        0.0, width_units, pad_units, max_rows=LABEL_MAX_ROWS,
+    bars = [((p.start_ns - t0_ns) / 1e9, (p.end_ns - t0_ns) / 1e9,
+             [f"{p.comm} ({p.pid})", p.comm]) for p in procs]
+    placed = label_spread.place_bar_labels(
+        bars, 0.0, span_s, width_units, text_width, pad_units, max_rows=LABEL_MAX_ROWS,
         max_shift=LABEL_MAX_SHIFT * width_units)
-    for lab, r, c in zip(outside, rows, centres):
-        lab.row, lab.x_s = r, c / per_s
+    labels, rows = [], []
+    for p, pl in zip(procs, placed):
+        if pl is None:
+            continue
+        _where, text, x, anchor, row = pl
+        labels.append(ProcessLabel(key=p.key, text=text, lane=lanes[p.key],
+                                   anchor_s=anchor, x_s=x, row=row))
+        if row >= 0:
+            rows.append(row)
     return labels, (max(rows) + 1 if rows else 0)
 
 
