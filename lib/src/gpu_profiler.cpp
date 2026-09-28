@@ -402,6 +402,10 @@ void GpuProfiler::Start() {
         device.gpuIndex           = static_cast<uint32_t>(d->deviceIndex);
         device.samplingIntervalNs = static_cast<uint64_t>(1e9 / m_impl->config.samplingFrequencyHz);
         device.decodeIntervalMs   = m_impl->config.decodeIntervalMs;
+        device.deviceIndex        = d->deviceIndex;
+        device.configImage        = &d->configImage;
+        device.hwBufferSize       = m_impl->config.hwBufferSize;
+        device.maxSamples         = m_impl->config.maxSamples;
         d->decodeThread = std::thread(internal::DecodeThreadFunc,
                                        std::ref(d->counterDataImages),
                                        std::ref(m_impl->metricsCstr),
@@ -464,14 +468,11 @@ void GpuProfiler::Stop() {
     internal::lifecycle::StopScope stopping;
     if (!m_impl->running) return;
 
-    // Stop sampling on every device.
+    // Each decode thread stops its device's sampler (it may be re-enabling
+    // it after an overflow) and decodes what is left: tell them all, then
+    // join.
+    for (auto& d : m_impl->devices) d->stopDecode.Set();
     for (auto& d : m_impl->devices) {
-        CUPTI_API_CALL(d->target.Stop());
-    }
-
-    // Join decode threads.
-    for (auto& d : m_impl->devices) {
-        d->stopDecode.Set();
         if (d->decodeThread.joinable()) d->decodeThread.join();
     }
 

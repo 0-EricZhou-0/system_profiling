@@ -23,6 +23,10 @@ bool PassReadHook(uint32_t pid, testing::ReadProbe probe);
 /// test set with testing::SetFlushDelayMs. Off: one relaxed atomic load.
 void PassFlushDelay();
 
+/// Called by the GPU decode thread before each pass: sleeps once for the
+/// stall a test set with testing::StallNextDecodeMs.
+void PassDecodeStall();
+
 /// testing::SetBacklogReportPeriodMs, 30000 by default.
 unsigned BacklogReportPeriodMs();
 

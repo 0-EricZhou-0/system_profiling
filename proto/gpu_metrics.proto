@@ -52,15 +52,25 @@ message GpuDecodeStats {
     // previous one); dropped. CUPTI 13.3 returns such samples after a
     // decode that filled the counter-data image.
     uint64 invalid_samples     = 5;
-    // Decodes that stopped because the counter-data image was full
-    // (max_samples too small for one decode pass). Samples are lost
-    // after each one.
+    // Decodes that stopped because the counter-data image was full (the
+    // decode thread fell behind, or max_samples is too small). The samples
+    // beyond the image are lost (in samples_lost / invalid_samples); later
+    // passes are clean again.
     uint64 counter_data_full   = 6;
-    // Decodes that reported a hardware-buffer overflow. After the
-    // first, CUPTI returns no more samples for this device.
+    // Decodes that reported a hardware-buffer overflow. CUPTI then returns
+    // nothing more until the sampler is re-enabled, which the probe does
+    // (sampler_restarts); the samples in between are in samples_lost.
     uint64 hw_buffer_overflows = 7;
     // Zero-length samples (start == end, a real time) CUPTI returned;
     // dropped. CUPTI 13.3 returns one or two, stamped at the start of
     // sampling, in the last decode after sampling stops. Not a loss.
     uint64 empty_samples       = 8;
+    // Times the PM sampler was disabled and enabled again after a
+    // hardware-buffer overflow.
+    uint64 sampler_restarts    = 9;
+    // Samples longer than 1.5 sampling intervals; dropped. CUPTI's first
+    // sample after a start covers the time since sampling began (~0.3 s:
+    // one per run), and after a re-enable the whole gap (its samples are
+    // in samples_lost).
+    uint64 stretched_samples   = 10;
 }

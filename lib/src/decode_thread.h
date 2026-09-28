@@ -26,6 +26,8 @@ struct DecodeStats {
     std::atomic<uint64_t> emptySamples{0};
     std::atomic<uint64_t> samplesLost{0};
     std::atomic<uint64_t> hwBufferOverflows{0};
+    std::atomic<uint64_t> samplerRestarts{0};
+    std::atomic<uint64_t> stretchedSamples{0};
 };
 
 /// What the decode thread needs to know about its device.
@@ -33,10 +35,17 @@ struct DecodeTarget {
     uint32_t gpuIndex = 0;
     uint64_t samplingIntervalNs = 0;
     uint64_t decodeIntervalMs = 1000;   // one pass per interval
+    // What it takes to re-enable the sampler after a hardware-buffer
+    // overflow (see decode_thread.cpp).
+    int deviceIndex = 0;
+    const std::vector<uint8_t>* configImage = nullptr;
+    size_t hwBufferSize = 0;
+    uint64_t maxSamples = 0;
 };
 
 /// One pass per decodeIntervalMs into the two images (see
-/// decode_thread.cpp); samples are evaluated on a worker thread.
+/// decode_thread.cpp); samples are evaluated on a worker thread. Stops the
+/// sampler itself when `stop` is set, then decodes what is left.
 void DecodeThreadFunc(std::array<std::vector<uint8_t>, 2>& counterDataImages,
                       const std::vector<const char*>& metricsList,
                       CuptiPmSampling& target,

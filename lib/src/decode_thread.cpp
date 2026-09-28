@@ -1,5 +1,6 @@
 #include "decode_thread.h"
 #include "lifecycle.h"
+#include "testing_hooks.h"
 
 #include <pthread.h>
 
@@ -38,13 +39,16 @@ constexpr int kMaxDecodeStepsPerPass = 1 << 16;
 //     (each one starts where the previous one ended) across passes;
 //     a sample still being written stays in the buffer.
 //   * A decode that stops at COUNTER_DATA_FULL left records behind.
-//     Decoding again catches the buffer up, but the samples of those next
-//     decodes come back with both timestamps 0 and the real samples in
-//     between are gone, whatever image is used. The image must be large
-//     enough for a whole pass (max_samples). Those samples are dropped
-//     and counted.
-//   * A hardware-buffer overflow makes this and every later decode
-//     fail with CUPTI_ERROR_OUT_OF_MEMORY and return nothing.
+//     Decoding again catches the buffer up, but part of what those
+//     decodes return is out of order or without timestamps, and the
+//     samples beyond the image's capacity are gone. The next passes are
+//     clean again. Those samples are dropped and counted; the image is
+//     sized so a pass fits (max_samples).
+//   * A hardware-buffer overflow makes this and every later decode fail
+//     with CUPTI_ERROR_OUT_OF_MEMORY and return nothing, until the
+//     sampler is disabled and enabled again (Stop + Start is not enough).
+//     The decoder does that (~115 ms); the samples of the stall and of
+//     the restart are lost and counted.
 class Decoder {
 public:
     Decoder(std::array<std::vector<uint8_t>, 2>& images, const std::vector<const char*>& metrics,
@@ -56,8 +60,8 @@ public:
     }
 
     // One pass: decode until the hardware buffer is drained, handing
-    // each decoded image to the worker.
-    CUptiResult Pass() {
+    // each decoded image to the worker. `final`: sampling has stopped.
+    CUptiResult Pass(bool final = false) {
         for (int step = 0; step < kMaxDecodeStepsPerPass; ++step) {
             {
                 std::unique_lock<std::mutex> lk(mu_);
@@ -73,14 +77,7 @@ public:
             const bool oom = o.result == CUPTI_ERROR_OUT_OF_MEMORY;
             if (oom || o.overflow) {
                 stats_.hwBufferOverflows.fetch_add(1, std::memory_order_relaxed);
-                if (!warnedOverflow_) {
-                    warnedOverflow_ = true;
-                    std::fprintf(stderr,
-                        "[cupti-profiler] warning: GPU %u: the PM sampling hardware buffer overflowed; "
-                        "CUPTI returns no samples from now on. Raise hw_buffer_size, or lower "
-                        "decode_interval_ms or the sampling rate\n", device_.gpuIndex);
-                }
-                if (oom) return CUPTI_SUCCESS;   // nothing decoded; image unchanged
+                if (oom) return final ? CUPTI_SUCCESS : Restart();
             }
             if (o.result != CUPTI_SUCCESS) return o.result;
 
@@ -91,19 +88,32 @@ public:
             }
             cv_.notify_all();
             active_ ^= 1;
+            if (o.overflow && !final) return Restart();
 
             if (o.stopReason != CUPTI_PM_SAMPLING_DECODE_STOP_REASON_COUNTER_DATA_FULL)
                 return CUPTI_SUCCESS;
             stats_.counterDataFull.fetch_add(1, std::memory_order_relaxed);
-            if (!warnedFull_) {
-                warnedFull_ = true;
+            // One line per pass that overflowed the image, at most one per
+            // 30 s (an undersized max_samples overflows every pass); the
+            // summary at stop has the count.
+            const auto now = std::chrono::steady_clock::now();
+            if (step == 0 && (fullWarnings_ == 0 || now - lastFullWarning_ >= std::chrono::seconds(30))) {
+                ++fullWarnings_;
+                lastFullWarning_ = now;
                 std::fprintf(stderr,
                     "[cupti-profiler] warning: GPU %u: the counter-data image (max_samples) filled up "
-                    "within one decode pass; CUPTI loses samples after that. Raise max_samples "
-                    "(0 = sized for the decode interval)\n", device_.gpuIndex);
+                    "in a decode pass (the decode thread fell behind, or max_samples is too small); "
+                    "the samples beyond it are lost (counted)\n", device_.gpuIndex);
             }
         }
         return CUPTI_SUCCESS;
+    }
+
+    // Stop sampling (the decode thread owns the sampler: a restart must
+    // not race Stop()).
+    CUptiResult StopSampling() {
+        std::lock_guard<std::mutex> g(cupti_);
+        return target_.Stop();
     }
 
     // After the last pass: the worker evaluates what is queued, then ends.
@@ -120,6 +130,42 @@ public:
     ~Decoder() { Finish(); }
 
 private:
+    // After a hardware-buffer overflow: disable and re-enable the sampler
+    // (a new PM sampling object, same config, fresh images), once the
+    // worker is done with the images.
+    CUptiResult Restart() {
+        const auto t0 = std::chrono::steady_clock::now();
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            cv_.wait(lk, [&] { return (queue_.empty() && !busy_[0] && !busy_[1]) ||
+                                      workerResult_ != CUPTI_SUCCESS; });
+            if (workerResult_ != CUPTI_SUCCESS) return workerResult_;
+        }
+        {
+            std::lock_guard<std::mutex> g(cupti_);
+            target_.Stop();   // an overflowed sampler may refuse; it is disabled next
+            if (auto r = target_.DisablePmSampling(); r != CUPTI_SUCCESS) return r;
+            if (auto r = target_.EnablePmSampling(device_.deviceIndex); r != CUPTI_SUCCESS) return r;
+            auto& cfg = const_cast<std::vector<uint8_t>&>(*device_.configImage);
+            if (auto r = target_.SetConfig(cfg, device_.hwBufferSize, device_.samplingIntervalNs);
+                r != CUPTI_SUCCESS) return r;
+            for (auto& img : images_) {
+                if (auto r = target_.CreateCounterDataImage(device_.maxSamples, metrics_, img);
+                    r != CUPTI_SUCCESS) return r;
+            }
+            if (auto r = target_.Start(); r != CUPTI_SUCCESS) return r;
+        }
+        active_ = 0;
+        stats_.samplerRestarts.fetch_add(1, std::memory_order_relaxed);
+        std::fprintf(stderr,
+            "[cupti-profiler] warning: GPU %u: the PM sampling hardware buffer overflowed (the decode "
+            "thread fell too far behind, or hw_buffer_size is too small); sampler re-enabled in "
+            "%.0f ms, the samples since the last decode are lost (counted)\n",
+            device_.gpuIndex,
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        return CUPTI_SUCCESS;
+    }
+
     void Work() {
         char name[16];
         lifecycle::BlockSignalsInThisThread();
@@ -182,6 +228,19 @@ private:
             return;
         }
         const uint64_t period = device_.samplingIntervalNs;
+        // Longer than a sampling interval: CUPTI's first sample after a
+        // (re)start covers everything since the sampler last delivered
+        // one (~0.3 s at the start of a run; the whole stall after a
+        // re-enable). Its values average over that window; drop it, and
+        // count the window as lost (except before the first sample).
+        if (period > 0 && sr.endTimestamp - sr.startTimestamp > period * 3 / 2) {
+            stats_.stretchedSamples.fetch_add(1, std::memory_order_relaxed);
+            if (lastEndNs_ != 0)
+                stats_.samplesLost.fetch_add((sr.endTimestamp - lastEndNs_ + period / 2) / period,
+                                             std::memory_order_relaxed);
+            lastEndNs_ = sr.endTimestamp;
+            return;
+        }
         if (lastEndNs_ != 0 && period > 0 && sr.startTimestamp > lastEndNs_) {
             const uint64_t missing = (sr.startTimestamp - lastEndNs_ + period / 2) / period;
             if (missing > 0) {
@@ -219,8 +278,8 @@ private:
 
     int active_ = 0;              // decode thread only
     uint64_t lastEndNs_ = 0;      // worker only
-    bool warnedOverflow_ = false;
-    bool warnedFull_ = false;
+    uint64_t fullWarnings_ = 0;
+    std::chrono::steady_clock::time_point lastFullWarning_{};
     bool warnedLost_ = false;
     std::thread worker_;
 };
@@ -248,14 +307,17 @@ void DecodeThreadFunc(std::array<std::vector<uint8_t>, 2>& counterDataImages,
     auto next = std::chrono::steady_clock::now() + interval;
     result = CUPTI_SUCCESS;
     while (!stop.WaitUntil(next)) {
+        PassDecodeStall();   // test-only; see <cupti_profiler/testing.h>
         result = decoder.Pass();
         if (result != CUPTI_SUCCESS) break;
         next += interval;
         const auto now = std::chrono::steady_clock::now();
         if (next < now) next = now + interval;   // overran: don't burst
     }
-    // Final drain (sampling has been stopped).
-    if (result == CUPTI_SUCCESS) result = decoder.Pass();
+    // Stop sampling, then decode what is left.
+    const CUptiResult stopped = decoder.StopSampling();
+    if (result == CUPTI_SUCCESS) result = stopped;
+    if (result == CUPTI_SUCCESS) result = decoder.Pass(/*final=*/true);
     const CUptiResult worker = decoder.Finish();
     if (result == CUPTI_SUCCESS) result = worker;
 }
@@ -265,14 +327,16 @@ void ReportDecodeSummary(uint32_t gpuIndex, const DecodeStats& stats) {
     const auto invalid  = stats.invalidSamples.load();
     const auto lost     = stats.samplesLost.load();
     const auto overflow = stats.hwBufferOverflows.load();
+    const auto restarts = stats.samplerRestarts.load();
     if (full == 0 && invalid == 0 && lost == 0 && overflow == 0) return;
     std::fprintf(stderr,
         "[cupti-profiler] warning: GPU %u decode summary: %llu samples kept, %llu missing, "
         "%llu invalid dropped; counter-data image full %llu time(s), hardware buffer "
-        "overflow %llu time(s)\n", gpuIndex,
+        "overflow %llu time(s), sampler re-enabled %llu time(s)\n", gpuIndex,
         static_cast<unsigned long long>(stats.samples.load()),
         static_cast<unsigned long long>(lost), static_cast<unsigned long long>(invalid),
-        static_cast<unsigned long long>(full), static_cast<unsigned long long>(overflow));
+        static_cast<unsigned long long>(full), static_cast<unsigned long long>(overflow),
+        static_cast<unsigned long long>(restarts));
 }
 
 } // namespace internal

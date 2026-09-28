@@ -37,6 +37,7 @@ ReadHook g_readHook[2];
 
 std::atomic<unsigned> g_flushDelayMs{0};
 std::atomic<unsigned> g_backlogPeriodMs{30000};
+std::atomic<unsigned> g_decodeStallMs{0};
 
 ReadHook& HookFor(testing::ReadProbe probe) {
     return g_readHook[probe == testing::ReadProbe::Disk ? 1 : 0];
@@ -68,6 +69,8 @@ bool WaitFlushHeld(unsigned timeoutMs) {
 void SetFlushDelayMs(unsigned ms) { g_flushDelayMs.store(ms); }
 
 void SetBacklogReportPeriodMs(unsigned ms) { g_backlogPeriodMs.store(ms); }
+
+void StallNextDecodeMs(unsigned ms) { g_decodeStallMs.store(ms); }
 
 void ReleaseFlushGate() {
     std::lock_guard<std::mutex> lk(g_mu);
@@ -124,6 +127,11 @@ bool PassReadHook(uint32_t pid, testing::ReadProbe probe) {
 
 void PassFlushDelay() {
     const unsigned ms = g_flushDelayMs.load(std::memory_order_relaxed);
+    if (ms) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+void PassDecodeStall() {
+    const unsigned ms = g_decodeStallMs.exchange(0, std::memory_order_relaxed);
     if (ms) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 }
 

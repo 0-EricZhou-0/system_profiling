@@ -60,6 +60,11 @@ CUPTI_PROFILER_API bool ArmKillAfterReadFromEnv();
 /// (the flush thread sleeps after its write). 0 = off.
 CUPTI_PROFILER_API void SetFlushDelayMs(unsigned ms);
 
+/// Stalled decode thread: the next GPU decode pass of every in-process
+/// GPU probe starts `ms` late (the thread sleeps first), as if the host
+/// were starved. One-shot.
+CUPTI_PROFILER_API void StallNextDecodeMs(unsigned ms);
+
 /// Period of the rate-limited flush-backlog summary lines (default
 /// 30000 ms), so a test does not have to run for minutes.
 CUPTI_PROFILER_API void SetBacklogReportPeriodMs(unsigned ms);
