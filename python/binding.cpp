@@ -346,6 +346,7 @@ PYBIND11_MODULE(_native, m) {
           py::arg("timeout_s"), py::call_guard<py::gil_scoped_release>());
     m.def("_testing_release_flush_gate", &testing::ReleaseFlushGate);
     m.def("_testing_set_flush_delay_ms", &testing::SetFlushDelayMs, py::arg("ms"));
+    m.def("_testing_set_stop_delay_ms", &testing::SetStopDelayMs, py::arg("ms"));
     m.def("_testing_stall_next_decode_ms", &testing::StallNextDecodeMs, py::arg("ms"));
     m.def("_testing_set_backlog_report_period_ms", &testing::SetBacklogReportPeriodMs, py::arg("ms"));
     m.def("_testing_kill_after_next_read",

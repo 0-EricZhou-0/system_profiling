@@ -23,6 +23,9 @@ bool PassReadHook(uint32_t pid, testing::ReadProbe probe);
 /// test set with testing::SetFlushDelayMs. Off: one relaxed atomic load.
 void PassFlushDelay();
 
+/// Called by ProfilerSuite::Stop() once it has begun.
+void PassStopDelay();
+
 /// Called by the GPU decode thread before each pass: sleeps once for the
 /// stall a test set with testing::StallNextDecodeMs.
 void PassDecodeStall();

@@ -1,6 +1,7 @@
 #include <cupti_profiler/profiler_suite.h>
 
 #include "lifecycle.h"
+#include "testing_hooks.h"
 #include "metric_catalog.h"
 #include "metric_catalog_builtins.h"
 #include "process_discovery.h"
@@ -598,6 +599,7 @@ void ProfilerSuite::Impl::Stop() {
     internal::lifecycle::StopScope stopping;
     if (stopped) return;
     stopped = true;
+    internal::PassStopDelay();   // test-only; see <cupti_profiler/testing.h>
     auto* m_impl = this;
     // Fire off the shutdown signal to EVERY sample thread —
     // in-process AND the sidecar — as early as possible, so they all

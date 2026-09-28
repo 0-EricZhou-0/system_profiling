@@ -35,8 +35,11 @@ namespace lifecycle {
 //     flush from finishing).
 //   * A second signal while a flush is running kills the process at once.
 //   * A signal that arrives while a Stop() is already running waits for
-//     it (bounded) instead of starting another one, unless it interrupted
-//     that very Stop(), which cannot finish until the handler returns.
+//     it (bounded) instead of starting another one. If it interrupted
+//     that very Stop() (which cannot go on until the handler returns),
+//     it is deferred: the handler returns at once, and when the Stop()
+//     ends the signal takes its course (chain or default action). A crash
+//     signal there is not deferred (the fault would recur).
 //   * In a forked child it only chains (the flusher is the parent's).
 //   * Signals that were ignored (SIG_IGN) stay ignored. SIGKILL and
 //     SIGSTOP cannot be caught: up to one flush interval of samples is
@@ -71,6 +74,7 @@ std::atomic<pid_t> g_stoppingTid{0};     // thread of the latest one
 std::atomic<bool>  g_flushing{false};    // a handler is waiting for a flush
 std::atomic<pid_t> g_ownerPid{0};        // the process whose flusher it is
 std::atomic<pid_t> g_registryPid{0};     // the process that registered
+std::atomic<int>   g_deferredSignal{0};  // arrived on the thread running Stop()
 
 struct sigaction g_prev[NSIG];
 bool             g_ours[NSIG];
@@ -162,7 +166,18 @@ extern "C" void OnSignal(int sig, siginfo_t* si, void* uc) {
     if (g_running.load() > 0) {
         const int bound = IsCrash(sig) ? kCrashBoundMs : kTerminateBoundMs;
         if (g_stopping.load() > 0) {
-            if (g_stoppingTid.load() != Tid()) WaitStopEnds(bound);
+            if (g_stoppingTid.load() != Tid()) {
+                WaitStopEnds(bound);
+            } else if (!IsCrash(sig)) {
+                // This very thread is inside Stop(), which cannot go on
+                // until the handler returns: let it finish its flush, and
+                // take the signal's course when it ends (~StopScope).
+                int none = 0;
+                g_deferredSignal.compare_exchange_strong(none, sig);
+                g_flushing.store(false);
+                errno = savedErrno;
+                return;
+            }
         } else if (g_wakeFd[1] >= 0) {
             uint64_t stale;
             while (::read(g_doneFd, &stale, sizeof(stale)) > 0) {}
@@ -278,7 +293,16 @@ StopScope::StopScope() {
 }
 
 StopScope::~StopScope() {
-    if (g_stopping.fetch_sub(1) == 1) g_stoppingTid.store(0);
+    if (g_stopping.fetch_sub(1) != 1) return;
+    g_stoppingTid.store(0);
+    // A termination signal that interrupted this Stop(): its course now.
+    if (const int sig = g_deferredSignal.exchange(0)) {
+        Say("[cupti-profiler] stop finished; taking the signal that arrived during it\n");
+        siginfo_t si{};
+        si.si_signo = sig;
+        si.si_code  = SI_USER;
+        Chain(sig, &si, nullptr);
+    }
 }
 
 void InstallSignalHandlers() {

@@ -60,6 +60,11 @@ CUPTI_PROFILER_API bool ArmKillAfterReadFromEnv();
 /// (the flush thread sleeps after its write). 0 = off.
 CUPTI_PROFILER_API void SetFlushDelayMs(unsigned ms);
 
+/// Slow stop: ProfilerSuite::Stop() sleeps `ms` right after it begins
+/// (inside its critical section), so a test can land a signal there.
+/// 0 = off.
+CUPTI_PROFILER_API void SetStopDelayMs(unsigned ms);
+
 /// Stalled decode thread: the next GPU decode pass of every in-process
 /// GPU probe starts `ms` late (the thread sleeps first), as if the host
 /// were starved. One-shot.
