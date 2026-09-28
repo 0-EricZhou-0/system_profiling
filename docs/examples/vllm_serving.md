@@ -49,7 +49,7 @@ Every machine- or user-specific value is an argument:
 | `--output-dir` | `vllm_serving_profile` | trace directory; the figure is `<dir>/vllm_serving.png` unless `--png` |
 | `--system-hz`, `--disk-hz` | 50, 50 | sampling rates (the library's defaults) |
 | `--scan-interval-ms` | 100 | descendant tracking scan interval |
-| `--flush-ms` | 1000 | probe flush interval |
+| `--flush-ms` | 5000 | flush interval of every probe |
 | `--disk-device` | every whole block device in `/sys/block` | devices for the per-device panel (repeatable) |
 | `--gpu`, `--gpu-device`, `--gpu-hz` | off, 0, 500 | GPU PM sampling from the launcher |
 | `--load-seconds` | 90 | duration of the request load |

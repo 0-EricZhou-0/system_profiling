@@ -179,7 +179,8 @@ GpuProfiler& GpuProfiler::operator=(GpuProfiler&&) noexcept = default;
 void GpuProfiler::Configure(const ProfilerConfig& requested) {
     ProfilerConfig resolved = requested;
     if (resolved.decodeIntervalMs == 0) resolved.decodeIntervalMs = kDefaultDecodeIntervalMs;
-    if (resolved.flushIntervalMs > 0 && resolved.flushIntervalMs < resolved.decodeIntervalMs) {
+    resolved.flushIntervalMs = ResolveFlushIntervalMs(resolved.flushIntervalMs);
+    if (resolved.flushIntervalMs < resolved.decodeIntervalMs) {
         throw std::invalid_argument(
             "GPU flush_interval_ms (" + std::to_string(resolved.flushIntervalMs) +
             ") is less than decode_interval_ms (" + std::to_string(resolved.decodeIntervalMs) +
@@ -396,7 +397,7 @@ void GpuProfiler::Start() {
 
     // Launch one flush thread that pulls from every device.
     m_impl->stopFlush.Reset();
-    if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
+    if (m_impl->outFile.is_open()) {
         std::cout << "Periodic flush every " << m_impl->config.flushIntervalMs << " ms\n";
         std::vector<internal::DeviceDrainSlot> slots;
         slots.reserve(m_impl->devices.size());

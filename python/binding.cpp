@@ -77,7 +77,7 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("metrics",               &ProfilerConfig::metrics,
             "List of CUPTI metric names (e.g. 'sm__cycles_active.avg').")
         .def_readwrite("flush_interval_ms",     &ProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms; 0 = single write at Stop(). "
+            "Periodic flush interval in ms (default 5000; 0 = 5000). "
             "Must not be less than decode_interval_ms.")
         .def_readwrite("decode_interval_ms",    &ProfilerConfig::decodeIntervalMs,
             "How often the host collects the buffered samples, in ms "
@@ -95,7 +95,7 @@ PYBIND11_MODULE(_native, m) {
             "Empty = system-wide only. PID 0 inside any entry is resolved "
             "to the current process at runtime.")
         .def_readwrite("flush_interval_ms",     &SystemProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms.")
+            "Periodic flush interval in ms (default 5000; 0 = 5000).")
         .def_readwrite("output_file",           &SystemProfilerConfig::outputFile,
             "Path to system_metrics.pb output file.");
 
@@ -110,7 +110,7 @@ PYBIND11_MODULE(_native, m) {
             "Processes to track per-process I/O (list of TrackedProcess). "
             "PID 0 inside any entry is resolved to the current process at runtime.")
         .def_readwrite("flush_interval_ms",     &DiskProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms.")
+            "Periodic flush interval in ms (default 5000; 0 = 5000).")
         .def_readwrite("output_file",           &DiskProfilerConfig::outputFile,
             "Path to disk_metrics.pb output file.");
 
@@ -118,7 +118,7 @@ PYBIND11_MODULE(_native, m) {
         "Configuration for EventProfiler — region + event annotations.")
         .def(py::init<>())
         .def_readwrite("flush_interval_ms", &EventProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms.")
+            "Periodic flush interval in ms (default 5000; 0 = 5000).")
         .def_readwrite("output_file",       &EventProfilerConfig::outputFile,
             "Path to events.pb output file.");
 

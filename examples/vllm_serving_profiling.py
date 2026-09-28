@@ -79,7 +79,7 @@ def suite_config(args):
     cfg = {
         "output_dir": args.output_dir,
         "gpu": {"enabled": False},
-        "events": {"enabled": True, "flush_interval_ms": 1000, "output_file": "events.pb"},
+        "events": {"enabled": True, "flush_interval_ms": args.flush_ms, "output_file": "events.pb"},
         "system": {
             "enabled": True,
             "sampling_frequency_hz": args.system_hz,
@@ -105,7 +105,7 @@ def suite_config(args):
             "hw_buffer_size": 512 * 1024 * 1024,
             "max_samples": 50000,
             "metrics": GPU_METRICS,
-            "flush_interval_ms": 5000,
+            "flush_interval_ms": args.flush_ms,
             "output_file": "gpu_metrics.pb",
         }
     return cfg
@@ -252,7 +252,8 @@ def main():
     ap.add_argument("--png", default=None, help="figure path (default: <output-dir>/vllm_serving.png)")
     ap.add_argument("--system-hz", type=int, default=50)
     ap.add_argument("--disk-hz", type=int, default=50)
-    ap.add_argument("--flush-ms", type=int, default=1000)
+    ap.add_argument("--flush-ms", type=int, default=5000,
+                    help="flush interval of every probe (default: %(default)s)")
     ap.add_argument("--scan-interval-ms", type=int, default=100,
                     help="descendant discovery scan interval (default: %(default)s)")
     ap.add_argument("--disk-device", action="append",

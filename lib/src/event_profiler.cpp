@@ -61,6 +61,7 @@ EventTracker& EventProfiler::GetGpuTracker()     { return *m_impl->gpu; }
 
 void EventProfiler::Configure(const EventProfilerConfig& config) {
     m_impl->config = config;
+    m_impl->config.flushIntervalMs = ResolveFlushIntervalMs(config.flushIntervalMs);
     m_impl->configured = true;
 }
 
@@ -88,7 +89,7 @@ void EventProfiler::Start() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 
     m_impl->stopFlush.Reset();
-    if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
+    if (m_impl->outFile.is_open()) {
         m_impl->flushThread = std::thread(internal::EventFlushThreadFunc,
                                           std::ref(*m_impl->generic),
                                           std::ref(*m_impl->gpu),

@@ -5,6 +5,8 @@
 #include <cupti_profiler/system_profiler.h>   // SystemProbeMode
 #include <cupti_profiler/tracked_process.h>
 
+#include <cupti_profiler/defaults.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -32,7 +34,8 @@ struct CUPTI_PROFILER_API DiskProfilerConfig {
     // Processes to track per-process I/O (with optional display aliases —
     // see SystemProfilerConfig::Processes).
     std::vector<TrackedProcess> Processes;
-    uint64_t flushIntervalMs = 5000;
+    // Periodic flush to outputFile. 0 = kDefaultFlushIntervalMs (5 s).
+    uint64_t flushIntervalMs = kDefaultFlushIntervalMs;
     std::string outputFile;
     SystemProbeMode mode = SystemProbeMode::Legacy;
 };

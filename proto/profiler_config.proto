@@ -40,6 +40,7 @@ message GPUProfilerConfig {
     // decode interval (see ProfilerConfig::maxSamples).
     uint64 max_samples = 5;
     repeated string metrics = 6;
+    // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 7;
     string output_file = 8;
     // How often the host collects the samples the GPU buffered (one
@@ -55,6 +56,7 @@ message SystemProfilerConfig {
     // PIDs can also be added/removed mid-run via
     // ProfilerSuite::AddTrackedProcess/RemoveTrackedProcess.
     repeated TrackedProcessV2 processes = 3;
+    // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 4;
     string output_file = 5;
     // Where the sampler + flush threads run. UNSPECIFIED → LEGACY.
@@ -67,6 +69,7 @@ message DiskProfilerConfig {
     repeated string devices = 3;
     // See SystemProfilerConfig.processes for mid-run add/remove behavior.
     repeated TrackedProcessV2 processes = 4;
+    // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 5;
     string output_file = 6;
     // Where the sampler + flush threads run. UNSPECIFIED → LEGACY.
@@ -79,6 +82,7 @@ message DiskProfilerConfig {
 
 message EventsProfilerConfig {
     bool enabled = 1;
+    // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 2;
     string output_file = 3;          // events.pb
 }

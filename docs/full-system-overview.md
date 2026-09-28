@@ -132,7 +132,7 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | `hw_buffer_size`       | uint64     | 536870912     | GPU ring buffer size (bytes). 512 MB default     |
 | `max_samples`          | uint64     | 50000         | Decode buffer capacity per cycle                 |
 | `metrics`              | string[]   | (empty)       | CUPTI metric names. Must fit single pass         |
-| `flush_interval_ms`    | uint64     | 10000         | Periodic flush interval. 0 = flush at end only   |
+| `flush_interval_ms`    | uint64     | 5000          | Periodic flush interval. 0 = 5000                |
 | `output_file`          | string     | (empty)       | Output `.pb` path                                |
 
 ### System section (CPU + memory)
@@ -142,7 +142,7 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | `enabled`              | bool       | false   | Enable CPU + memory profiling                    |
 | `sampling_frequency_hz`| uint64     | 50      | Sampling rate in Hz (0 = 50)                     |
 | `pids`                 | uint32[]   | (empty) | PIDs for per-process tracking. 0 = self          |
-| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval                          |
+| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval. 0 = 5000                |
 | `output_file`          | string     | (empty) | Output `.pb` path                                |
 
 ### Disk section
@@ -153,7 +153,7 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | `sampling_frequency_hz`| uint64     | 50      | Sampling rate in Hz (0 = 50)                     |
 | `devices`              | string[]   | (empty) | Block device names (e.g. `"nvme0n1"`, `"sda"`)  |
 | `pids`                 | uint32[]   | (empty) | PIDs for per-process I/O. 0 = self               |
-| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval                          |
+| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval. 0 = 5000                |
 | `output_file`          | string     | (empty) | Output `.pb` path                                |
 
 > [!WARNING]

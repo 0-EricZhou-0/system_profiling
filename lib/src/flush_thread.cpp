@@ -1,11 +1,11 @@
 #include "flush_thread.h"
+#include "delimited_write.h"
 
 #include "gpu_metrics.pb.h"
 #include "metric_sample.pb.h"
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl.h>
 
 #include <chrono>
+#include <pthread.h>
 #include <iostream>
 #include <thread>
 
@@ -90,16 +90,7 @@ GPUMetricsTrace BuildTrace(const std::string& hostname,
 }
 
 size_t WriteDelimitedToSized(const GPUMetricsTrace& trace, std::ofstream& out) {
-    std::string serialized;
-    if (!trace.SerializeToString(&serialized)) {
-        std::cerr << "Failed to serialize GPUMetricsTrace\n";
-        return 0;
-    }
-    google::protobuf::io::OstreamOutputStream raw(&out);
-    google::protobuf::io::CodedOutputStream coded(&raw);
-    coded.WriteVarint32(static_cast<uint32_t>(serialized.size()));
-    coded.WriteString(serialized);
-    return serialized.size();
+    return WriteDelimitedFrame(trace, out, "GPUMetricsTrace");
 }
 
 void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
@@ -117,6 +108,7 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
                      PendingFlushStats& pending,
                      std::mutex& pendingMutex)
 {
+    ::pthread_setname_np(::pthread_self(), "cupti-gpu-flush");
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;
     // Stop() wakes the wait; the final flush is Stop()'s.

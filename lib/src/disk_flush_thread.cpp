@@ -1,15 +1,15 @@
 #include "disk_flush_thread.h"
+#include "delimited_write.h"
 #include "testing_hooks.h"
 #include "discovery_stats_proto.h"
 #include "tracked_process_proto.h"
 
 #include "disk_metrics.pb.h"
 #include "metric_sample.pb.h"
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl.h>
 
 #include <array>
 #include <chrono>
+#include <pthread.h>
 #include <iostream>
 #include <thread>
 
@@ -228,16 +228,7 @@ DiskMetricsTrace BuildDiskTrace(
 size_t WriteDelimitedDiskTraceSized(const DiskMetricsTrace& trace,
                                     std::ofstream& out)
 {
-    std::string serialized;
-    if (!trace.SerializeToString(&serialized)) {
-        std::cerr << "Failed to serialize DiskMetricsTrace\n";
-        return 0;
-    }
-    google::protobuf::io::OstreamOutputStream raw(&out);
-    google::protobuf::io::CodedOutputStream coded(&raw);
-    coded.WriteVarint32(static_cast<uint32_t>(serialized.size()));
-    coded.WriteString(serialized);
-    return serialized.size();
+    return WriteDelimitedFrame(trace, out, "DiskMetricsTrace");
 }
 
 void DiskFlushThreadFunc(DiskSampleBatch& batch,
@@ -256,6 +247,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
                          DiskPendingFlushStats& pending,
                          std::mutex& pendingMutex)
 {
+    ::pthread_setname_np(::pthread_self(), "cupti-dsk-flush");
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;
     // Stop() wakes the wait; the final flush is Stop()'s.

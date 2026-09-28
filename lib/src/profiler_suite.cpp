@@ -219,7 +219,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         m_impl->gpuConfig.samplingFrequencyHz = g.sampling_frequency_hz() > 0 ? g.sampling_frequency_hz() : 10000;
         m_impl->gpuConfig.hwBufferSize = g.hw_buffer_size() > 0 ? g.hw_buffer_size() : 512 * 1024 * 1024;
         m_impl->gpuConfig.maxSamples = g.max_samples();   // 0 = auto
-        m_impl->gpuConfig.flushIntervalMs = g.flush_interval_ms();
+        m_impl->gpuConfig.flushIntervalMs = g.flush_interval_ms();    // 0 = default
         m_impl->gpuConfig.decodeIntervalMs = g.decode_interval_ms();   // 0 = default
         m_impl->gpuConfig.outputFile = g.output_file();
         for (const auto& m : g.metrics()) {
@@ -232,7 +232,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         m_impl->sysEnabled = true;
         const auto& s = proto.system();
         m_impl->sysConfig.samplingFrequencyHz = s.sampling_frequency_hz() > 0 ? s.sampling_frequency_hz() : 50;
-        m_impl->sysConfig.flushIntervalMs = s.flush_interval_ms() > 0 ? s.flush_interval_ms() : 5000;
+        m_impl->sysConfig.flushIntervalMs = s.flush_interval_ms();   // 0 = default
         m_impl->sysConfig.outputFile = s.output_file();
         m_impl->sysConfig.mode =
             (s.mode() == SYSTEM_PROBE_MODE_SIDECAR)
@@ -252,7 +252,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         m_impl->diskEnabled = true;
         const auto& d = proto.disk();
         m_impl->diskConfig.samplingFrequencyHz = d.sampling_frequency_hz() > 0 ? d.sampling_frequency_hz() : 50;
-        m_impl->diskConfig.flushIntervalMs = d.flush_interval_ms() > 0 ? d.flush_interval_ms() : 5000;
+        m_impl->diskConfig.flushIntervalMs = d.flush_interval_ms();  // 0 = default
         m_impl->diskConfig.outputFile = d.output_file();
         m_impl->diskConfig.mode =
             (d.mode() == SYSTEM_PROBE_MODE_SIDECAR)
@@ -274,7 +274,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     if (proto.has_events() && proto.events().enabled()) {
         m_impl->eventEnabled = true;
         const auto& e = proto.events();
-        m_impl->eventConfig.flushIntervalMs = e.flush_interval_ms() > 0 ? e.flush_interval_ms() : 5000;
+        m_impl->eventConfig.flushIntervalMs = e.flush_interval_ms(); // 0 = default
         m_impl->eventConfig.outputFile = !e.output_file().empty() ? e.output_file() : "events.pb";
     }
 

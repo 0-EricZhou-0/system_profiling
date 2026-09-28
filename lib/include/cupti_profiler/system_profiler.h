@@ -4,6 +4,8 @@
 #include <cupti_profiler/process_tracking_probe.h>
 #include <cupti_profiler/tracked_process.h>
 
+#include <cupti_profiler/defaults.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -42,7 +44,8 @@ struct CUPTI_PROFILER_API SystemProfilerConfig {
     // render labels as "<alias> (PID xxx)" when alias is non-empty,
     // otherwise plain "PID xxx".
     std::vector<TrackedProcess> Processes;
-    uint64_t flushIntervalMs = 5000;
+    // Periodic flush to outputFile. 0 = kDefaultFlushIntervalMs (5 s).
+    uint64_t flushIntervalMs = kDefaultFlushIntervalMs;
     std::string outputFile;
     SystemProbeMode mode = SystemProbeMode::Legacy;
 };

@@ -325,7 +325,7 @@ int main(int argc, char** argv) {
         cupti_profiler::SystemProfilerConfig sc;
         const auto& s = cfg.system();
         sc.samplingFrequencyHz = s.sampling_frequency_hz() > 0 ? s.sampling_frequency_hz() : 50;
-        sc.flushIntervalMs     = s.flush_interval_ms()     > 0 ? s.flush_interval_ms()     : 5000;
+        sc.flushIntervalMs     = s.flush_interval_ms();   // 0 = default
         sc.outputFile          = build_output_path(s.output_file());
         // sc.mode stays Legacy here — from the sidecar's POV, running
         // in-process is the only path (this IS the sidecar).
@@ -349,7 +349,7 @@ int main(int argc, char** argv) {
         cupti_profiler::DiskProfilerConfig dc;
         const auto& d = cfg.disk();
         dc.samplingFrequencyHz = d.sampling_frequency_hz() > 0 ? d.sampling_frequency_hz() : 50;
-        dc.flushIntervalMs     = d.flush_interval_ms()     > 0 ? d.flush_interval_ms()     : 5000;
+        dc.flushIntervalMs     = d.flush_interval_ms();   // 0 = default
         dc.outputFile          = build_output_path(d.output_file());
         for (const auto& dev : d.devices()) dc.devices.push_back(dev);
         for (const auto& p : d.processes()) {

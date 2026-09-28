@@ -223,6 +223,7 @@ SystemProfiler::~SystemProfiler() {
 
 void SystemProfiler::Configure(const SystemProfilerConfig& config) {
     m_impl->config = config;
+    m_impl->config.flushIntervalMs = ResolveFlushIntervalMs(config.flushIntervalMs);
 
     char buf[256];
     gethostname(buf, sizeof(buf));
@@ -427,7 +428,7 @@ void SystemProfiler::Start() {
 
     // Launch flush thread
     m_impl->stopFlush.Reset();
-    if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
+    if (m_impl->outFile.is_open()) {
         m_impl->flushThread = std::thread(internal::SystemFlushThreadFunc,
                                            std::ref(m_impl->batch),
                                            std::ref(m_impl->batchMutex),

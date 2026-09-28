@@ -377,7 +377,7 @@ struct ProfilerConfig {
     uint64_t maxSamples = 50000;
     std::vector<std::string> metrics;
 
-    uint64_t flushIntervalMs = 10000;           // 0 = no periodic flush
+    uint64_t flushIntervalMs = 5000;            // 0 = 5000
     std::string outputFile;                     // empty = no file output
 };
 ```
@@ -389,7 +389,7 @@ struct ProfilerConfig {
 | `hwBufferSize` | GPU-side ring buffer size. 512 MB prevents overflow at 10 kHz |
 | `maxSamples` | Decode buffer capacity (per decode cycle, not total) |
 | `metrics` | CUPTI metric names to collect. Must fit in a single pass. The same set is applied to every device in `deviceIndices`. |
-| `flushIntervalMs` | How often to write accumulated samples to disk. 0 disables periodic flush |
+| `flushIntervalMs` | How often to write accumulated samples to disk (one write per flush). 0 = 5000 ms. Every probe flushes periodically; there is no flush-at-end-only mode, which would buffer the whole run in memory |
 | `outputFile` | Path to the output `.pb` file. Empty disables file output |
 
 > [!TIP]
