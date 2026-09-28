@@ -71,7 +71,9 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("hw_buffer_size",        &ProfilerConfig::hwBufferSize,
             "CUPTI hardware buffer size in bytes (default 512 MiB).")
         .def_readwrite("max_samples",           &ProfilerConfig::maxSamples,
-            "Maximum samples retained in memory before flushing.")
+            "Counter-data image capacity, in samples, for one decode pass "
+            "(~16 KB of host RAM each). 0 (default) = sized for the decode "
+            "interval: ceil(rate x decode_interval x 1.25) + 64.")
         .def_readwrite("metrics",               &ProfilerConfig::metrics,
             "List of CUPTI metric names (e.g. 'sm__cycles_active.avg').")
         .def_readwrite("flush_interval_ms",     &ProfilerConfig::flushIntervalMs,

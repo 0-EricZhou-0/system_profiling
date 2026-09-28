@@ -36,6 +36,8 @@ message GPUProfilerConfig {
     repeated int32 device_indices = 2;
     uint64 sampling_frequency_hz = 3;
     uint64 hw_buffer_size = 4;
+    // Counter-data image capacity per decode pass; 0 = sized for the
+    // decode interval (see ProfilerConfig::maxSamples).
     uint64 max_samples = 5;
     repeated string metrics = 6;
     uint64 flush_interval_ms = 7;

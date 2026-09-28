@@ -95,6 +95,20 @@ double NvLinkLinkBytesPerSec(unsigned int gen) {
     return s.laneGbps * 1e9 * s.lanesPerLink / 8.0;
 }
 
+// Hardware-buffer bytes one PM sample takes. CUPTI does not expose it;
+// measured on H100 (CUDA 13.3, 2026-09-28): ~4.2-4.6 KB with 1-2
+// metrics, ~5.9-7.0 KB with 4 (it grows with the counters the metrics
+// need). This bound is used to check that hw_buffer_size holds two
+// decode intervals of samples; an overflow is still detected at run
+// time (GpuDecodeStats.hw_buffer_overflows).
+constexpr uint64_t kHwBufferBytesPerSampleBound = 16 * 1024;
+
+// Counter-data image slots for one decode pass, with a 25% + 64 margin
+// for a late pass.
+uint64_t AutoMaxSamples(uint64_t hz, uint64_t decodeIntervalMs) {
+    return (hz * decodeIntervalMs * 5 + 3999) / 4000 + 64;
+}
+
 } // namespace
 
 class GpuProfiler::Impl {
@@ -171,6 +185,27 @@ void GpuProfiler::Configure(const ProfilerConfig& requested) {
             "): a flush could only write what the last decode pass collected. "
             "Raise flush_interval_ms or lower decode_interval_ms");
     }
+    const uint64_t perPass = (resolved.samplingFrequencyHz * resolved.decodeIntervalMs + 999) / 1000;
+    const uint64_t hwNeeded = 2 * perPass * kHwBufferBytesPerSampleBound;
+    if (resolved.hwBufferSize < hwNeeded) {
+        throw std::invalid_argument(
+            "GPU hw_buffer_size (" + std::to_string(resolved.hwBufferSize >> 20) +
+            " MiB) cannot hold two decode intervals of samples at " +
+            std::to_string(resolved.samplingFrequencyHz) + " Hz every " +
+            std::to_string(resolved.decodeIntervalMs) + " ms: needs at least " +
+            std::to_string((hwNeeded + (1 << 20) - 1) >> 20) +
+            " MiB (at up to 16 KiB per sample). Raise hw_buffer_size, or lower "
+            "decode_interval_ms or the sampling rate");
+    }
+    const bool autoSize = resolved.maxSamples == 0;
+    if (autoSize) {
+        resolved.maxSamples = AutoMaxSamples(resolved.samplingFrequencyHz, resolved.decodeIntervalMs);
+    } else if (resolved.maxSamples < perPass) {
+        std::cerr << "[cupti-profiler] warning: GPU max_samples (" << resolved.maxSamples
+                  << ") is less than one decode pass (" << perPass << " samples at "
+                  << resolved.samplingFrequencyHz << " Hz every " << resolved.decodeIntervalMs
+                  << " ms); samples will be lost. 0 = sized for the decode interval\n";
+    }
     m_impl->config = std::move(resolved);
     // metricsCstr below points into this copy's strings.
     const ProfilerConfig& config = m_impl->config;
@@ -240,6 +275,9 @@ void GpuProfiler::Configure(const ProfilerConfig& requested) {
         CUPTI_API_CALL(d.target.SetConfig(d.configImage, config.hwBufferSize, intervalNs));
         CUPTI_API_CALL(d.target.CreateCounterDataImage(
             config.maxSamples, m_impl->metricsCstr, d.counterDataImage));
+        std::cout << "  Counter-data image: " << config.maxSamples << " samples ("
+                  << (autoSize ? "auto" : "set") << "), " << std::fixed << std::setprecision(1)
+                  << d.counterDataImage.size() / 1e6 << " MB\n";
 
         cudaDeviceProp prop;
         RUNTIME_API_CALL(cudaGetDeviceProperties(&prop, idx));

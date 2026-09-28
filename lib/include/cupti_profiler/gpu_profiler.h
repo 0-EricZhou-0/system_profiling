@@ -43,7 +43,13 @@ struct CUPTI_PROFILER_API ProfilerConfig {
     std::vector<int> deviceIndices;
     uint64_t samplingFrequencyHz = 10000;          // 10 kHz
     size_t hwBufferSize = 512 * 1024 * 1024;    // 512 MB
-    uint64_t maxSamples = 50000;
+    // Counter-data image capacity, in samples, for ONE decode pass (the
+    // image is re-initialized after every pass; ~16 KB of host RAM per
+    // slot with 4 metrics on H100). 0 = sized for the decode interval:
+    // ceil(samplingFrequencyHz x decodeIntervalMs / 1000 x 1.25) + 64.
+    // Smaller than one pass loses samples (CUPTI 13.3 returns invalid
+    // samples once the image fills); counted in GpuDecodeStats.
+    uint64_t maxSamples = 0;
     std::vector<std::string> metrics;
 
     // How often the host collects the samples the GPU buffered: one

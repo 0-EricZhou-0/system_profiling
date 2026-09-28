@@ -218,7 +218,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         }
         m_impl->gpuConfig.samplingFrequencyHz = g.sampling_frequency_hz() > 0 ? g.sampling_frequency_hz() : 10000;
         m_impl->gpuConfig.hwBufferSize = g.hw_buffer_size() > 0 ? g.hw_buffer_size() : 512 * 1024 * 1024;
-        m_impl->gpuConfig.maxSamples = g.max_samples() > 0 ? g.max_samples() : 50000;
+        m_impl->gpuConfig.maxSamples = g.max_samples();   // 0 = auto
         m_impl->gpuConfig.flushIntervalMs = g.flush_interval_ms();
         m_impl->gpuConfig.decodeIntervalMs = g.decode_interval_ms();   // 0 = default
         m_impl->gpuConfig.outputFile = g.output_file();
