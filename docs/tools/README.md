@@ -102,6 +102,22 @@ listed entries never share a colour. Cumulative companion panels carry
 each series' run total in its legend entry (`+k more` carries theirs
 combined). Every series, listed or not, is in `<output>.legend.txt`.
 
+**Process timeline.** Directly under the Region strip, on the same time
+axis: one bar per tracked process (processes only — threads are not
+traced) from its start to its exit, or to the end of the trace if it was
+still running, in the process's colour from the per-process panels and
+labelled `comm (pid)` where the label fits (`comm` = its latest name).
+Listed roots are outlined solid, orphans — discovered processes whose
+parent is not in the trace — dashed. A thin line with a dot on the
+parent's bar marks each fork: from the parent's bar at the child's start
+to the child's bar (the parent is the one recorded when the child was
+found, so a reparented process still links to the process that forked
+it). The bars are packed into the fewest lanes possible: in start order,
+each takes a lane free at its start — the one nearest its parent's — and
+a new lane opens only when none is free, so the lane count is the most
+processes alive at one instant. From the trace's process table (the
+System probe's): pid, parent, comm history, start (10 ms ticks) and end.
+
 **Statistic labels.** A metric that is a statistic over its entity's
 instances says which in its legend, from the FQN's rollup:
 `sm__cycles_active.avg…` reads "Active Cycles (avg)" (the mean over the
@@ -167,6 +183,9 @@ Flag reference (selected; full list via `--help`):
 
 What you get:
 
+- **Process timeline** under the strips (it scrolls with the panels),
+  as in `visualize_all.py`; hover a bar for the process's every name,
+  pid, parent, kind, start and end.
 - **Sticky event + region strips** pinned at the top of the page; the
   metric panels below scroll past behind them. The two strips share
   one continuous opaque band with a dashed separator at the bottom.

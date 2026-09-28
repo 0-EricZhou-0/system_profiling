@@ -52,6 +52,7 @@ import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
 import panel_legend  # noqa: E402
+import process_timeline  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 from bokeh.application import Application  # noqa: E402
@@ -1008,6 +1009,104 @@ def _build_event_strip(events, t0_ns: int, x_range) -> "figure":
     return fig
 
 
+_LANE_PX = 16   # process timeline: pixels per lane
+
+
+def _timeline_data(projector: TraceProjector, proj: dict, t0_ns: int, t_end_ns: int):
+    """(processes, lanes, n_lanes, links) of the process timeline."""
+    first, last = {}, {}
+    for (fqn, key), (ts, _v) in proj.items():
+        d = projector.descriptors.get(fqn)
+        if ts.size and d is not None and d.scope == mc_pb.SCOPE_PROCESS:
+            first[key] = min(first.get(key, int(ts[0])), int(ts[0]))
+            last[key] = max(last.get(key, int(ts[-1])), int(ts[-1]))
+    procs = process_timeline.build(projector.process_table, t0_ns, t_end_ns,
+                                   first_sample_ns=first, last_sample_ns=last)
+    lanes, n_lanes = process_timeline.pack_lanes(procs)
+    return procs, lanes, n_lanes, process_timeline.fork_links(procs, lanes)
+
+
+def _build_process_timeline(procs, lanes, n_lanes, links, t0_ns: int, t_end_ns: int,
+                            x_range, pid_colors: dict) -> "figure":
+    """Bokeh equivalent of visualize_all._render_process_timeline: one bar
+    per process (lifetime, lane packed), listed roots outlined solid,
+    orphans dashed, fork links from parent to child; `comm (pid)` on the
+    bars wide enough at the full view, everything in the hover."""
+    fig = figure(
+        title="Processes (bars: lifetime, packed into the fewest lanes; lines: fork links)",
+        width=1200, frame_height=max(1, n_lanes) * _LANE_PX, frame_width=_FRAME_WIDTH,
+        min_border_left=_STRIP_LEFT_PX, x_range=x_range, y_range=Range1d(n_lanes, 0),
+        tools=[], toolbar_location=None, output_backend=_RENDER_BACKEND,
+    )
+    fig.yaxis.visible = False
+    fig.ygrid.visible = False
+    fig.xaxis.visible = False
+    span_s = max((t_end_ns - t0_ns) / 1e9, 1e-9)
+    by_kind: dict = {k: dict(left=[], right=[], top=[], bottom=[], color=[], name=[], pid=[],
+                             ppid=[], kind=[], start=[], end=[])
+                     for k in (process_timeline.ROOT, process_timeline.DISCOVERED,
+                               process_timeline.ORPHAN)}
+    labels = dict(x=[], y=[], text=[], color=[])
+    for p in procs:
+        lane = lanes[p.key]
+        left, right = (p.start_ns - t0_ns) / 1e9, (p.end_ns - t0_ns) / 1e9
+        color = pid_colors.get(p.pid, "#9e9e9e")
+        d = by_kind[p.kind]
+        d["left"].append(left)
+        d["right"].append(max(right, left + span_s * 1e-4))
+        d["top"].append(lane + 0.11)
+        d["bottom"].append(lane + 0.89)
+        d["color"].append(color)
+        d["name"].append(process_timeline.name_history(p))
+        d["pid"].append(p.pid)
+        d["ppid"].append(p.ppid)
+        d["kind"].append(p.kind + (", started before the trace" if p.started_before else "")
+                         + (", alive at the end" if p.alive else ""))
+        d["start"].append(left)
+        d["end"].append(right)
+        text = f"{p.comm} ({p.pid})"
+        if len(text) * _LEGEND_CHAR_EM * _LEGEND_FONT_PX + 6 < (right - left) / span_s * _FRAME_WIDTH:
+            labels["x"].append((left + right) / 2)
+            labels["y"].append(lane + 0.5)
+            labels["text"].append(text)
+            labels["color"].append(color)
+    style = {process_timeline.ROOT: dict(line_color="black", line_width=1.5),
+             process_timeline.DISCOVERED: dict(line_color="color", line_width=0.5),
+             process_timeline.ORPHAN: dict(line_color="black", line_width=1.0,
+                                           line_dash="dashed")}
+    shown = []
+    names = {process_timeline.ROOT: "listed root", process_timeline.DISCOVERED: "discovered",
+             process_timeline.ORPHAN: "orphan (parent not tracked)"}
+    bars = []
+    for kind, d in by_kind.items():
+        bars.append(fig.quad(left="left", right="right", top="top", bottom="bottom",
+                             source=ColumnDataSource(d), fill_color="color", fill_alpha=0.85,
+                             **style[kind]))
+        # Legend swatch: the kind's outline on neutral grey (a bar's own
+        # colour is its process's, not the kind's), drawn at negative time,
+        # outside the x range's bounds.
+        swatch = dict(style[kind], line_color=("#bbbbbb" if kind == process_timeline.DISCOVERED
+                                               else style[kind]["line_color"]))
+        shown.append((names[kind], fig.quad(left=[-2.0], right=[-1.0], top=[0.1], bottom=[0.9],
+                                            fill_color="#bbbbbb", **swatch)))
+    link = dict(x=[(lk.t_ns - t0_ns) / 1e9 for lk in links],
+                y0=[lk.parent_lane + 0.5 for lk in links],
+                y1=[lk.child_lane + 0.5 for lk in links])
+    seg = fig.segment(x0="x", y0="y0", x1="x", y1="y1", source=ColumnDataSource(link),
+                      line_color="#444444", line_width=1.0)
+    fig.scatter("x", "y0", source=ColumnDataSource(link), size=3, color="#444444")
+    shown.append(("fork link (parent -> child)", seg))
+    fig.text(x="x", y="y", text="text", source=ColumnDataSource(labels),
+             text_align="center", text_baseline="middle", text_font_size="7pt",
+             text_color="white")
+    fig.add_tools(HoverTool(renderers=bars, tooltips=[
+        ("process", "@name (@pid)"), ("parent", "@ppid"), ("kind", "@kind"),
+        ("start", "@start{0.000}s"), ("end", "@end{0.000}s")]))
+    _legend_above(fig, shown, [])
+    fig.legend[0].click_policy = "none"
+    return fig
+
+
 def _overlay_regions(figs: list, regions, t0_ns: int) -> None:
     """Add a translucent BoxAnnotation per region to each metric panel."""
     if not regions or not figs:
@@ -1385,6 +1484,16 @@ def _build_static_document(
     if shared_x is not None and regions:
         strips.append(_build_region_strip(regions, t0_ns, shared_x))
 
+    # The process timeline, right under the (sticky) strips, scrolling.
+    timeline_fig = None
+    if shared_x is not None:
+        procs, lanes, n_lanes, links = _timeline_data(projector, proj, t0_ns, t_end_ns)
+        if procs:
+            order = {pid: i for i, pid in enumerate(dict.fromkeys(p.pid for p in procs))}
+            timeline_fig = _build_process_timeline(
+                procs, lanes, n_lanes, links, t0_ns, t_end_ns, shared_x,
+                {pid: _PALETTE[i % len(_PALETTE)] for pid, i in order.items()})
+
     # Drop the Bokeh logo from every toolbar (15 logos across the
     # page is visual noise; the framework is implicit from the file
     # extension). The wheel-zoom's maintain_focus=False is set at
@@ -1408,6 +1517,8 @@ def _build_static_document(
             "border-bottom": f"1px dashed {theme['strip_border']}",
         }
         layout_children.append(strip_col)
+    if timeline_fig is not None:
+        layout_children.append(timeline_fig)
     layout_children.extend(figs)
 
     # Write-rate footer (mirrors visualize_all.py's static-PNG table).
@@ -1431,7 +1542,8 @@ def _build_static_document(
 
     layout_root = column(layout_children, sizing_mode="stretch_width")
     return StaticDocument(root=layout_root, strips=strips, panel_figs=panel_figs,
-                          footer_text=footer_text, n_figures=len(strips) + len(figs))
+                          timeline=timeline_fig, footer_text=footer_text,
+                          n_figures=len(strips) + len(figs) + (timeline_fig is not None))
 
 
 # ---------------------------------------------------------------------------

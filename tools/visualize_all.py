@@ -7,6 +7,8 @@ and produces a tall, multi-panel PNG. Layout (top to bottom):
   - Event strip   : instantaneous markers from events.pb
   - Region strip  : named time intervals from events.pb, with shaded
                     overlays mirrored on every metric panel below
+  - Process timeline: one bar per tracked process, lane packed, with
+                    fork links (process_timeline.py)
   - GPU panels    : every layout entry whose FQNs were emitted by the
                     GPU probe
   - System panels : CPU + memory + per-PID CPU/RSS
@@ -56,6 +58,7 @@ import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
 import panel_legend  # noqa: E402
+import process_timeline  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 
@@ -66,12 +69,17 @@ from metric_projector import TraceProjector  # noqa: E402
 PANEL_HEIGHT_METRIC = 1.7   # any metric panel
 PANEL_HEIGHT_EVENT  = 0.25  # event timeline strip
 PANEL_HEIGHT_REGION = 0.10  # region timeline strip
+# Process timeline: one lane per process alive at the busiest instant.
+PROCESS_LANE_HEIGHT = 0.16  # inches per lane
+PROCESS_BAR_FILL    = 0.78  # bar height, fraction of a lane
+PROCESS_LABEL_FONTSIZE = 6.5
 PANEL_HEIGHT_FOOTER = 0.7   # write-rate text footer
 
 SPACING_PANEL        = 0.55   # within a section
 SPACING_SECTION      = 0.90   # between sections (dashed sep at midpoint)
 SPACING_EVENT_REGION = 1.85   # event strip -> region strip
 SPACING_AFTER_REGION = 1.45   # region strip -> first metric panel
+SPACING_REGION_TIMELINE = 0.95  # region strip -> process timeline (title + duration labels)
 SPACING_TITLE        = 0.95   # title baseline above first strip
 
 FIG_WIDTH         = 21.0
@@ -997,6 +1005,98 @@ def _render_event_strip(ax, events, t0_ns: int, xmax_s: float,
     return groups
 
 
+class _Timeline:
+    """The process timeline's data (process_timeline): processes, lanes,
+    fork links."""
+
+    def __init__(self, projector: TraceProjector, projection: dict, t0_ns: int, t_end_ns: int):
+        first, last = {}, {}
+        for (fqn, key), (ts, _v) in projection.items():
+            if ts.size and projector.descriptors.get(fqn) is not None \
+                    and projector.descriptors[fqn].scope == mc_pb.SCOPE_PROCESS:
+                first[key] = min(first.get(key, int(ts[0])), int(ts[0]))
+                last[key] = max(last.get(key, int(ts[-1])), int(ts[-1]))
+        self.procs = process_timeline.build(projector.process_table, t0_ns, t_end_ns,
+                                            first_sample_ns=first, last_sample_ns=last)
+        self.lanes, self.n_lanes = process_timeline.pack_lanes(self.procs)
+        self.links = process_timeline.fork_links(self.procs, self.lanes)
+
+    @property
+    def height_in(self) -> float:
+        return self.n_lanes * PROCESS_LANE_HEIGHT
+
+
+def _text_color_on(color: str) -> str:
+    r, g, b = mcolors.to_rgb(color)
+    return "black" if 0.299 * r + 0.587 * g + 0.114 * b > 0.6 else "white"
+
+
+def _render_process_timeline(ax, tl: _Timeline, t0_ns: int, xmax_s: float,
+                             pid_color_map: dict[int, str]) -> None:
+    """One bar per process (start -> end, lane packed), in the process's
+    colour from the per-process panels; listed roots outlined solid,
+    orphans (discovered, parent not tracked) dashed. A thin line joins
+    the parent's bar to each child's at the child's start (fork link).
+    Bars are labelled `comm (pid)` where the label fits."""
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    ax.set_xlim(0, xmax_s)
+    ax.set_ylim(tl.n_lanes, 0)               # lane 0 on top
+    ax.set_yticks([])
+    ax.tick_params(bottom=False, labelbottom=False)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
+    ax.grid(True, axis="x", alpha=0.3)
+    ax.set_ylabel("Process", fontsize=8)
+    ax.set_title("Processes (bars: lifetime, packed into the fewest lanes; lines: fork links)",
+                 fontsize=10, loc="left", pad=_timeline_legend_pad_pt())
+
+    width_pt = _axes_width_pt(ax)
+    for p in tl.procs:
+        lane = tl.lanes[p.key]
+        x0 = (p.start_ns - t0_ns) / 1e9
+        w = (p.end_ns - p.start_ns) / 1e9
+        color = pid_color_map.get(p.pid, "#9e9e9e")
+        edge, ls, lw = color, "-", 0.5
+        if p.kind == process_timeline.ROOT:
+            edge, lw = "black", 1.2
+        elif p.kind == process_timeline.ORPHAN:
+            edge, ls, lw = "black", "--", 0.9
+        ax.barh(lane + 0.5, max(w, xmax_s * 1e-4), left=x0, height=PROCESS_BAR_FILL,
+                color=color, edgecolor=edge, linestyle=ls, linewidth=lw, zorder=2)
+        label = f"{p.comm} ({p.pid})"
+        if _text_width_pt(label, PROCESS_LABEL_FONTSIZE) + 4 < w / xmax_s * width_pt:
+            ax.text(x0 + w / 2, lane + 0.5, label, ha="center", va="center",
+                    fontsize=PROCESS_LABEL_FONTSIZE, color=_text_color_on(color),
+                    clip_on=True, zorder=4)
+    for link in tl.links:
+        x = (link.t_ns - t0_ns) / 1e9
+        y0, y1 = link.parent_lane + 0.5, link.child_lane + 0.5
+        ax.plot([x, x], [y0, y1], color="#444444", lw=0.6, zorder=3, solid_capstyle="butt")
+        ax.plot([x], [y0], marker="o", markersize=1.8, color="#444444", zorder=3)
+
+    handles = [Patch(facecolor="#bbbbbb", edgecolor="black", linewidth=1.2, label="listed root"),
+               Patch(facecolor="#bbbbbb", edgecolor="#bbbbbb", label="discovered"),
+               Patch(facecolor="#bbbbbb", edgecolor="black", linestyle="--", linewidth=0.9,
+                     label="orphan (parent not tracked)"),
+               Line2D([], [], color="#444444", lw=0.8, marker="o", markersize=2,
+                      label="fork link (parent -> child)")]
+    fs = LEGEND_FONTSIZE
+    ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
+              ncol=len(handles), fontsize=fs, frameon=False,
+              borderaxespad=LEGEND_AXESPAD_EM, borderpad=LEGEND_BORDER_EM,
+              handlelength=LEGEND_HANDLE_EM, handletextpad=LEGEND_TEXTPAD_EM,
+              columnspacing=LEGEND_COLSPACE_EM)
+
+
+def _timeline_legend_pad_pt() -> float:
+    """Title pad above the timeline: its one-row legend."""
+    fs = LEGEND_FONTSIZE
+    return (1.25 * fs + 2 * LEGEND_BORDER_EM * fs + LEGEND_AXESPAD_EM * fs
+            + LEGEND_TITLE_GAP_PT)
+
+
 def _overlay_regions(metric_axes, regions, t0_ns: int) -> None:
     for ri, (_name, start_ns, end_ns) in enumerate(regions):
         r_start_s = (start_ns - t0_ns) / 1e9
@@ -1352,6 +1452,9 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
     has_regions = bool(probes["events"]["regions"])
     if has_events:  annot_panels.append(("event",  PANEL_HEIGHT_EVENT, 0.0))
     if has_regions: annot_panels.append(("region", PANEL_HEIGHT_REGION, 0.0))
+    timeline = _Timeline(projector, proj, t0_ns, t_end_ns)
+    if timeline.procs:
+        annot_panels.append(("process", timeline.height_in, _timeline_legend_pad_pt() / 72.0))
     if annot_panels:
         sections.append(("annot", annot_panels))
 
@@ -1371,8 +1474,10 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
         return None
 
     def _within_group_gap(prev_kind, kind):
-        if prev_kind == "event" and kind == "region":
+        if prev_kind == "event":             # its time labels hang below it
             return SPACING_EVENT_REGION
+        if prev_kind == "region":            # its duration labels hang below it
+            return SPACING_REGION_TIMELINE
         return SPACING_PANEL
 
     def _between_section_gap(prev_section, next_section):
@@ -1410,10 +1515,11 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
             prev_kind = panel_kind
 
     # Sort axes by role
-    event_ax = region_ax = footer_ax = None
+    event_ax = region_ax = footer_ax = process_ax = None
     metric_axes_by_group: dict[str, list] = {"gpu": [], "system": [], "disk": []}
     for group_key, panel_kind, ax in placed:
         if panel_kind == "event":  event_ax = ax
+        elif panel_kind == "process": process_ax = ax
         elif panel_kind == "region": region_ax = ax
         elif panel_kind == "footer": footer_ax = ax
         elif panel_kind == "metric":
@@ -1461,6 +1567,9 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
     if region_ax is not None:
         region_groups = _render_region_strip(
             region_ax, probes["events"]["regions"], t0_ns, xmax_s)
+
+    if process_ax is not None:
+        _render_process_timeline(process_ax, timeline, t0_ns, xmax_s, pid_color_map)
 
     if probes["events"]["regions"]:
         _overlay_regions(all_metric_axes, probes["events"]["regions"], t0_ns)
@@ -1611,7 +1720,8 @@ def build_figure(metadata, *, catalog=None, panel_layout=None,
         for ax, (panel, series_list, kind) in zip(metric_axes_by_group[g], groups[g]):
             panel_axes.append((panel, series_list, kind, ax))
     return Rendered(fig=fig, resolved=resolved, projector=projector,
-                    panel_axes=panel_axes, region_ax=region_ax, event_ax=event_ax)
+                    panel_axes=panel_axes, region_ax=region_ax, event_ax=event_ax,
+                    process_ax=process_ax, timeline=timeline)
 
 
 if __name__ == "__main__":

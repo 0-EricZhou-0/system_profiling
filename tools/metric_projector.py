@@ -69,6 +69,23 @@ class TrackedProcess:
     parent_pid: int = 0        # the tracked parent it was found under
 
 
+@dataclass
+class ProcessRecord:
+    """One row of the trace's process table (TrackedProcessV2), merged
+    across flushes: the latest comm/alias, the end once it is known, the
+    longest comm history."""
+    pid: int = 0
+    parent_pid: int = 0
+    discovered: bool = False
+    label: str = ""
+    alias: str = ""
+    comm: str = ""
+    start_time_ns: int = 0
+    end_time_ns: int = 0
+    removed: bool = False
+    comm_history: list = field(default_factory=list)   # [(timestamp_ns, comm)]
+
+
 # ---------------------------------------------------------------------------
 # TraceProjector
 # ---------------------------------------------------------------------------
@@ -99,6 +116,11 @@ class TraceProjector:
         # keyed by pid so the visualizer can render a consistent
         # legend label regardless of which probe surfaced the PID.
         self.tracked_processes: dict[int, TrackedProcess] = {}
+        # The whole process table for the process timeline, per probe
+        # ("system", "disk": each probe records its own start / end
+        # instants, a tick apart), keyed by (pid, start_time_ns) so a
+        # reused PID number is a new row. See `process_table`.
+        self.process_tables: dict[str, dict[tuple[int, int], ProcessRecord]] = {}
 
         # FQN -> source probe ("gpu" / "system" / "disk"). Lets the
         # visualizer group panels by which probe emitted their series.
@@ -168,7 +190,14 @@ class TraceProjector:
                 cache.ts.append(ts)
                 cache.vals.append(s.values[i])
 
-    def _absorb_tracked_processes(self, entries) -> None:
+    @property
+    def process_table(self) -> dict[tuple[int, int], ProcessRecord]:
+        """The System probe's process table (the Disk probe's when there
+        is no System probe)."""
+        return self.process_tables.get("system") or self.process_tables.get("disk") or {}
+
+    def _absorb_tracked_processes(self, entries, probe: str) -> None:
+        table = self.process_tables.setdefault(probe, {})
         for e in entries:
             tp = self.tracked_processes.get(e.pid)
             if tp is None:
@@ -183,6 +212,20 @@ class TraceProjector:
                 tp.removed = tp.removed or e.removed
             if e.removed:
                 self._record_removal(_mc.SCOPE_PROCESS, e.pid)
+            rec = table.get((e.pid, e.start_time_ns))
+            if rec is None:
+                rec = ProcessRecord(pid=e.pid, parent_pid=e.parent_pid,
+                                    discovered=e.discovered, label=e.label,
+                                    start_time_ns=e.start_time_ns)
+                table[(e.pid, e.start_time_ns)] = rec
+            if e.comm:
+                rec.comm = e.comm
+            if e.alias:
+                rec.alias = e.alias
+            rec.removed = rec.removed or e.removed
+            rec.end_time_ns = max(rec.end_time_ns, e.end_time_ns)
+            if len(e.comm_history) >= len(rec.comm_history):
+                rec.comm_history = [(c.timestamp_ns, c.comm) for c in e.comm_history]
 
     def ingest_gpu(self, trace) -> None:
         self._absorb_header(trace.header)
@@ -226,7 +269,7 @@ class TraceProjector:
     def ingest_system(self, trace) -> None:
         self._absorb_header(trace.header)
         self._record_probe_source(trace, "system")
-        self._absorb_tracked_processes(trace.tracked_processes)
+        self._absorb_tracked_processes(trace.tracked_processes, "system")
         sys_fqns = self._scope_fqns(trace, _mc.SCOPE_SYSTEM)
         proc_fqns = self._scope_fqns(trace, _mc.SCOPE_PROCESS)
         self._ingest_samples_uniform(
@@ -241,7 +284,7 @@ class TraceProjector:
     def ingest_disk(self, trace) -> None:
         self._absorb_header(trace.header)
         self._record_probe_source(trace, "disk")
-        self._absorb_tracked_processes(trace.tracked_processes)
+        self._absorb_tracked_processes(trace.tracked_processes, "disk")
         dev_fqns = self._scope_fqns(trace, _mc.SCOPE_DEVICE)
         proc_fqns = self._scope_fqns(trace, _mc.SCOPE_PROCESS)
         self._ingest_samples_uniform(
