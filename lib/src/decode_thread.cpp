@@ -32,7 +32,7 @@ constexpr int kMaxDecodeStepsPerPass = 1 << 16;
 // Both images have the same size: a GetCounterDataSize query with another
 // max_samples makes later image initializations fail.
 //
-// What CUPTI 13.3 does (measured on H100, sidecar-impl phase 7):
+// What CUPTI 13.3 does (measured on H100, 2026-09-28; docs/cupti-hardware-findings.md, 4):
 //   * A decode that stops at END_OF_RECORDS (or OTHER) got everything
 //     the hardware buffer held. Samples are complete and contiguous
 //     (each one starts where the previous one ended) across passes;

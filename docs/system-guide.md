@@ -1818,14 +1818,28 @@ sampler buffered once per `decode_interval_ms` (1 s), a worker
 (`cupti-eval<N>`) evaluates the samples, and a flush thread
 (`cupti-gpu-flush`) writes them every `flush_interval_ms` (5 s).
 
-**What it costs** (measured 2026-09-27/28 against a warm vLLM 0.29 server,
-`Qwen3.5-0.8B` on an H100 NVL, deterministic load, paired runs; details in
-the phase 6b/7 measurements):
+**What it costs** (measured 2026-09-28 against a warm vLLM 0.29 server,
+`Qwen3.5-0.8B` on an H100 NVL; deterministic load: S1 = 60 sequential
+streamed requests, S64 = 15 closed batches of 64; temperature 0; every
+process pinned; runs interleaved in blocks, mean paired Δ with 95% CI,
+n = 5–7 pairs; one CUDA context created after the server was ready, see
+below). Against no profiler at all, with System + Disk at 100 Hz in the
+sidecar and the GPU probe at the new defaults, launcher off vLLM's L3:
 
-| | S64 decode (ITL) | prefill / TTFT | GPU power |
-|---|---|---|---|
-| PM sampling itself, launcher off vLLM's L3 | **+0.16–0.18%** | **≈ +1%** | +18 W |
-| same, at 100, 500 and 1000 Hz | the same (a fixed "PM sampling on" cost, not per sample) | the same | the same |
+| vs no profiler | S1 decode (ITL) | S64 decode (ITL) | S1 TTFT | S64 prefill | GPU power | launcher CPU |
+|---|---|---|---|---|---|---|
+| System + Disk 100 Hz only | −0.01% [−0.03, +0.01] | −0.05% [−0.09, −0.01] | +0.60% [+0.01, +1.20] | +0.12% [−0.11, +0.35] | +0.2% | — |
+| + GPU 100 Hz | −0.09% [−0.11, −0.07] | +0.02% [−0.03, +0.07] | +0.29% [−0.17, +0.74] | +1.01% [+0.55, +1.48] | +19 W | 0.75% of a core |
+| + GPU 500 Hz | −0.10% [−0.12, −0.08] | +0.05% [+0.02, +0.09] | +0.36% [−0.45, +1.16] | +0.94% [+0.54, +1.35] | +19 W | 2.8% |
+
+Against System + Disk alone, the GPU probe at 100 / 200 / 500 / 1000 Hz
+costs the same: S64 ITL +0.11–0.15%, S64 prefill +0.6–0.9%, S1 ITL −0.1%,
++18–19 W; the launcher uses 0.8 / 1.3 / 2.9 / 5.2% of a core (decode thread
++ evaluation worker). At 500 Hz with the launcher on vLLM's own L3 the cost
+is the same as off it (S64 ITL +0.12% [+0.04, +0.20]). No sample was lost in
+any run (`GpuDecodeStats`), and each probe wrote once per 5 s flush (GPU 24 /
+116 kB per flush at 100 / 500 Hz; the sidecar's System 106 kB and Disk
+360 kB).
 
 - **The rate does not change the cost** from 100 to 1000 Hz. Choose it for
   time resolution and trace size: about 4 / 20 / 40 kB/s at 100 / 500 /
@@ -1836,8 +1850,8 @@ the phase 6b/7 measurements):
   re-initialized every ~60 ms, 92% of a core), the launcher on vLLM's CCD
   slowed vLLM by **+7.5% (S64 ITL) and +10–16% (TTFT)**; the same launcher
   on another CCD or the other NUMA node cost **+0.13% / +0.19%**. The
-  collection is now a pass per second into a small image (under 2% of a
-  core at 1 kHz), but the placement advice stands: whatever the host
+  collection is now a pass per second into a small image (5% of a core at
+  1 kHz, and the same cost on vLLM's CCD as off it), but the advice stands: whatever the host
   process does, it should not share an L3 with the serving engine. Find
   the L3 of each CPU with `lscpu -e` (the `L3` column of `CACHE`) or
   `/sys/devices/system/cpu/cpu<N>/cache/index3/shared_cpu_list`, and pin
