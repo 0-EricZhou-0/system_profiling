@@ -19,6 +19,16 @@ void PassFlushGate();
 /// its reading as another process's. Disarmed: one relaxed atomic load.
 bool PassReadHook(uint32_t pid, testing::ReadProbe probe);
 
+/// The errno a test wants `probe`'s read of `pid`'s per-PID file to fail
+/// with (testing::SetReadError), 0 = read it. Disarmed: one relaxed
+/// atomic load.
+int ReadErrorFor(uint32_t pid, testing::ReadProbe probe);
+
+/// At a System/Disk probe's Stop(): with
+/// CUPTI_PROFILER_TEST_REPORT_WARN_STATE set, print its warning-key
+/// count before it drops them (testing::WarnStateSize for the sidecar).
+void ReportWarnStateAtStop(const char* probe, size_t n);
+
 /// Called by every flush thread after its write: sleeps for the delay a
 /// test set with testing::SetFlushDelayMs. Off: one relaxed atomic load.
 void PassFlushDelay();

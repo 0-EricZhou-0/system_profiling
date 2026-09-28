@@ -28,10 +28,12 @@ OTHER_COLOR = "#cccccc"
 
 def activity(ts_ns: np.ndarray, vals: np.ndarray) -> float:
     """How much a series did over the run: the time integral of |value|
-    (trapezoid, value x seconds). A single sample counts by its value."""
+    (trapezoid, value x seconds). A single sample counts by its value.
+    Missing values (NaN: e.g. memory of a process whose statm could not
+    be read) count as nothing."""
     if vals.size == 0:
         return 0.0
-    v = np.abs(vals.astype(np.float64))
+    v = np.nan_to_num(np.abs(vals.astype(np.float64)), nan=0.0)
     if ts_ns.size < 2:
         return float(v.sum())
     dt_s = np.diff(ts_ns.astype(np.int64)) / 1e9

@@ -1,6 +1,7 @@
 #include <cupti_profiler/testing.h>
 
 #include "testing_hooks.h"
+#include "warn_limiter.h"
 
 #include <atomic>
 #include <chrono>
@@ -34,6 +35,13 @@ struct ReadHook {
     std::atomic<uint32_t> skip{0};
 };
 ReadHook g_readHook[2];
+
+// Injected read errors, one per probe: target PID (0 = off) and errno.
+struct ReadError {
+    std::atomic<uint32_t> pid{0};
+    std::atomic<int>      err{0};
+};
+ReadError g_readError[2];
 
 std::atomic<unsigned> g_flushDelayMs{0};
 std::atomic<unsigned> g_backlogPeriodMs{30000};
@@ -84,6 +92,37 @@ void ReleaseFlushGate() {
 
 void KillAfterNextRead(uint32_t pid, ReadProbe probe) { Arm(probe, pid, 0); }
 
+void SetReadError(uint32_t pid, ReadProbe probe, int err) {
+    auto& e = g_readError[probe == ReadProbe::Disk ? 1 : 0];
+    e.pid.store(0);
+    e.err.store(err);
+    if (err) e.pid.store(pid);
+}
+
+bool ArmReadErrorFromEnv() {
+    const char* env = std::getenv("CUPTI_PROFILER_TEST_READ_ERROR");
+    if (!env || !*env) return false;
+    bool armed = false;
+    for (const char* spec = env; spec && *spec; ) {
+        char probe[16] = {};
+        unsigned pid = 0;
+        int err = 0;
+        if (std::sscanf(spec, "%15[a-z]:%u:%d", probe, &pid, &err) != 3 || pid == 0 || err <= 0 ||
+            (std::strcmp(probe, "system") != 0 && std::strcmp(probe, "disk") != 0)) {
+            std::fprintf(stderr, "[testing] ignoring malformed CUPTI_PROFILER_TEST_READ_ERROR=%s\n", env);
+            return armed;
+        }
+        SetReadError(pid, std::strcmp(probe, "disk") == 0 ? ReadProbe::Disk : ReadProbe::System, err);
+        std::fprintf(stderr, "[testing] read error armed: %s probe, pid %u, errno %d\n", probe, pid, err);
+        armed = true;
+        spec = std::strchr(spec, ',');
+        if (spec) ++spec;
+    }
+    return armed;
+}
+
+size_t WarnStateSize() { return internal::WarnLimiterKeysInProcess(); }
+
 bool ArmKillAfterReadFromEnv() {
     const char* env = std::getenv("CUPTI_PROFILER_TEST_KILL_AFTER_READ");
     if (!env || !*env) return false;
@@ -110,6 +149,17 @@ void PassFlushGate() {
     g_held = true;
     g_cv.notify_all();
     g_cv.wait(lk, [] { return g_released; });
+}
+
+void ReportWarnStateAtStop(const char* probe, size_t n) {
+    if (const char* e = std::getenv("CUPTI_PROFILER_TEST_REPORT_WARN_STATE"); e && *e)
+        std::fprintf(stderr, "[testing] %s warn state at stop: %zu\n", probe, n);
+}
+
+int ReadErrorFor(uint32_t pid, testing::ReadProbe probe) {
+    auto& e = g_readError[probe == testing::ReadProbe::Disk ? 1 : 0];
+    const uint32_t target = e.pid.load(std::memory_order_relaxed);
+    return (target != 0 && target == pid) ? e.err.load() : 0;
 }
 
 bool PassReadHook(uint32_t pid, testing::ReadProbe probe) {

@@ -67,6 +67,9 @@ struct ProcessTick {
     uint64_t rss_bytes      = 0;
     uint64_t vms_bytes      = 0;
     uint64_t shared_bytes   = 0;
+    // /proc/<pid>/statm could not be read (the process is alive): the
+    // memory values go out as NaN — missing, not zero.
+    bool     mem_unreadable = false;
 };
 
 // A discovered process's CPU after its last sample, measured on the

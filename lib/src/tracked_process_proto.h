@@ -27,6 +27,10 @@ inline void FillTrackedProcess(TrackedProcessV2* tp,
         h->set_timestamp_ns(c.timestamp_ns);
         h->set_comm(c.comm);
     }
+    tp->set_io_unreadable_since_ns(p.io_unreadable_since_ns);
+    tp->set_io_unreadable_ticks(p.io_unreadable_ticks);
+    tp->set_mem_unreadable_since_ns(p.mem_unreadable_since_ns);
+    tp->set_mem_unreadable_ticks(p.mem_unreadable_ticks);
 }
 
 // Does this snapshot carry a removal marker (an entry with
@@ -35,6 +39,16 @@ inline void FillTrackedProcess(TrackedProcessV2* tp,
 // for the final flush at Stop().
 inline bool HasRemovalMarker(const std::vector<ProcessTrackingProbe::ProcessEntry>& snapshot) {
     for (const auto& p : snapshot) if (p.pending_removal) return true;
+    return false;
+}
+
+// Does a row say that a per-PID file of its process could not be read
+// (io_ / mem_unreadable_*)? A flush goes out for it even with no
+// samples: a process whose I/O is never readable has none, and without
+// a flush the trace would not say why its I/O is missing.
+inline bool HasUnreadableRecord(const std::vector<ProcessTrackingProbe::ProcessEntry>& snapshot) {
+    for (const auto& p : snapshot)
+        if (p.io_unreadable_ticks || p.mem_unreadable_ticks) return true;
     return false;
 }
 

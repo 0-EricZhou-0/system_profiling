@@ -83,7 +83,6 @@ public:
     };
     std::unordered_map<std::string, Baseline<internal::DiskStatSnapshot>> prevDisk;
     std::unordered_map<uint32_t, Baseline<internal::PIDIOSnapshot>> prevPIDIO;
-    std::unordered_set<uint32_t> warnedPIDs; // PIDs we've already warned about EACCES
 
     // Reaped children's I/O (IoReapAdjustment in disk_metrics.proto).
     // A reaping parent's own /proc/<pid>/io counters grow by the child's
@@ -327,6 +326,11 @@ void DiskProfiler::Start() {
                 snapshotPids.insert(entry.pid);
                 if (entry.pending_removal) continue;
                 auto io = internal::ReadPIDIO(entry.pid);
+                if (int e = internal::ReadErrorFor(entry.pid, testing::ReadProbe::Disk)) {   // test-only
+                    io = {};
+                    io.accessible = false;
+                    io.error = e;
+                }
                 // Test-only: the process dies right after this read, and
                 // the reading stands for its number's next owner.
                 if (internal::PassReadHook(entry.pid, testing::ReadProbe::Disk)) {
@@ -399,12 +403,16 @@ void DiskProfiler::Start() {
                 const uint32_t pid = entry.pid;
                 if (gone.count(entry.serial)) continue;   // exited during this tick
                 if (!curIO.accessible) {
-                    if (impl.warnedPIDs.find(pid) == impl.warnedPIDs.end()) {
-                        std::cerr << "[Disk] Warning: cannot read /proc/" << pid
-                                  << "/io (permission denied). "
-                                  << "Skipping per-process disk IO for this PID.\n";
-                        impl.warnedPIDs.insert(pid);
-                    }
+                    // No sample this tick; the baseline is kept. An exiting
+                    // process's /proc/<pid>/io fails with EACCES until it is
+                    // reaped: that is its exit, not a permission problem.
+                    // A live one: warn once per tracked process and record
+                    // it in the process table (missing I/O is not zero).
+                    const auto kind = internal::ClassifyReadFailure(pid, curIO.error);
+                    if (kind != internal::ReadFailure::Gone)
+                        this->NoteUnreadable(entry.serial, UnreadableFile::Io, static_cast<int>(kind), tsNs,
+                                             internal::UnreadableWarning("Disk", "io", pid, entry.comm,
+                                                                         curIO.error, kind));
                     continue;
                 }
 
@@ -550,6 +558,7 @@ void DiskProfiler::Stop() {
         if (!drained.deviceTicks.empty() || !drained.processTicks.empty() ||
             !drained.ioReaps.empty() ||
             internal::HasRemovalMarker(processSnapshot) ||
+            internal::HasUnreadableRecord(processSnapshot) ||
             m_impl->flushStatsPending.valid) {
             DiskMetricsTrace trace = internal::BuildDiskTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz,
@@ -574,6 +583,8 @@ void DiskProfiler::Stop() {
         std::cout << "[Disk] Wrote trace to " << m_impl->config.outputFile << "\n";
     }
 
+    internal::ReportWarnStateAtStop("disk", WarnStateSize());
+    FlushWarnings();
     m_impl->running = false;
     internal::lifecycle::Unregister(m_impl.get());
 }

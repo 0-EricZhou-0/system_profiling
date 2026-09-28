@@ -55,6 +55,30 @@ CUPTI_PROFILER_API void KillAfterNextRead(uint32_t pid, ReadProbe probe = ReadPr
 /// Unset: does nothing. Returns true if it armed the hook.
 CUPTI_PROFILER_API bool ArmKillAfterReadFromEnv();
 
+/// Unreadable per-PID file: while armed, every read `probe` makes of
+/// `pid`'s per-PID file (System: /proc/<pid>/statm; Disk:
+/// /proc/<pid>/io) fails with errno `err`, as if the kernel had refused
+/// it; the process itself is untouched (alive, not exiting). err 0 or
+/// pid 0 disarms. In-process probes; for the sidecar see
+/// ArmReadErrorFromEnv().
+CUPTI_PROFILER_API void SetReadError(uint32_t pid, ReadProbe probe, int err);
+
+/// The same, armed from the environment, for the sidecar's probes:
+///
+///     CUPTI_PROFILER_TEST_READ_ERROR=<system|disk>:<pid>:<errno>[,...]
+///
+/// (one spec per probe). Unset: does nothing. Returns true if it armed
+/// the hook.
+CUPTI_PROFILER_API bool ArmReadErrorFromEnv();
+
+/// Per-process warning keys held, summed over the in-process System and
+/// Disk probes (their rate-limited read-failure warnings; see
+/// ProcessTrackingProbe::NoteUnreadable). Returns to 0 as processes stop
+/// being tracked. For the sidecar: with CUPTI_PROFILER_TEST_REPORT_WARN_STATE
+/// set, each probe prints "[testing] <probe> warn state at stop: <n>"
+/// to stderr at Stop(), before dropping what is left.
+CUPTI_PROFILER_API size_t WarnStateSize();
+
 /// Slow writer: every periodic flush of an in-process probe (GPU,
 /// System, Disk, Events) takes `ms` longer, as if the disk were slow
 /// (the flush thread sleeps after its write). 0 = off.

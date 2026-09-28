@@ -1784,7 +1784,19 @@ $ ls -la /proc/<pid>/io
 -r--------  <user>  <user>  /proc/<pid>/io        ← owner-only, 0400
 ```
 
-Symptom when permissions are missing: `disk_metrics.pb` is produced, per-device samples are populated normally, but **every per-PID `proc__io_*` rate reads as `0`** (or the profiler logs `EACCES` reading `/proc/<pid>/io`). Per-PID *CPU* and *memory* are unaffected because `/proc/<pid>/stat` and `/proc/<pid>/status` are world-readable.
+Symptom when permissions are missing: `disk_metrics.pb` is produced and per-device samples are populated normally, but the process has **no per-PID `proc__io_*` samples** — missing, not zero — and the Disk probe warns on stderr, naming the cause:
+
+```text ln:false
+[Disk] Warning: cannot read /proc/<pid>/io of <comm> (pid <pid>): Permission denied -- not readable by this process: it runs as another uid or is not dumpable (reading needs the same uid and a dumpable process, or CAP_SYS_PTRACE). Its I/O is missing from the trace (not zero) while this lasts: io_unreadable_since_ns / io_unreadable_ticks in the process table. At most once a second per process while it lasts. (99 suppressed)
+```
+
+The trace records it too: the process's `TrackedProcessV2` row carries `io_unreadable_since_ns` (the first tick it was unreadable) and `io_unreadable_ticks`, so a reader can tell missing I/O from no I/O.
+
+**Warning rate.** Per-process read-failure warnings (unreadable `/proc/<pid>/io`, unreadable `/proc/<pid>/statm`, any other errno) are keyed by *tracked process* (PID number and start time: a new process that reuses the number is a new key) and *warning type*, and each key warns **at most once a second** while the condition lasts. The ones in between are counted, not lost: the next line for that key ends in `(N suppressed)`, and when the process stops being tracked (exit, `remove_tracked_process`) or the probe stops, a last line reports any still pending (`(N suppressed; no longer tracked)` / `(N suppressed; at stop)`). So the lines of one key account for every failed read, which equals the row's `io_unreadable_ticks` (or `mem_unreadable_ticks`). The warning state belongs to the tracked process and is dropped with it. Per-PID *CPU* and *memory* are unaffected: the process CPU clock needs no permission, and `/proc/<pid>/stat` and `/proc/<pid>/statm` are world-readable (should `statm` be unreadable, e.g. under `hidepid`, the System probe warns the same way, samples the CPU, and writes the memory values as NaN, recorded as `mem_unreadable_since_ns` / `mem_unreadable_ticks`).
+
+**Not a permission problem: a process that is exiting.** From the moment the kernel starts tearing down an exiting process's memory until the process is reaped, its `/proc/<pid>/io` fails with `EACCES` too — for a large process for a noticeable time (measured on kernel 5.15: ~0.5 s for 8 GB mapped, while its pidfd still reports it alive). The probes check `/proc/<pid>/stat` on any failure: a process that is gone, a zombie, or has `PF_EXITING` set is exiting, and is neither warned about nor recorded: it has no sample on those ticks, as on any tick after its exit. `ENOENT` / `ESRCH` likewise mean it is gone. Any other error is warned about (at the same rate) with its text.
+
+What this window means for the counts: the probe's last reading of an exiting process is from before the window, so the I/O it did after that reading — its last interval, the window included — is not in its own samples. For a discovered process reaped by a tracked parent, the kernel folds its whole I/O into the parent at the reap, and the parent's sample at that tick carries it: `IoReapAdjustment` subtracts the child's last reading (`last_seen`), and the rest, including the child's final interval, stays in the adjustment's `remainder` — it shows as the parent's I/O at the reap tick. For a root, reaped by a process that is not tracked (the launcher), that final interval is not in the trace at all.
 
 **Fixes** (any one of):
 

@@ -27,7 +27,8 @@ struct PIDIOSnapshot {
     uint64_t readBytes = 0;            // storage layer: bytes fetched from storage
     uint64_t writeBytes = 0;           // storage layer: bytes dirtied in the page cache
     uint64_t cancelledWriteBytes = 0;  // dirtied bytes discarded before writeback
-    bool accessible = true;            // false if the file cannot be opened
+    bool accessible = true;            // false if the file cannot be opened or read
+    int  error = 0;                    // errno when !accessible (ENODATA: fields missing)
 };
 
 /// Read disk stats for specified devices from /proc/diskstats.
@@ -36,8 +37,10 @@ std::vector<DiskStatSnapshot> ReadDiskStats(const std::vector<std::string>& devi
 /// Read in-flight I/O counts from /sys/block/<dev>/inflight.
 DiskInflightSnapshot ReadDiskInflight(const std::string& device);
 
-/// Read per-process I/O from /proc/[pid]/io.
-/// Sets accessible=false if it cannot be opened (EACCES, or the PID is gone).
+/// Read per-process I/O from /proc/[pid]/io. If it cannot be opened or
+/// read, accessible=false and error = the errno (EACCES also while the
+/// process is exiting: see ClassifyReadFailure); ENODATA if the file
+/// lacked a counter.
 PIDIOSnapshot ReadPIDIO(uint32_t pid);
 
 } // namespace internal

@@ -357,6 +357,15 @@ PYBIND11_MODULE(_native, m) {
                                                               : testing::ReadProbe::System);
           },
           py::arg("pid"), py::arg("probe") = "system");
+    m.def("_testing_set_read_error",
+          [](uint32_t pid, const std::string& probe, int err) {
+              if (probe != "system" && probe != "disk")
+                  throw py::value_error("probe must be 'system' or 'disk'");
+              testing::SetReadError(pid, probe == "disk" ? testing::ReadProbe::Disk
+                                                         : testing::ReadProbe::System, err);
+          },
+          py::arg("pid"), py::arg("probe"), py::arg("err"));
+    m.def("_testing_warn_state_size", &testing::WarnStateSize);
     m.def("_stop_running_at_exit", &StopRunningAtExit,
         "Stop every running suite/probe, warning that stop() was not called. "
         "Registered with atexit by the package; not for direct use.",

@@ -11,10 +11,15 @@
 
 #include <array>
 #include <chrono>
+#include <limits>
 #include <pthread.h>
 #include <iostream>
 #include <thread>
 
+
+namespace {
+constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+}
 namespace cupti_profiler {
 namespace internal {
 
@@ -140,7 +145,7 @@ inline constexpr std::array kProcessMetrics = {
         .unit        = Unit::Bytes,  .scope = Scope::Process,
         .peak        = PeakRef{"mem__capacity_bytes"},
         .description = "Resident set size — /proc/<pid>/status VmRSS. Physical pages owned by the PID.",
-        .read        = [](const ProcessTick& t){ return static_cast<double>(t.rss_bytes); },
+        .read        = [](const ProcessTick& t){ return t.mem_unreadable ? kNaN : static_cast<double>(t.rss_bytes); },
     },
     MetricDescriptor<ProcessTick>{
         .fqn         = "proc__vms_bytes",
@@ -148,7 +153,7 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "vms_bytes",
         .unit        = Unit::Bytes,  .scope = Scope::Process,
         .description = "Virtual memory size — /proc/<pid>/status VmSize. Can exceed physical RAM (file-backed, overcommit).",
-        .read        = [](const ProcessTick& t){ return static_cast<double>(t.vms_bytes); },
+        .read        = [](const ProcessTick& t){ return t.mem_unreadable ? kNaN : static_cast<double>(t.vms_bytes); },
     },
     MetricDescriptor<ProcessTick>{
         .fqn         = "proc__shared_bytes",
@@ -157,7 +162,7 @@ inline constexpr std::array kProcessMetrics = {
         .unit        = Unit::Bytes,  .scope = Scope::Process,
         .peak        = PeakRef{"mem__capacity_bytes"},
         .description = "Resident shared memory — /proc/<pid>/status RssShmem.",
-        .read        = [](const ProcessTick& t){ return static_cast<double>(t.shared_bytes); },
+        .read        = [](const ProcessTick& t){ return t.mem_unreadable ? kNaN : static_cast<double>(t.shared_bytes); },
     },
 };
 
@@ -291,7 +296,8 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
 
         auto processSnapshot = probe.SnapshotProcesses();
         if (drained.systemTicks.empty() && drained.processTicks.empty() &&
-            drained.cpuTails.empty() && !HasRemovalMarker(processSnapshot)) continue;
+            drained.cpuTails.empty() && !HasRemovalMarker(processSnapshot) &&
+            !HasUnreadableRecord(processSnapshot)) continue;
 
         SystemMetricsTrace trace = BuildSystemTrace(
             hostname, samplingFrequencyHz, hostCpuCount,

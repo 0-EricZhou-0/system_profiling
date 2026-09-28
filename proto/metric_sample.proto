@@ -116,6 +116,21 @@ message TrackedProcessV2 {
     // (for an IoReapAdjustment child: last_seen). Unset if the process
     // was never read (exited before its first reading, or unreadable).
     IoCounters io_before_tracking = 12;
+    // A per-PID file of this process, while it was alive and not exiting,
+    // could not be read (another uid, not dumpable, hidepid, or another
+    // error; the probe warns once per process on stderr): the first
+    // instant (trace clock; 0 = never) and on how many ticks. Missing
+    // values are missing, not zero:
+    //   Disk trace, /proc/<pid>/io: no ProcessSample on those ticks.
+    //   System trace, /proc/<pid>/statm: its memory values are NaN in
+    //   those ProcessSamples (its CPU is still sampled).
+    // A process that is exiting is not counted: its /proc/<pid>/io is
+    // unreadable (EACCES) from the kernel's teardown of its memory until
+    // it is reaped, which is its exit, not a permission problem.
+    uint64 io_unreadable_since_ns  = 13;
+    uint32 io_unreadable_ticks     = 14;
+    uint64 mem_unreadable_since_ns = 15;
+    uint32 mem_unreadable_ticks    = 16;
 }
 
 // The five /proc/<pid>/io counters, in bytes.

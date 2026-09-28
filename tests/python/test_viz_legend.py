@@ -99,6 +99,10 @@ def test_cap_unit():
     assert shown == ["b", "c"] and hidden == ["a"]
     shown, hidden = panel_legend.cap([("a", 1), ("b", 5)], limit=2)
     assert shown == ["a", "b"] and hidden == []
+    # missing values (NaN) count as nothing, not as NaN
+    import numpy as np
+    ts = np.array([0, 10**9, 2 * 10**9], dtype=np.uint64)
+    assert panel_legend.activity(ts, np.array([2.0, float("nan"), 2.0])) == 2.0
 
 
 def test_smaller_series_drawn_over_larger(tmp_path):

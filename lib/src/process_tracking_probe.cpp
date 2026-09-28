@@ -1,5 +1,6 @@
 #include <cupti_profiler/process_tracking_probe.h>
 
+#include "warn_limiter.h"
 #include "proc_readers.h"
 
 #include <algorithm>
@@ -34,6 +35,8 @@ void AppendComm(ProcessTrackingProbe::ProcessEntry& e, uint64_t tsNs, std::strin
 }
 
 } // namespace
+
+ProcessTrackingProbe::ProcessTrackingProbe() : warn_(std::make_unique<internal::WarnLimiter>()) {}
 
 ProcessTrackingProbe::~ProcessTrackingProbe() {
     for (auto& [serial, fd] : pidfds_) ::close(fd);
@@ -186,6 +189,25 @@ void ProcessTrackingProbe::SetCpuBeforeTracking(uint32_t pid, uint64_t ns) {
     }
 }
 
+void ProcessTrackingProbe::NoteUnreadable(uint64_t serial, UnreadableFile which, int warningType,
+                                          uint64_t tsNs, const std::string& warning) {
+    {
+        std::unique_lock<std::shared_mutex> lk(mutex_);
+        auto it = std::find_if(processes_.begin(), processes_.end(),
+                               [&](const ProcessEntry& e) { return e.serial == serial; });
+        if (it == processes_.end()) return;                 // no longer tracked
+        auto& since = which == UnreadableFile::Io ? it->io_unreadable_since_ns : it->mem_unreadable_since_ns;
+        auto& ticks = which == UnreadableFile::Io ? it->io_unreadable_ticks : it->mem_unreadable_ticks;
+        ++ticks;
+        if (!since) since = tsNs ? tsNs : 1;
+    }
+    warn_->Warn(serial, static_cast<int>(which) * 16 + warningType, warning, tsNs);
+}
+
+size_t ProcessTrackingProbe::WarnStateSize() const { return warn_->Size(); }
+
+void ProcessTrackingProbe::FlushWarnings() { warn_->Flush(); }
+
 void ProcessTrackingProbe::SetIoBeforeTracking(uint32_t pid, const IoCounters& io) {
     std::unique_lock<std::shared_mutex> lk(mutex_);
     for (auto& e : processes_) {
@@ -248,6 +270,7 @@ void ProcessTrackingProbe::SetInitialProcesses(std::vector<ProcessEntry> entries
     std::unique_lock<std::shared_mutex> lk(mutex_);
     for (auto& [serial, fd] : pidfds_) ::close(fd);
     for (auto& d : deferred_) if (d.pidfd >= 0) ::close(d.pidfd);
+    for (const auto& e : processes_) warn_->Remove(e.serial);
     pidfds_.clear();
     processes_.clear();
     deferred_.clear();
@@ -346,6 +369,7 @@ void ProcessTrackingProbe::CommitPendingRemovals(const std::vector<ProcessEntry>
     std::unordered_set<uint64_t> marked;
     for (const auto& e : emitted) if (e.pending_removal) marked.insert(e.serial);
     std::vector<ProcessEntry> roots;        // deferred roots to register now
+    std::vector<uint64_t> dropped;          // their warning state goes too
     {
         std::unique_lock<std::shared_mutex> lk(mutex_);
         if (marked.empty() && deferred_.empty()) return;
@@ -354,6 +378,7 @@ void ProcessTrackingProbe::CommitPendingRemovals(const std::vector<ProcessEntry>
                            [&](const ProcessEntry& e) {
                                if (!(e.pending_removal && marked.count(e.serial))) return false;
                                CloseLocked(e.serial);
+                               dropped.push_back(e.serial);
                                return true;
                            }),
             processes_.end());
@@ -368,6 +393,7 @@ void ProcessTrackingProbe::CommitPendingRemovals(const std::vector<ProcessEntry>
             it = deferred_.erase(it);
         }
     }
+    for (uint64_t serial : dropped) warn_->Remove(serial);
     for (auto& e : roots) AddTrackedProcess(e.pid, std::move(e.alias));
 }
 

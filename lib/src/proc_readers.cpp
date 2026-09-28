@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <fcntl.h>
 #include <fstream>
@@ -74,15 +75,31 @@ MemInfoSnapshot ReadMemInfo() {
     return s;
 }
 
-PIDStatmSnapshot ReadPIDStatm(uint32_t pid) {
-    PIDStatmSnapshot s;
-    std::string path = "/proc/" + std::to_string(pid) + "/statm";
-    std::ifstream f(path);
-    if (!f) return s;
-
+std::optional<PIDStatmSnapshot> ReadPIDStatm(uint32_t pid, int* err) {
+    errno = 0;
+    auto text = ReadSmallFile("/proc/" + std::to_string(pid) + "/statm");
+    if (!text) {
+        if (err) *err = errno ? errno : EIO;
+        return std::nullopt;
+    }
     // Format: size resident shared text lib data dt
-    f >> s.VMSPages >> s.RSSPages >> s.sharedPages;
+    PIDStatmSnapshot s;
+    std::istringstream f(*text);
+    if (!(f >> s.VMSPages >> s.RSSPages >> s.sharedPages)) {
+        if (err) *err = ENODATA;
+        return std::nullopt;
+    }
     return s;
+}
+
+ReadFailure ClassifyReadFailure(uint32_t pid, int err) {
+    if (err == ENOENT || err == ESRCH) return ReadFailure::Gone;
+    constexpr uint64_t kPfExiting = 0x4;
+    auto st = ReadProcStat("/proc", pid);
+    if (!st || st->state == 'Z' || st->state == 'X' || (st->flags & kPfExiting))
+        return ReadFailure::Gone;
+    if (err == EACCES || err == EPERM) return ReadFailure::Unreadable;
+    return ReadFailure::Other;
 }
 
 std::optional<std::string> ReadSmallFile(const std::string& path) {
@@ -93,7 +110,13 @@ std::optional<std::string> ReadSmallFile(const std::string& path) {
     for (;;) {
         ssize_t n = ::read(fd, buf, sizeof(buf));
         if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) break;
+        if (n < 0) {                      // not a partial file: errno kept
+            int e = errno;
+            ::close(fd);
+            errno = e;
+            return std::nullopt;
+        }
+        if (n == 0) break;
         out.append(buf, static_cast<size_t>(n));
     }
     ::close(fd);
@@ -114,16 +137,35 @@ std::optional<ProcStat> ReadProcStat(const std::string& procRoot, uint32_t pid) 
     std::istringstream rest(text->substr(close + 1));
     std::string field;
     // Fields after comm: index 0 = state (field 3), 1 = ppid (4), ...,
-    // 13 = cutime (16), 14 = cstime (17), 19 = starttime (22).
+    // 6 = flags (9), 13 = cutime (16), 14 = cstime (17), 19 = starttime (22).
     for (int i = 0; i <= 19 && (rest >> field); ++i) {
         if (i == 0) st.state = field.empty() ? '?' : field[0];
         else if (i == 1) st.ppid = static_cast<uint32_t>(std::strtoul(field.c_str(), nullptr, 10));
+        else if (i == 6) st.flags = std::strtoull(field.c_str(), nullptr, 10);
         else if (i == 13) st.cutime = std::strtoull(field.c_str(), nullptr, 10);
         else if (i == 14) st.cstime = std::strtoull(field.c_str(), nullptr, 10);
         else if (i == 19) st.startTime = std::strtoull(field.c_str(), nullptr, 10);
     }
     if (st.state == '?') return std::nullopt;   // truncated or malformed
     return st;
+}
+
+std::string UnreadableWarning(const char* probeTag, const char* file, uint32_t pid,
+                              const std::string& comm, int err, ReadFailure kind) {
+    const bool io = std::string(file) == "io";
+    std::string m = std::string("[") + probeTag + "] Warning: cannot read /proc/" +
+                    std::to_string(pid) + "/" + file + " of " + (comm.empty() ? "process" : comm) +
+                    " (pid " + std::to_string(pid) + "): " + std::strerror(err);
+    if (kind == ReadFailure::Unreadable)
+        m += io ? " -- not readable by this process: it runs as another uid or is not dumpable "
+                  "(reading needs the same uid and a dumpable process, or CAP_SYS_PTRACE)"
+                : " -- /proc is mounted with hidepid, or the process is another uid's";
+    m += io ? ". Its I/O is missing from the trace (not zero) while this lasts: "
+              "io_unreadable_since_ns / io_unreadable_ticks in the process table."
+            : ". Its memory values are NaN (missing, not zero) while this lasts: "
+              "mem_unreadable_since_ns / mem_unreadable_ticks in the process table.";
+    m += " At most once a second per process while it lasts.";
+    return m;
 }
 
 int PidfdOpen(uint32_t pid) {

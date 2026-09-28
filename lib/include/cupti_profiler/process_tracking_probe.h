@@ -53,6 +53,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -76,6 +77,8 @@
 #endif
 
 namespace cupti_profiler {
+
+namespace internal { class WarnLimiter; }
 
 // Descendant tracking's cumulative self-metrics (see the DiscoveryStats
 // proto in proto/metric_sample.proto for field meanings).
@@ -108,7 +111,7 @@ struct CommChange {
 
 class CUPTI_PROFILER_API ProcessTrackingProbe {
 public:
-    ProcessTrackingProbe() = default;
+    ProcessTrackingProbe();
     virtual ~ProcessTrackingProbe();
 
     // Non-copyable and non-movable: holds a shared_mutex. Derived
@@ -184,7 +187,34 @@ public:
         // request while alive.
         uint64_t    end_time_ns      = 0;
         std::vector<CommChange> comm_history;
+        // A per-PID file of this process, while alive and not exiting,
+        // could not be read (another uid, not dumpable, hidepid, ...):
+        // the first instant (trace clock, ns; 0 = never) and on how many
+        // ticks. Disk probe: /proc/<pid>/io — no I/O sample on those
+        // ticks (missing, not zero). System probe: /proc/<pid>/statm —
+        // its memory values are NaN in those samples.
+        uint64_t    io_unreadable_since_ns  = 0;
+        uint32_t    io_unreadable_ticks     = 0;
+        uint64_t    mem_unreadable_since_ns = 0;
+        uint32_t    mem_unreadable_ticks    = 0;
     };
+
+    /// Which per-PID file NoteUnreadable() is about.
+    enum class UnreadableFile { Io, Statm };
+
+    /// A per-PID file of the live tracked process registered as `serial`
+    /// could not be read at `tsNs`: counted in its table row
+    /// (ProcessEntry::io_ / mem_unreadable_*), and `warning` written to
+    /// stderr at most once a second per (process, warningType); the
+    /// suppressed ones are counted into the next ("(N suppressed)"), and
+    /// into a last line when the process stops being tracked or the
+    /// probe stops. The state is per registration (a reused PID number
+    /// is a new one) and is dropped with it. Thread-safe.
+    void NoteUnreadable(uint64_t serial, UnreadableFile which, int warningType,
+                        uint64_t tsNs, const std::string& warning);
+
+    /// Per-process warning keys this probe holds (tests).
+    size_t WarnStateSize() const;
 
     /// Record a process's CPU before its first sample
     /// (ProcessEntry::cpu_before_tracking_ns). No-op if it is no longer
@@ -269,6 +299,9 @@ protected:
     /// own registered parent); 0 = unknown.
     static uint32_t RootParentOf(const ProcessEntry& e, const std::vector<ProcessEntry>& snapshot);
     uint32_t HostReaper() const { return hostReaper_.load(); }
+    /// At Stop(), after the last flush: write the pending suppressed-
+    /// warning counts and drop all warning state.
+    void FlushWarnings();
 
 private:
     std::pair<ProcessEntry, int> MakeRoot(uint32_t pid, std::string alias);
@@ -292,6 +325,7 @@ private:
     std::optional<DiscoveryStats> discoveryStats_;
 
     std::atomic<uint32_t> hostReaper_{0};
+    std::unique_ptr<internal::WarnLimiter> warn_;
     mutable std::mutex    adoptedMutex_;
     mutable std::vector<std::pair<uint32_t, uint64_t>> adoptedIncoming_;
 };

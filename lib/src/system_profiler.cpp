@@ -414,7 +414,9 @@ void SystemProfiler::Start() {
             struct Reading {
                 const ProcessTrackingProbe::ProcessEntry* entry;
                 uint64_t cpuNs;
-                std::optional<internal::PIDStatmSnapshot> statm;   // set if a baseline exists
+                bool haveBase;                                      // a baseline exists
+                std::optional<internal::PIDStatmSnapshot> statm;   // with a baseline: its memory
+                int statmErr;                                       // why statm is unset (errno)
             };
             std::vector<Reading> readings;
             readings.reserve(snapshot.size());
@@ -440,9 +442,13 @@ void SystemProfiler::Start() {
                 if (internal::PassReadHook(pid, testing::ReadProbe::System)) *curCpuNs += 1000'000'000'000ull;
                 auto it = impl.prevPID.find(pid);
                 const bool haveBase = it != impl.prevPID.end() && it->second.serial == entry.serial;
-                readings.push_back({&entry, *curCpuNs,
-                                    haveBase ? std::optional(internal::ReadPIDStatm(pid))
-                                             : std::nullopt});
+                std::optional<internal::PIDStatmSnapshot> statm;
+                int statmErr = 0;
+                if (haveBase) {
+                    statmErr = internal::ReadErrorFor(pid, testing::ReadProbe::System);   // test-only
+                    if (!statmErr) statm = internal::ReadPIDStatm(pid, &statmErr);
+                }
+                readings.push_back({&entry, *curCpuNs, haveBase, statm, statmErr});
             }
             const auto goneList = this->PollTracked();
             const std::unordered_set<uint64_t> gone(goneList.begin(), goneList.end());
@@ -451,7 +457,7 @@ void SystemProfiler::Start() {
                 const auto& entry = *r.entry;
                 const uint32_t pid = entry.pid;
                 if (gone.count(entry.serial)) continue;   // exited during this tick
-                if (!r.statm) {
+                if (!r.haveBase) {
                     // Mid-run add — seed the baseline; skip this tick.
                     // First emitted sample is one tick later, so the
                     // delta isn't garbage.
@@ -466,8 +472,20 @@ void SystemProfiler::Start() {
                     this->SetCpuBeforeTracking(pid, r.cpuNs);
                     continue;
                 }
+                bool memUnreadable = false;
+                if (!r.statm) {
+                    // Exiting (its /proc entry going away): its last
+                    // interval goes to its exit tail. Alive: warn once,
+                    // record it, and sample its CPU with memory missing.
+                    const auto kind = internal::ClassifyReadFailure(pid, r.statmErr);
+                    if (kind == internal::ReadFailure::Gone) continue;
+                    this->NoteUnreadable(entry.serial, UnreadableFile::Statm, static_cast<int>(kind), tsNs,
+                                         internal::UnreadableWarning("System", "statm", pid, entry.comm,
+                                                                     r.statmErr, kind));
+                    memUnreadable = true;
+                }
                 auto& prev = impl.prevPID[pid];
-                const auto& statm = *r.statm;
+                const internal::PIDStatmSnapshot statm = r.statm.value_or(internal::PIDStatmSnapshot{});
 
                 // On-CPU delta of the whole thread group. The process
                 // CPU clock is monotonic for the life of the process,
@@ -490,6 +508,7 @@ void SystemProfiler::Start() {
                 t.rss_bytes    = statm.RSSPages    * pageSize;
                 t.vms_bytes    = statm.VMSPages    * pageSize;
                 t.shared_bytes = statm.sharedPages * pageSize;
+                t.mem_unreadable = memUnreadable;
 
                 prev.tickTsNs = tsNs;
                 prev.cpuNs    = r.cpuNs;
@@ -577,6 +596,7 @@ void SystemProfiler::Stop() {
         if (!drained.systemTicks.empty() || !drained.processTicks.empty() ||
             !drained.cpuTails.empty() ||
             internal::HasRemovalMarker(processSnapshot) ||
+            internal::HasUnreadableRecord(processSnapshot) ||
             m_impl->flushStatsPending.valid) {
             SystemMetricsTrace trace = internal::BuildSystemTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz,
@@ -602,6 +622,8 @@ void SystemProfiler::Stop() {
         std::cout << "[System] Wrote trace to " << m_impl->config.outputFile << "\n";
     }
 
+    internal::ReportWarnStateAtStop("system", WarnStateSize());
+    FlushWarnings();
     m_impl->running = false;
     internal::lifecycle::Unregister(m_impl.get());
 }

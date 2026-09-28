@@ -40,6 +40,7 @@ add_library(cupti_profiler SHARED
     src/profiler_error.cpp
     src/sidecar_process.cpp
     src/process_tracking_probe.cpp
+    src/warn_limiter.cpp
     src/lifecycle.cpp
     src/flush_backlog.cpp
     src/testing_hooks.cpp

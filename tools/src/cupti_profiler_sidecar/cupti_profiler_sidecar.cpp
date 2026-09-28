@@ -208,8 +208,10 @@ int main(int argc, char** argv) {
 
     ::signal(SIGPIPE, SIG_IGN);
 
-    // Test-only (CUPTI_PROFILER_TEST_KILL_AFTER_READ); unset does nothing.
+    // Test-only (CUPTI_PROFILER_TEST_KILL_AFTER_READ, _READ_ERROR); unset
+    // does nothing.
     cupti_profiler::testing::ArmKillAfterReadFromEnv();
+    cupti_profiler::testing::ArmReadErrorFromEnv();
 
     // Every signal whose default action terminates the process (except
     // SIGPIPE, ignored above) -> graceful stop, final flush included.
