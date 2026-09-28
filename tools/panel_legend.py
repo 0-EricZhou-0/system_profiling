@@ -186,6 +186,33 @@ def metric_color_map(panels) -> dict:
     return out
 
 
+def aggregate(series_list, projection: dict) -> tuple[list, dict]:
+    """For PANEL_AGGREGATION_INTEGRATE_SUM: each metric's series summed
+    over their instances on the union of their sample times (a series is
+    0 outside its own span). Returns (series, projection) for the sums,
+    one per metric, keyed (fqn, "all N <instances>")."""
+    by_fqn: dict = {}
+    for s in series_list:
+        if projection[(s.fqn, s.scope_key)][0].size:
+            by_fqn.setdefault(s.fqn, []).append(s)
+    out, proj = [], {}
+    for fqn, ss in by_fqn.items():
+        arrays = [projection[(s.fqn, s.scope_key)] for s in ss]
+        ts = np.unique(np.concatenate([t for t, _v in arrays]))
+        x = ts.astype(np.float64)
+        total = np.zeros(ts.size)
+        for t, v in arrays:
+            total += np.interp(x, t.astype(np.float64), np.nan_to_num(v.astype(np.float64)),
+                               left=0.0, right=0.0)
+        what = {_mc.SCOPE_DEVICE: "devices", _mc.SCOPE_GPU: "GPUs",
+                _mc.SCOPE_PROCESS: "processes"}.get(ss[0].scope, "series")
+        key = f"all {len(ss)} {what}"
+        out.append(metric_layout.ResolvedSeries(fqn=fqn, scope=ss[0].scope, scope_key=key,
+                                                descriptor=ss[0].descriptor))
+        proj[(fqn, key)] = (ts, total)
+    return out, proj
+
+
 def _distinct_colors(keys_by_rank: list, colors: dict) -> dict:
     """Colours for a panel's listed legend keys (most active first), each
     its own: a key whose colour an earlier one already has gets the first
@@ -225,7 +252,7 @@ class Plan:
 
 def plan(series_list, projector, projection: dict, pid_colors: dict,
          totals: dict | None = None, fmt_total=None,
-         metric_colors: dict | None = None) -> Plan:
+         metric_colors: dict | None = None, aggregated: bool = False) -> Plan:
     """Colours, line styles and legend entries of one panel. A metric
     panel ranks its entries by activity; a cumulative companion, given
     `totals` ((fqn, scope_key) -> run total, full resolution), by those,
@@ -241,6 +268,21 @@ def plan(series_list, projector, projection: dict, pid_colors: dict,
     else:
         amount = {(s.fqn, s.scope_key): activity(*projection[(s.fqn, s.scope_key)])
                   for s in live}
+
+    if aggregated:
+        # Sums over instances (aggregate()): one hue, a line style per
+        # metric, each entry with its total.
+        fqns = list(dict.fromkeys(s.fqn for s in live))
+        styles, entries = {}, []
+        for s in live:
+            k = (s.fqn, s.scope_key)
+            st = fqns.index(s.fqn) % N_METRIC_STYLES
+            styles[k] = (COLORS[0], st, True)
+            label = series_label(s, projector, base=label_bases[k])
+            if cumulative:
+                label += f" = {fmt_total(amount[k])}"
+            entries.append((label, COLORS[0], st, [k]))
+        return Plan(styles, entries, amount)
 
     colors = {}
     color_idx = 0

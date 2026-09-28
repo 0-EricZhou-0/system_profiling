@@ -732,7 +732,8 @@ def _panel_has_cumulative_companion(panel,
     warning) for non-integrable units — visualize_all.py logs the
     skip; here we keep the live-render path quiet since this gets
     called every tick."""
-    if panel.aggregation != panels_pb.PANEL_AGGREGATION_INTEGRATE:
+    if panel.aggregation not in (panels_pb.PANEL_AGGREGATION_INTEGRATE,
+                                 panels_pb.PANEL_AGGREGATION_INTEGRATE_SUM):
         return False
     if not series_list:
         return False
@@ -753,8 +754,10 @@ def _build_cumulative_panel(
     source_hzs: dict[tuple[str, object], float] | None = None,
     pid_colors: dict | None = None,
     metric_colors: dict | None = None,
+    aggregated: bool = False,
 ) -> tuple:
-    """Bokeh equivalent of visualize_all._render_integrated_panel.
+    """Bokeh equivalent of visualize_all._render_integrated_panel
+    (aggregated: the series are panel_legend.aggregate() sums).
 
     Returns (figure, cds_by_key) — same shape as _build_panel so the
     static / live machinery treats it like a regular panel for layout
@@ -795,7 +798,8 @@ def _build_cumulative_panel(
 
     tools, box_zoom, wheel_zoom = _make_plot_tools()
     fig_kwargs = dict(
-        title=f"{base_title}  (cumulative)",
+        title=(f"{base_title}  (cumulative, {series_list[0].scope_key})" if aggregated
+               else f"{base_title}  (cumulative)"),
         x_axis_label="time (s)",
         y_axis_label=ylabel,
         width=1200, frame_height=_FRAME_HEIGHT, frame_width=_FRAME_WIDTH,
@@ -821,7 +825,7 @@ def _build_cumulative_panel(
         series_list, projector, projection, pid_colors or {},
         totals={(s.fqn, s.scope_key): float(c[-1]) if c.size else 0.0 for s, c in full_totals},
         fmt_total=units.fmt_bytes,          # each total in its own unit
-        metric_colors=metric_colors)
+        metric_colors=metric_colors, aggregated=aggregated)
     for series, ts_ns, cum in cumulatives:
         key = (series.fqn, series.scope_key)
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
@@ -1586,15 +1590,20 @@ def _build_static_document(
         # unsmoothed `proj` so the integrated total is faithful; the
         # display-only decimation happens inside the builder.
         if _panel_has_cumulative_companion(panel, series):
+            cum_series, cum_proj = series, proj
+            summed = panel.aggregation == panels_pb.PANEL_AGGREGATION_INTEGRATE_SUM
+            if summed:           # each metric summed over its instances first
+                cum_series, sums = panel_legend.aggregate(series, proj)
+                cum_proj = {**proj, **sums}
             source_hzs = {
                 (s.fqn, s.scope_key):
                     sample_freqs.get(projector.fqn_to_probe.get(s.fqn, ""), 0)
-                for s in series
+                for s in cum_series
             }
             cum_fig, _ = _build_cumulative_panel(
-                panel, series, projector, proj, t0_ns, x_range=shared_x,
+                panel, cum_series, projector, cum_proj, t0_ns, x_range=shared_x,
                 display_hz=display_hz, source_hzs=source_hzs, pid_colors=pid_colors,
-                metric_colors=metric_colors)
+                metric_colors=metric_colors, aggregated=summed)
             figs.append(cum_fig)
             metric_figs.append(cum_fig)
             panel_figs.append((panel, "cumulative", cum_fig))
@@ -1659,8 +1668,7 @@ def _build_static_document(
     folds: list = []                                   # (fig, button, title)
     folded_panels: list = []
     for panel, kind, fig in panel_figs:
-        title = _panel_title(panel, [s for p2, s in resolved if p2 is panel][0]) \
-            + ("  (cumulative)" if kind == "cumulative" else "")
+        title = fig.title.text                      # the builders' titles
         btn, wrapped = _fold(fig, title)
         folds.append((fig, btn, title))
         folded_panels.append(wrapped)

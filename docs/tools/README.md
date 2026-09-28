@@ -157,6 +157,16 @@ band over the full-colour `.max` one (max ≥ avg, so max shows from avg up
 to max). Series lines are 0.63 pt (the grey "+k more" 0.42 pt; the Bokeh
 page 0.84 / 0.56 px).
 
+**Cumulative companions.** A layout panel with `aggregation:
+PANEL_AGGREGATION_INTEGRATE` gets a companion under it plotting ∫ y dt of
+each of its series (trapezoid rule, full-resolution data), run totals in
+the legend. `PANEL_AGGREGATION_INTEGRATE_SUM` first sums each metric over
+its instances (all devices, GPUs or processes, on the union of their
+sample times) and integrates the sums: one line per metric in one hue,
+told apart by line style — the disk bandwidth panel's companion in both
+shipped layouts is read (solid) and write (dashed) summed over every
+traced device, titled `(cumulative, all N devices)`.
+
 **Byte units.** Every bytes and bytes/s axis — rates, gauges and
 cumulative panels, in both renderers — takes its unit from the largest
 value actually plotted on it (after any smoothing or decimation asked

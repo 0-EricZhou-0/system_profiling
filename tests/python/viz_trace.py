@@ -56,12 +56,16 @@ def proc(pid, ppid=0, comm="p", start_s=0.0, end_s=None, cpu=50.0,
 IO_FQNS = ["proc__io_rchar.sum.per_second", "proc__io_wchar.sum.per_second"]
 
 
+DEV_FQNS = ["disk__read_bytes.sum.per_second", "disk__write_bytes.sum.per_second"]
+
+
 def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_values=None,
-                disk=False):
+                disk=False, devices=None):
     """Write a trace of `procs` (see proc()) over duration_s seconds.
     regions: (name, start_s, end_s). gpu_fqns: GPU metrics to add, each
     a constant: gpu_values[i], else 50. disk: also a Disk trace with each
     process's rchar / wchar rates (cpu x 1 MB/s, cpu x 0.1 MB/s).
+    devices: {name: (read B/s, write B/s)}, constant, in that Disk trace.
     Returns the session_metadata.pb path."""
     os.makedirs(out_dir, exist_ok=True)
     catalog = text_format.Parse(open(CATALOG).read(), metric_catalog_pb2.MetricCatalog())
@@ -101,6 +105,12 @@ def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_va
         dt = disk_metrics_pb2.DiskMetricsTrace()
         dt.header.CopyFrom(tr.header)
         dt.scope_metric_names.add(scope=metric_catalog_pb2.SCOPE_PROCESS, fqns=IO_FQNS)
+        if devices:
+            dt.scope_metric_names.add(scope=metric_catalog_pb2.SCOPE_DEVICE, fqns=DEV_FQNS)
+            for name, (rd, wr) in devices.items():
+                dt.tracked_devices.append(name)
+                for ts in ticks:
+                    dt.device_samples.add(timestamp_ns=ts, device_name=name, values=[rd, wr])
         for tp in tr.tracked_processes:
             dt.tracked_processes.add().CopyFrom(tp)
         for x in tr.process_samples:
