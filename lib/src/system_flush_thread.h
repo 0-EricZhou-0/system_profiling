@@ -14,6 +14,7 @@
 #pragma once
 
 #include "metric_descriptor.h"
+#include "stop_signal.h"
 
 #include <cupti_profiler/process_tracking_probe.h>
 #include <cupti_profiler/system_profiler.h>
@@ -56,19 +57,38 @@ struct SystemTick {
 struct ProcessTick {
     uint64_t timestamp_ns   = 0;
     uint32_t pid            = 0;
-    // Total on-CPU time as % of one core. From /proc/<pid>/schedstat
-    // sum_exec_runtime delta — nanosecond-precise (no CLK_TCK
-    // quantization). >100% for multi-threaded tasks.
+    // Total on-CPU time as % of one core. From the process CPU clock
+    // (sum_exec_runtime of the whole thread group, exited threads
+    // included). No CLK_TCK quantization, but a running thread's time
+    // is folded in at scheduler ticks, so one sample can be off by up
+    // to one tick per running thread. >100% for multi-threaded tasks.
     double cpu_pct          = 0.0;
     // Memory (bytes)
     uint64_t rss_bytes      = 0;
     uint64_t vms_bytes      = 0;
     uint64_t shared_bytes   = 0;
+    // /proc/<pid>/statm could not be read (the process is alive): the
+    // memory values go out as NaN — missing, not zero.
+    bool     mem_unreadable = false;
+};
+
+// A discovered process's CPU after its last sample, measured on the
+// parent that reaped it (CpuTail in system_metrics.proto). Several pids
+// = reaped in one interval, not apportionable.
+struct CpuTailRecord {
+    uint64_t              timestamp_ns = 0;
+    uint32_t              parent_pid   = 0;
+    std::vector<uint32_t> pids;
+    uint64_t              cpu_ns       = 0;
+    std::vector<uint32_t> chainPids;       // reaped in the same interval, taken out
+    std::vector<uint32_t> ambiguousPids;   // reaped by whom is unknown, left in
+    uint64_t              ambiguousCpuNs = 0;   // their CPU already in their samples
 };
 
 struct SystemSampleBatch {
-    std::vector<SystemTick>  systemTicks;
-    std::vector<ProcessTick> processTicks;
+    std::vector<SystemTick>    systemTicks;
+    std::vector<ProcessTick>   processTicks;
+    std::vector<CpuTailRecord> cpuTails;
 };
 
 // Accessors for the descriptor arrays owned by system_flush_thread.cpp.
@@ -81,6 +101,8 @@ std::span<const MetricDescriptor<ProcessTick>> GetProcessMetrics();
 struct SystemPendingFlushStats {
     uint64_t bytesWritten = 0;
     uint64_t intervalNs   = 0;
+    uint64_t durationNs   = 0;   // drain to written
+    uint64_t slowFlushes  = 0;   // so far (FlushBacklog)
     bool     valid        = false;
 };
 
@@ -109,7 +131,7 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
                            uint64_t samplingFrequencyHz,
                            uint32_t hostCpuCount,
                            ProcessTrackingProbe& probe,
-                           std::atomic<bool>& stop,
+                           StopSignal& stop,
                            uint64_t flushIntervalMs,
                            uint64_t steadyClockRefNs,
                            uint64_t wallClockEpochNs,

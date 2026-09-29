@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <cupti_profiler/defaults.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -32,7 +34,8 @@ struct ResolvedEvent;
 } // namespace internal
 
 struct CUPTI_PROFILER_API EventProfilerConfig {
-    uint64_t flushIntervalMs = 5000;
+    // Periodic flush to outputFile. 0 = kDefaultFlushIntervalMs (5 s).
+    uint64_t flushIntervalMs = kDefaultFlushIntervalMs;
     std::string outputFile;            // e.g. "events.pb"
 };
 

@@ -133,7 +133,10 @@ int main(int argc, char* argv[]) {
 
     cupti_profiler::ProfilerSuite suite;
     suite.LoadConfig(configPath);
-    suite.Configure();
+    if (auto err = suite.Configure(); err != cupti_profiler::ProfilerError::Ok) {
+        std::cerr << "Configure failed: " << cupti_profiler::ToString(err) << "\n";
+        return 1;
+    }
     suite.Start();
     suite.GetEventProfiler().GetGenericTracker().MarkEvent("suite start");
 

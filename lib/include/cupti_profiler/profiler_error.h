@@ -1,0 +1,56 @@
+// Error codes returned by ProfilerSuite::Configure() / Start().
+//
+// Introduced with the SIDECAR mode series: the sidecar spawn +
+// handshake can fail in several distinct ways that callers should be
+// able to distinguish (missing binary vs. exec failure vs. a sidecar
+// that died or rejected its config). The previous void-returning API forced
+// std::cerr + std::exit(1) on any setup failure; this enum lets
+// the workload handle setup errors as data.
+//
+// Ok = 0 is guaranteed and safe to compare against; other numeric
+// values are stable across versions but callers should prefer
+// symbolic names.
+#pragma once
+
+#if defined(_WIN32)
+  #ifdef CUPTI_PROFILER_EXPORTS
+    #define CUPTI_PROFILER_API __declspec(dllexport)
+  #else
+    #define CUPTI_PROFILER_API __declspec(dllimport)
+  #endif
+#else
+  #ifdef CUPTI_PROFILER_EXPORTS
+    #define CUPTI_PROFILER_API __attribute__((visibility("default")))
+  #else
+    #define CUPTI_PROFILER_API
+  #endif
+#endif
+
+namespace cupti_profiler {
+
+enum class ProfilerError {
+    Ok = 0,
+
+    // Generic setup problems
+    NotConfigured        = 100,  // Configure() called before LoadConfig()
+    ProbeStartFailed     = 101,  // a System/Disk probe did not start (e.g. its
+                                 // output file cannot be opened); in SIDECAR
+                                 // mode, reported by the sidecar
+    InvalidConfig        = 102,  // inconsistent settings (the reason is
+                                 // printed on stderr); nothing was started
+
+    // Sidecar-specific problems (SIDECAR mode only)
+    SidecarNotFound      = 200,  // couldn't locate the sidecar binary
+    SidecarSpawnFailed   = 201,  // fork() or execve() failed
+    // 202 was SidecarMissingCaps: never returned (the /proc backend
+    // needs no capability for same-uid targets). Do not reuse.
+    SidecarBadHandshake  = 203,  // sidecar returned an unexpected message
+    SidecarExited        = 204,  // sidecar died before completing handshake
+    SidecarAffinityFailed = 205, // sidecar_cpus could not be applied
+};
+
+/// Stable human-readable identifier for a ProfilerError. Never
+/// null; callers can log directly. Not localised.
+CUPTI_PROFILER_API const char* ToString(ProfilerError err);
+
+} // namespace cupti_profiler

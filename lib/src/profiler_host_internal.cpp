@@ -54,8 +54,8 @@ CUptiResult CuptiProfilerHost::CreateConfigImage(const std::vector<const char*>&
 
 CUptiResult CuptiProfilerHost::EvaluateCounterData(CUpti_PmSampling_Object* pSamplingObject, size_t rangeIndex,
                                                      const std::vector<const char*>& metricsList,
-                                                     std::vector<uint8_t>& counterDataImage) {
-    SamplerRange sr;
+                                                     std::vector<uint8_t>& counterDataImage,
+                                                     SamplerRange& sr) {
     sr.rangeIndex = rangeIndex;
 
     CUpti_PmSampling_CounterData_GetSampleInfo_Params si = {CUpti_PmSampling_CounterData_GetSampleInfo_Params_STRUCT_SIZE};
@@ -66,6 +66,9 @@ CUptiResult CuptiProfilerHost::EvaluateCounterData(CUpti_PmSampling_Object* pSam
     CUPTI_API_CALL(cuptiPmSamplingCounterDataGetSampleInfo(&si));
     sr.startTimestamp = si.startTimestamp;
     sr.endTimestamp = si.endTimestamp;
+    // An invalid sample (both timestamps 0, see decode_thread.cpp) has
+    // nothing worth evaluating.
+    if (sr.startTimestamp == 0 && sr.endTimestamp == 0) return CUPTI_SUCCESS;
 
     sr.metricValues.resize(metricsList.size());
     CUpti_Profiler_Host_EvaluateToGpuValues_Params ev = {CUpti_Profiler_Host_EvaluateToGpuValues_Params_STRUCT_SIZE};
@@ -77,10 +80,12 @@ CUptiResult CuptiProfilerHost::EvaluateCounterData(CUpti_PmSampling_Object* pSam
     ev.rangeIndex = rangeIndex;
     ev.pMetricValues = sr.metricValues.data();
     CUPTI_API_CALL(cuptiProfilerHostEvaluateToGpuValues(&ev));
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_samplerRanges.push_back(std::move(sr));
     return CUPTI_SUCCESS;
+}
+
+void CuptiProfilerHost::PushSample(SamplerRange&& sample) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_samplerRanges.push_back(std::move(sample));
 }
 
 std::vector<SamplerRange> CuptiProfilerHost::DrainSamples() {

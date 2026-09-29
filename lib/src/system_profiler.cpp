@@ -1,7 +1,12 @@
 #include <cupti_profiler/system_profiler.h>
 
+#include "lifecycle.h"
+#include "stop_signal.h"
 #include "proc_readers.h"
 #include "system_flush_thread.h"
+#include "tracked_process_proto.h"
+#include "discovery_stats_proto.h"
+#include "testing_hooks.h"
 
 #include "system_metrics.pb.h"
 #include "metric_sample.pb.h"
@@ -13,10 +18,13 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <pthread.h>
 #include <thread>
 #include <unistd.h>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace cupti_profiler {
 
@@ -37,8 +45,8 @@ public:
     // Threads
     std::thread sampleThread;
     std::thread flushThread;
-    std::atomic<bool> stopSample{false};
-    std::atomic<bool> stopFlush{false};
+    internal::StopSignal stopSample;
+    internal::StopSignal stopFlush;
 
     // Sync anchor
     uint64_t steadyClockRefNs = 0;
@@ -46,6 +54,9 @@ public:
 
     bool configured = false;
     bool running = false;
+    // Serializes Stop() (the host, the signal flusher and the exit hook
+    // may all call it).
+    std::mutex stopMutex;
 
     // Previous snapshots for delta computation
     internal::CPUStatSnapshot prevCPU;
@@ -53,28 +64,252 @@ public:
     // Per-tracked-PID baseline carried between sample ticks. tickTsNs
     // pins the actual wall-clock instant of the previous read (so the
     // %-of-core denominator uses real elapsed time, not a nominal
-    // sample period). threadCpuNs holds per-TID sum_exec_runtime so
-    // we can attribute on-CPU time across the whole thread group
-    // (process CPU%, not just main-thread CPU%) and stay robust to
-    // threads spawning or exiting between ticks.
+    // sample period). cpuNs is the process CPU clock at that read —
+    // on-CPU time of the whole thread group, exited threads included.
+    // serial is the tracked entry's (ProcessEntry::serial): a new
+    // process that got an old one's PID never inherits its baseline.
     struct ProcessBaseline {
         uint64_t tickTsNs = 0;
-        internal::PIDThreadCpuMap threadCpuNs;
+        uint64_t cpuNs = 0;
+        uint64_t serial = 0;
     };
     std::unordered_map<uint32_t, ProcessBaseline> prevPID;
+
+    // Exit tails of discovered processes (CpuTail). Sample thread only.
+    //   discoveredParent: every discovered PID seen in a snapshot and not
+    //     yet exited -> the parent it was found under.
+    //   awaitingTail: discovered PIDs that exited (or left the tracked
+    //     set) and whose parent has not reaped them yet, with the CPU
+    //     already accounted for: the clock at their last sample, and
+    //     their own reaped children's CPU as last read.
+    //   childrenCpuNs: last cutime+cstime (ns) of every tracked process
+    //     that currently has discovered children — the baseline the
+    //     reaping parent's growth is measured against — and of every
+    //     discovered process, whose own tail must subtract the CPU of the
+    //     children it reaped (its cutime), even once they are all gone.
+    struct ExitedChild {
+        uint32_t parent            = 0;
+        uint64_t lastCpuNs         = 0;
+        uint64_t lastChildrenCpuNs = 0;
+        uint64_t startNs           = 0;   // identity for the host's reaped set
+        uint32_t rootParent        = 0;   // parent of its tree's listed root
+    };
+    //   discoveredMeta: start time and root parent of each discovered PID
+    //     in discoveredParent, taken when first seen (reap-chain rule).
+    struct DiscoveredMeta {
+        uint64_t startNs    = 0;
+        uint32_t rootParent = 0;
+    };
+    std::unordered_map<uint32_t, DiscoveredMeta> discoveredMeta;
+    // The host's orphan reaper and its reaped set, refreshed every tick.
+    ProcessTrackingProbe::ReapRuleState reap;
+    struct ParentBaseline {
+        uint64_t childrenCpuNs = 0;
+        uint64_t startTime     = 0;   // guards against a reused PID
+    };
+    std::unordered_map<uint32_t, uint32_t>       discoveredParent;
+    std::unordered_map<uint32_t, ExitedChild>    awaitingTail;
+    std::unordered_map<uint32_t, ParentBaseline> childrenCpu;
+    //   tailSettled: discovered PIDs whose tail was emitted or given up
+    //     on. Such a PID stays in the snapshot until discovery's removal
+    //     is flushed; it must not be noted as exiting (and tailed) again.
+    std::unordered_set<uint32_t>                 tailSettled;
+
+    void NoteExited(uint32_t pid);
+    void AttributeTails(uint64_t tsNs,
+                        const std::unordered_set<uint32_t>& trackedPids);
+    int64_t ChainCpu(uint32_t pid, internal::CpuTailRecord& r, int depth, bool ambiguous = false);
 
     // Per-flush write accounting
     internal::SystemPendingFlushStats flushStatsPending;
     std::mutex flushStatsMutex;
 };
 
+// A discovered process is gone from the samples (exited, unreadable, or
+// dropped from the tracked set): remember what was accounted for, so the
+// parent's cutime growth at reap time can be turned into its tail.
+void SystemProfiler::Impl::NoteExited(uint32_t pid) {
+    auto dp = discoveredParent.find(pid);
+    if (dp == discoveredParent.end()) return;   // a root, or already noted
+    ExitedChild c;
+    c.parent = dp->second;
+    discoveredParent.erase(dp);
+    if (auto b = prevPID.find(pid); b != prevPID.end()) c.lastCpuNs = b->second.cpuNs;
+    if (auto k = childrenCpu.find(pid); k != childrenCpu.end()) c.lastChildrenCpuNs = k->second.childrenCpuNs;
+    if (auto m = discoveredMeta.find(pid); m != discoveredMeta.end()) {
+        c.startNs    = m->second.startNs;
+        c.rootParent = m->second.rootParent;
+    }
+    // Reparented since discovery (its parent exited)? Then the new parent
+    // reaps it; follow it if that one is tracked too.
+    if (auto st = internal::ReadProcStat("/proc", pid); st && st->ppid != 0) c.parent = st->ppid;
+    awaitingTail[pid] = c;
+}
+
+// A reap chain: `pid` was reaped (by its tracked parent, whose cutime
+// grew by pid's whole CPU *including every child pid had reaped*) and
+// some of pid's own tracked children exited in the same interval,
+// before pid's cutime could be read again. The CPU of each child that
+// pid reaped is already in that child's samples (and its children's):
+// return it, to be taken out of pid's tail. Whether pid reaped a child
+// or exited first, leaving it to a subreaper or init, is the reap-chain
+// rule (ProcessTrackingProbe::WhoReaped): the host reaped it -> not in
+// pid; unknown -> listed as ambiguous and not subtracted (its CPU may be
+// counted twice), never guessed. Settles every child it looks at.
+// `ambiguous`: pid itself may not have been reaped by its parent, so
+// nothing below it is taken out either; it is all listed as ambiguous
+// and its CPU added to ambiguousCpuNs (the most the tail can hold twice).
+int64_t SystemProfiler::Impl::ChainCpu(uint32_t pid, internal::CpuTailRecord& r, int depth,
+                                       bool ambiguous) {
+    if (depth >= 64) return 0;
+    std::vector<uint32_t> kidsOf;
+    for (const auto& [k, e] : awaitingTail)
+        if (e.parent == pid) kidsOf.push_back(k);
+    int64_t sub = 0;
+    for (uint32_t k : kidsOf) {
+        auto it = awaitingTail.find(k);
+        if (it == awaitingTail.end()) continue;
+        if (auto st = internal::ReadProcStat("/proc", k)) {   // not reaped: reparented
+            it->second.parent = st->ppid;
+            continue;
+        }
+        const ExitedChild e = it->second;
+        awaitingTail.erase(it);
+        tailSettled.insert(k);
+        const auto by = SystemProfiler::WhoReaped(reap, k, e.startNs, e.rootParent);
+        if (by == ReapedBy::Host) continue;
+        if (ambiguous || by == ReapedBy::Unknown) {
+            r.ambiguousPids.push_back(k);
+            r.ambiguousCpuNs += e.lastCpuNs + e.lastChildrenCpuNs;
+            ChainCpu(k, r, depth + 1, /*ambiguous=*/true);
+            continue;
+        }
+        switch (by) {
+            case ReapedBy::Host:
+            case ReapedBy::Unknown:
+                break;
+            case ReapedBy::Parent:
+                r.chainPids.push_back(k);
+                sub += static_cast<int64_t>(e.lastCpuNs + e.lastChildrenCpuNs) + ChainCpu(k, r, depth + 1);
+                break;
+        }
+    }
+    return sub;
+}
+
+// Once per tick. For each tracked process with discovered children: read
+// its cutime+cstime; if it grew and some of its exited children are now
+// reaped (their /proc entry is gone), the growth minus what their samples
+// already covered is their tail.
+void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
+                                          const std::unordered_set<uint32_t>& trackedPids) {
+    for (auto it = tailSettled.begin(); it != tailSettled.end(); ) {
+        it = trackedPids.count(*it) ? std::next(it) : tailSettled.erase(it);
+    }
+    std::erase_if(discoveredMeta, [&](const auto& kv) {
+        return !discoveredParent.count(kv.first) && !awaitingTail.count(kv.first);
+    });
+    std::erase_if(reap.adopted, [&](const auto& kv) {
+        return !trackedPids.count(kv.first) && !awaitingTail.count(kv.first);
+    });
+    if (discoveredParent.empty() && awaitingTail.empty()) {
+        childrenCpu.clear();
+        return;
+    }
+    const uint64_t nsPerTick = 1000000000ull / static_cast<uint64_t>(internal::GetCLKTCK());
+    std::unordered_map<uint32_t, std::vector<uint32_t>> kids;   // parent -> awaiting children
+    std::unordered_set<uint32_t> parents;
+    // A discovered process's own cutime is read too: when its parent
+    // reaps it, the parent's growth includes the CPU of every child it
+    // reaped, which that process's cutime holds.
+    for (const auto& [pid, parent] : discoveredParent) {
+        parents.insert(parent);
+        parents.insert(pid);
+    }
+    for (auto it = awaitingTail.begin(); it != awaitingTail.end(); ) {
+        if (!trackedPids.count(it->second.parent)) {
+            tailSettled.insert(it->first);
+            it = awaitingTail.erase(it);
+            continue;
+        }
+        kids[it->second.parent].push_back(it->first);
+        parents.insert(it->second.parent);
+        parents.insert(it->first);
+        ++it;
+    }
+    // An exited child that was itself a parent: its own reaped children's
+    // CPU keeps changing until it is reaped (a zombie's cutime is still
+    // readable); use the latest reading.
+    for (auto& [pid, e] : awaitingTail) {
+        if (auto k = childrenCpu.find(pid); k != childrenCpu.end())
+            e.lastChildrenCpuNs = k->second.childrenCpuNs;
+    }
+    for (auto it = childrenCpu.begin(); it != childrenCpu.end(); ) {
+        it = parents.count(it->first) ? std::next(it) : childrenCpu.erase(it);
+    }
+
+    for (uint32_t parent : parents) {
+        const auto& waiting = kids[parent];
+        // Consistent reading: the parent's cutime is the same before and
+        // after checking which children are reaped, so no reap was in
+        // progress in between and every reaped child is in the value.
+        std::optional<internal::ProcStat> st;
+        std::vector<uint32_t> reaped;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            auto before = internal::ReadProcStat("/proc", parent);
+            reaped.clear();
+            for (uint32_t c : waiting) {
+                if (!internal::ReadProcStat("/proc", c)) reaped.push_back(c);
+            }
+            st = internal::ReadProcStat("/proc", parent);
+            if (!before || !st ||
+                (before->cutime == st->cutime && before->cstime == st->cstime)) break;
+        }
+        if (!st) {                       // parent gone: nobody left to measure it
+            // ...unless the parent itself awaits its tail: then its tracked
+            // parent reaped it, and the children it reaped in the same
+            // interval are inside that reap (ChainCpu). Keep them for it.
+            if (!awaitingTail.count(parent))
+                for (uint32_t c : waiting) { awaitingTail.erase(c); tailSettled.insert(c); }
+            childrenCpu.erase(parent);
+            continue;
+        }
+        const uint64_t cur = (st->cutime + st->cstime) * nsPerTick;
+        auto base = childrenCpu.find(parent);
+        const bool haveBase = base != childrenCpu.end() && base->second.startTime == st->startTime;
+        if (haveBase && !reaped.empty()) {
+            int64_t tail = static_cast<int64_t>(cur) - static_cast<int64_t>(base->second.childrenCpuNs);
+            internal::CpuTailRecord r;
+            for (uint32_t c : reaped) {
+                const auto& e = awaitingTail[c];
+                tail -= static_cast<int64_t>(e.lastCpuNs + e.lastChildrenCpuNs);
+                tail -= ChainCpu(c, r, 0);
+            }
+            r.timestamp_ns = tsNs;
+            r.parent_pid   = parent;
+            r.pids         = reaped;
+            r.cpu_ns       = tail > 0 ? static_cast<uint64_t>(tail) : 0;
+            std::lock_guard<std::mutex> lock(batchMutex);
+            batch.cpuTails.push_back(std::move(r));
+        }
+        // Reaped without a baseline (found and reaped within one tick of
+        // its parent's first reading): no tail can be measured.
+        for (uint32_t c : reaped) { awaitingTail.erase(c); tailSettled.insert(c); }
+        childrenCpu[parent] = {cur, st->startTime};
+    }
+}
+
 SystemProfiler::SystemProfiler() : m_impl(std::make_unique<Impl>()) {}
 SystemProfiler::~SystemProfiler() {
-    if (m_impl && m_impl->running) Stop();
+    if (m_impl && m_impl->running) {
+        internal::lifecycle::WarnNotStopped("SystemProfiler", "when it was destroyed");
+        Stop();
+    }
 }
 
 void SystemProfiler::Configure(const SystemProfilerConfig& config) {
     m_impl->config = config;
+    m_impl->config.flushIntervalMs = ResolveFlushIntervalMs(config.flushIntervalMs);
 
     char buf[256];
     gethostname(buf, sizeof(buf));
@@ -124,14 +359,15 @@ void SystemProfiler::Start() {
     m_impl->prevCPU = internal::ReadCPUStat();
 
     // Launch sample thread
-    m_impl->stopSample = false;
+    m_impl->stopSample.Reset();
     m_impl->sampleThread = std::thread([this]() {
+        internal::lifecycle::BlockSignalsInThisThread();
+        ::pthread_setname_np(::pthread_self(), "cupti-sys-samp");
         auto& impl = *m_impl;
         long pageSize = internal::GetPageSize();
 
-        while (!impl.stopSample) {
-            std::this_thread::sleep_for(std::chrono::microseconds(1000000 / impl.config.samplingFrequencyHz));
-            if (impl.stopSample) break;
+        const auto period = std::chrono::microseconds(1000000 / impl.config.samplingFrequencyHz);
+        while (!impl.stopSample.WaitUntil(std::chrono::steady_clock::now() + period)) {
 
             auto now = std::chrono::steady_clock::now().time_since_epoch();
             uint64_t tsNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
@@ -166,43 +402,104 @@ void SystemProfiler::Start() {
             // right now (config + any mid-run Add/Remove). Entries with
             // pending_removal=true are skipped — they're awaiting the
             // next flush to be emitted as a removal marker.
+            //
+            // Read-then-verify: values are read by PID number, then the
+            // entries' pidfds are polled, and the readings of processes
+            // found to have exited are dropped (the number may already
+            // name another process). What is kept was read while the
+            // process each entry pins was still there.
             auto snapshot = this->SnapshotProcesses();
             std::unordered_set<uint32_t> snapshotPids;
             snapshotPids.reserve(snapshot.size());
+            struct Reading {
+                const ProcessTrackingProbe::ProcessEntry* entry;
+                uint64_t cpuNs;
+                bool haveBase;                                      // a baseline exists
+                std::optional<internal::PIDStatmSnapshot> statm;   // with a baseline: its memory
+                int statmErr;                                       // why statm is unset (errno)
+            };
+            std::vector<Reading> readings;
+            readings.reserve(snapshot.size());
 
             for (const auto& entry : snapshot) {
                 uint32_t pid = entry.pid;
                 snapshotPids.insert(pid);
-                if (entry.pending_removal) continue;
+                if (entry.discovered && !entry.pending_removal &&
+                    !impl.awaitingTail.count(pid) && !impl.tailSettled.count(pid)) {
+                    impl.discoveredParent[pid] = entry.parent_pid;
+                    if (!impl.discoveredMeta.count(pid))
+                        impl.discoveredMeta[pid] = {entry.start_time_ns, RootParentOf(entry, snapshot)};
+                }
+                if (entry.pending_removal) { impl.NoteExited(pid); continue; }
 
-                auto curThreads = internal::ReadPIDSchedStatPerThread(pid);
-                auto it         = impl.prevPID.find(pid);
-                if (it == impl.prevPID.end()) {
+                // A PID that has exited (or cannot be read) is skipped
+                // for this tick; its baseline is kept, so no negative
+                // or garbage delta can be emitted.
+                auto curCpuNs = internal::ReadPIDCpuTimeNs(pid);
+                if (!curCpuNs) { impl.NoteExited(pid); continue; }
+                // Test-only: the process dies right after this read, and
+                // the reading stands for its number's next owner.
+                if (internal::PassReadHook(pid, testing::ReadProbe::System)) *curCpuNs += 1000'000'000'000ull;
+                auto it = impl.prevPID.find(pid);
+                const bool haveBase = it != impl.prevPID.end() && it->second.serial == entry.serial;
+                std::optional<internal::PIDStatmSnapshot> statm;
+                int statmErr = 0;
+                if (haveBase) {
+                    statmErr = internal::ReadErrorFor(pid, testing::ReadProbe::System);   // test-only
+                    if (!statmErr) statm = internal::ReadPIDStatm(pid, &statmErr);
+                }
+                readings.push_back({&entry, *curCpuNs, haveBase, statm, statmErr});
+            }
+            const auto goneList = this->PollTracked();
+            const std::unordered_set<uint64_t> gone(goneList.begin(), goneList.end());
+
+            for (const auto& r : readings) {
+                const auto& entry = *r.entry;
+                const uint32_t pid = entry.pid;
+                if (gone.count(entry.serial)) continue;   // exited during this tick
+                if (!r.haveBase) {
                     // Mid-run add — seed the baseline; skip this tick.
                     // First emitted sample is one tick later, so the
                     // delta isn't garbage.
                     auto& seed = impl.prevPID[pid];
-                    seed.tickTsNs     = tsNs;
-                    seed.threadCpuNs  = std::move(curThreads);
+                    seed.tickTsNs = tsNs;
+                    seed.cpuNs    = r.cpuNs;
+                    seed.serial   = entry.serial;
+                    // The process's CPU so far — from its fork until
+                    // this first reading — is recorded once as its head
+                    // (cpu_before_tracking_ns), never as a first-interval
+                    // spike. Same for roots and discovered processes.
+                    this->SetCpuBeforeTracking(pid, r.cpuNs);
                     continue;
                 }
-                auto& prev  = it->second;
-                auto statm  = internal::ReadPIDStatm(pid);
-
-                // Aggregate on-CPU delta across the whole thread group.
-                // For every TID visible this tick: delta = cur - prev,
-                // treating an absent prev as 0 so newly spawned
-                // threads get attributed to this window. Threads that
-                // exited between ticks simply drop out of the sum;
-                // their final partial slice (from prev tick to exit)
-                // is discarded — a tolerable approximation that keeps
-                // the per-PID baseline bounded.
-                uint64_t deltaCpuNs = 0;
-                for (const auto& kv : curThreads) {
-                    auto pit = prev.threadCpuNs.find(kv.first);
-                    uint64_t prevNs = (pit != prev.threadCpuNs.end()) ? pit->second : 0;
-                    if (kv.second > prevNs) deltaCpuNs += (kv.second - prevNs);
+                bool memUnreadable = false;
+                if (!r.statm) {
+                    // Exiting (its /proc entry going away): its last
+                    // interval goes to its exit tail. Alive: warn once,
+                    // record it, and sample its CPU with memory missing.
+                    const auto kind = internal::ClassifyReadFailure(pid, r.statmErr);
+                    if (kind == internal::ReadFailure::Gone) continue;
+                    this->NoteUnreadable(entry.serial, UnreadableFile::Statm, static_cast<int>(kind), tsNs,
+                                         internal::UnreadableWarning("System", "statm", pid, entry.comm,
+                                                                     r.statmErr, kind));
+                    memUnreadable = true;
                 }
+                // A process whose memory the kernel is tearing down reads
+                // RSS 0 in /proc/<pid>/statm (its mm is gone) while its
+                // pidfd still says alive. That 0 is its exit, not its
+                // memory: with the exit evidence, the memory values of
+                // this sample are NaN (missing); its CPU is kept. A live
+                // process that frees its memory reads its real value.
+                if (r.statm && r.statm->RSSPages == 0 && internal::IsExiting(pid))
+                    memUnreadable = true;
+                auto& prev = impl.prevPID[pid];
+                const internal::PIDStatmSnapshot statm = r.statm.value_or(internal::PIDStatmSnapshot{});
+
+                // On-CPU delta of the whole thread group. The process
+                // CPU clock is monotonic for the life of the process,
+                // and threads that exited since the previous tick have
+                // already been folded into it.
+                uint64_t deltaCpuNs = (r.cpuNs > prev.cpuNs) ? (r.cpuNs - prev.cpuNs) : 0;
 
                 // Denominator: actual wall-clock elapsed between this
                 // tick and the previous one, not the nominal sample
@@ -219,9 +516,10 @@ void SystemProfiler::Start() {
                 t.rss_bytes    = statm.RSSPages    * pageSize;
                 t.vms_bytes    = statm.VMSPages    * pageSize;
                 t.shared_bytes = statm.sharedPages * pageSize;
+                t.mem_unreadable = memUnreadable;
 
-                prev.tickTsNs    = tsNs;
-                prev.threadCpuNs = std::move(curThreads);
+                prev.tickTsNs = tsNs;
+                prev.cpuNs    = r.cpuNs;
 
                 std::lock_guard<std::mutex> lock(impl.batchMutex);
                 impl.batch.processTicks.push_back(std::move(t));
@@ -230,17 +528,25 @@ void SystemProfiler::Start() {
             // snapshot (committed removals).
             for (auto it = impl.prevPID.begin(); it != impl.prevPID.end(); ) {
                 if (snapshotPids.find(it->first) == snapshotPids.end()) {
+                    impl.NoteExited(it->first);
                     it = impl.prevPID.erase(it);
                 } else {
                     ++it;
                 }
             }
+            // Discovered PIDs that left without ever being sampled.
+            std::vector<uint32_t> left;
+            for (const auto& [pid, parent] : impl.discoveredParent)
+                if (!snapshotPids.count(pid)) left.push_back(pid);
+            for (uint32_t pid : left) impl.NoteExited(pid);
+            this->RefreshReapRule(impl.reap);
+            impl.AttributeTails(tsNs, snapshotPids);
         }
     });
 
     // Launch flush thread
-    m_impl->stopFlush = false;
-    if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
+    m_impl->stopFlush.Reset();
+    if (m_impl->outFile.is_open()) {
         m_impl->flushThread = std::thread(internal::SystemFlushThreadFunc,
                                            std::ref(m_impl->batch),
                                            std::ref(m_impl->batchMutex),
@@ -259,21 +565,27 @@ void SystemProfiler::Start() {
     }
 
     m_impl->running = true;
+    internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Probe, "SystemProfiler",
+                                  [this] { Stop(); });
     std::cout << "[System] Profiler started\n";
 }
 
+bool SystemProfiler::IsRunning() const { return m_impl->running; }
+
 void SystemProfiler::SignalStop() {
     if (!m_impl->running) return;
-    m_impl->stopSample = true;
-    m_impl->stopFlush = true;
+    m_impl->stopSample.Set();
+    m_impl->stopFlush.Set();
 }
 
 void SystemProfiler::Stop() {
+    std::lock_guard<std::mutex> stopLock(m_impl->stopMutex);
+    internal::lifecycle::StopScope stopping;
     if (!m_impl->running) return;
 
     // Signal if not already signaled
-    m_impl->stopSample = true;
-    m_impl->stopFlush = true;
+    m_impl->stopSample.Set();
+    m_impl->stopFlush.Set();
 
     if (m_impl->sampleThread.joinable()) m_impl->sampleThread.join();
     if (m_impl->flushThread.joinable()) m_impl->flushThread.join();
@@ -285,33 +597,43 @@ void SystemProfiler::Stop() {
             std::lock_guard<std::mutex> lock(m_impl->batchMutex);
             drained.systemTicks.swap(m_impl->batch.systemTicks);
             drained.processTicks.swap(m_impl->batch.processTicks);
+            drained.cpuTails.swap(m_impl->batch.cpuTails);
         }
 
         auto processSnapshot = SnapshotProcesses();
         if (!drained.systemTicks.empty() || !drained.processTicks.empty() ||
+            !drained.cpuTails.empty() ||
+            internal::HasRemovalMarker(processSnapshot) ||
+            internal::HasUnreadableRecord(processSnapshot) ||
             m_impl->flushStatsPending.valid) {
             SystemMetricsTrace trace = internal::BuildSystemTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz,
                 m_impl->hostCpuCount,
                 m_impl->steadyClockRefNs, m_impl->wallClockEpochNs,
                 processSnapshot, drained);
+            internal::AttachDiscoveryStats(trace, *this);
             // Attach any pending flush stats from the last background flush cycle.
             if (m_impl->flushStatsPending.valid) {
                 auto* fs = trace.add_flush_stats();
                 fs->set_flush_byte_size(m_impl->flushStatsPending.bytesWritten);
                 fs->set_flush_interval_ns(m_impl->flushStatsPending.intervalNs);
+                fs->set_flush_duration_ns(m_impl->flushStatsPending.durationNs);
+                fs->set_slow_flushes(m_impl->flushStatsPending.slowFlushes);
                 m_impl->flushStatsPending.valid = false;
             }
 
             internal::WriteDelimitedSystemTraceSized(trace, m_impl->outFile);
             m_impl->outFile.flush();
-            CommitPendingRemovals();
+            CommitPendingRemovals(processSnapshot);
         }
         m_impl->outFile.close();
         std::cout << "[System] Wrote trace to " << m_impl->config.outputFile << "\n";
     }
 
+    internal::ReportWarnStateAtStop("system", WarnStateSize());
+    FlushWarnings();
     m_impl->running = false;
+    internal::lifecycle::Unregister(m_impl.get());
 }
 
 } // namespace cupti_profiler

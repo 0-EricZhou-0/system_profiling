@@ -10,7 +10,7 @@ to build on top of the protobuf-serialized traces.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ```text
-GPU PM samples (10 kHz)  ┐
+GPU PM samples (100 Hz)  ┐
 CPU + memory ticks       │
 Per-process CPU / RSS    ├──► five .pb files ──►  visualize_all.py / visualize_interactive.py
 Per-device disk I/O      │
@@ -28,7 +28,8 @@ Named regions + events   ┘
 - **PM Sampling, not kernel-replay.** No artificial slowdowns, no
   cuBLAS calls being run multiple times to gather counters. The
   workload runs at full speed; samples are streamed off the GPU's PM
-  buffer in the background. Default 10 kHz on Ampere+. See
+  buffer in the background. Default 100 Hz on Ampere+ (100–1000 Hz cost
+  the same; the rate sets time resolution and trace size). See
   [`docs/cupti-overhead-analysis.md`](docs/cupti-overhead-analysis.md)
   for what the overhead landscape looks like across CUPTI features.
 - **Multi-domain regions and events.** A `Generic` (host
@@ -54,7 +55,17 @@ Named regions + events   ┘
 A run of [`examples/full_system_profiling.py`](examples/full_system_profiling.py)
 (GEMM ramp + `vecAdd` workload) rendered with `visualize_all.py`:
 
-![Full-system profile](docs/images/full_system_profile.v0.1.0.png)
+![Full-system profile](docs/images/full_system_profile.v0.2.0.png)
+
+A live vLLM server (`Qwen/Qwen3.5-0.8B`, startup then six request batches),
+traced process by process from a launcher with
+[`examples/vllm_serving_profiling.py`](examples/vllm_serving_profiling.py):
+the API server, `VLLM::EngineCore` (under its renamed comm), the
+multiprocessing helper and the startup workers are each their own series,
+found by descendant tracking; the GPU panels are device-wide counters.
+How to run it and read it: [docs/examples/vllm_serving.md](docs/examples/vllm_serving.md).
+
+![vLLM serving profile](docs/images/vllm_serving_profile.v0.2.0.png)
 
 ## Repository layout
 
@@ -62,7 +73,7 @@ A run of [`examples/full_system_profiling.py`](examples/full_system_profiling.py
 cupti-profiler/
 ├── lib/                  C++ shared library (the actual profiler core)
 ├── python/               pybind11 wrapper + pyproject.toml-installable package
-├── examples/             gemm_profiling.cu, full_system_profiling.{cu,py}
+├── examples/             gemm_profiling.cu, full_system_profiling.{cu,py}, vllm_serving_profiling.py
 ├── tools/                CLI utilities (visualizers, list_pm_metrics)
 ├── proto/                .proto schemas (data + config)
 ├── tests/                pytest smoke test for the Python wrapper
@@ -194,6 +205,53 @@ For the full Python API (with parameter names + docstrings forwarded to
 `.pyi` stubs) see `python/binding.cpp` or any IDE pointed at the
 installed package.
 
+## Profiling a process tree (sidecar mode, descendant tracking)
+
+Two opt-in features for profiling a workload you launch, such as a
+server that forks workers:
+
+- **Sidecar mode** (`mode: SYSTEM_PROBE_MODE_SIDECAR` on the `system` /
+  `disk` blocks) runs the CPU/memory/disk samplers in a separate
+  `cupti-profiler-sidecar` process, so their CPU is not charged to the
+  process you are measuring.
+- **Descendant tracking** (`process_discovery`) also traces every
+  descendant of a listed PID, each as its own series:
+
+```python
+import subprocess
+import cupti_profiler as cp
+
+SIDECAR = 2   # SYSTEM_PROBE_MODE_SIDECAR
+suite = cp.ProfilerSuite()
+cp.configure_suite(suite, {
+    "output_dir": "server_run/",
+    "system": {"enabled": True, "sampling_frequency_hz": 100, "mode": SIDECAR,
+               "output_file": "system_metrics.pb"},
+    "disk":   {"enabled": True, "sampling_frequency_hz": 100, "mode": SIDECAR,
+               "output_file": "disk_metrics.pb"},
+    "process_discovery": {"enabled": False, "scan_interval_ms": 100},
+})
+suite.start()
+server = subprocess.Popen(["my-server", "--port", "8000"])
+suite.add_tracked_process(server.pid, "server", track_descendants=True)
+# ... drive the server ...
+suite.stop()
+```
+
+Every tracked process is written to the trace's process table (pid,
+parent, `comm` including renames, start and end time) and removed
+automatically when it exits. Per-process I/O is reported as all five
+`/proc/<pid>/io` counters, which see different things (a warm `mmap`
+read shows up in none of them). Where to read more:
+
+- [Configuration reference](docs/system-guide.md#configuration-reference-sidecar-mode-descendant-tracking-process-table)
+  — every knob, where it lives, and its default;
+- [Sidecar mode](docs/system-guide.md#sidecar-mode),
+  [Process table and exit detection](docs/system-guide.md#process-table-and-exit-detection),
+  [Descendant tracking](docs/system-guide.md#descendant-tracking);
+- [Per-PID I/O counters](docs/metric-model.md#per-pid-io-counters-who-records-what);
+- a complete example on a vLLM server: [docs/examples/vllm_serving.md](docs/examples/vllm_serving.md).
+
 ## Tools
 
 | Tool | What it does |
@@ -216,6 +274,9 @@ Detailed usage in [`docs/tools/README.md`](docs/tools/README.md).
 - [`docs/cupti-overhead-analysis.md`](docs/cupti-overhead-analysis.md) —
   overhead characteristics of CUPTI subsystems and why this project
   uses PM Sampling.
+- [`docs/cupti-hardware-findings.md`](docs/cupti-hardware-findings.md) —
+  CUPTI/hardware behaviours found on H100 with CUDA 12.8 (PM Sampling vs.
+  Activity-API tracing, forced flushes, the legacy metric API's gate).
 - [`docs/integration.md`](docs/integration.md) — how a sibling
   project should depend on this one (submodule + `pip install -e .` is
   the recommended path).

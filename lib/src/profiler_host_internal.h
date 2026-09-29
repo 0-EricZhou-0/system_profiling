@@ -26,9 +26,15 @@ public:
 
     CUptiResult CreateConfigImage(const std::vector<const char*>& metricsList, std::vector<uint8_t>& configImage);
 
+    /// Timestamps + metric values of sample `rangeIndex` of the image,
+    /// into `out` (values left empty for an invalid sample: both
+    /// timestamps 0). Stores nothing: PushSample() keeps it.
     CUptiResult EvaluateCounterData(CUpti_PmSampling_Object* pSamplingObject, size_t rangeIndex,
                                      const std::vector<const char*>& metricsList,
-                                     std::vector<uint8_t>& counterDataImage);
+                                     std::vector<uint8_t>& counterDataImage,
+                                     SamplerRange& out);
+
+    void PushSample(SamplerRange&& sample);
 
     /// Atomically drain all accumulated samples.
     std::vector<SamplerRange> DrainSamples();

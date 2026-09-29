@@ -18,10 +18,13 @@
 #include <cupti_profiler/system_profiler.h>
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/tracked_process.h>
+#include <cupti_profiler/child_subreaper.h>
+#include <cupti_profiler/testing.h>
 
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -64,15 +67,21 @@ PYBIND11_MODULE(_native, m) {
         .def_readwrite("device_indices",        &ProfilerConfig::deviceIndices,
             "List of CUDA device ordinals to profile (empty = [0]).")
         .def_readwrite("sampling_frequency_hz", &ProfilerConfig::samplingFrequencyHz,
-            "PM sampling rate in Hz (default 10000).")
+            "PM sampling rate in Hz (default 100).")
         .def_readwrite("hw_buffer_size",        &ProfilerConfig::hwBufferSize,
             "CUPTI hardware buffer size in bytes (default 512 MiB).")
         .def_readwrite("max_samples",           &ProfilerConfig::maxSamples,
-            "Maximum samples retained in memory before flushing.")
+            "Counter-data image capacity, in samples, for one decode pass "
+            "(~16 KB of host RAM each). 0 (default) = sized for the decode "
+            "interval: ceil(rate x decode_interval x 4) + 64.")
         .def_readwrite("metrics",               &ProfilerConfig::metrics,
             "List of CUPTI metric names (e.g. 'sm__cycles_active.avg').")
         .def_readwrite("flush_interval_ms",     &ProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms; 0 = single write at Stop().")
+            "Periodic flush interval in ms (default 5000; 0 = 5000). "
+            "Must not be less than decode_interval_ms.")
+        .def_readwrite("decode_interval_ms",    &ProfilerConfig::decodeIntervalMs,
+            "How often the host collects the buffered samples, in ms "
+            "(default 1000; 0 = 1000).")
         .def_readwrite("output_file",           &ProfilerConfig::outputFile,
             "Path to gpu_metrics.pb output file. Empty = no output.");
 
@@ -86,7 +95,7 @@ PYBIND11_MODULE(_native, m) {
             "Empty = system-wide only. PID 0 inside any entry is resolved "
             "to the current process at runtime.")
         .def_readwrite("flush_interval_ms",     &SystemProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms.")
+            "Periodic flush interval in ms (default 5000; 0 = 5000).")
         .def_readwrite("output_file",           &SystemProfilerConfig::outputFile,
             "Path to system_metrics.pb output file.");
 
@@ -94,14 +103,14 @@ PYBIND11_MODULE(_native, m) {
         "Configuration for DiskProfiler — per-device + per-process I/O.")
         .def(py::init<>())
         .def_readwrite("sampling_frequency_hz", &DiskProfilerConfig::samplingFrequencyHz,
-            "Tick rate in Hz (default 10).")
+            "Tick rate in Hz (default 100).")
         .def_readwrite("devices",               &DiskProfilerConfig::devices,
             "Block device names to track (e.g. ['nvme0n1', 'md0']).")
         .def_readwrite("processes",             &DiskProfilerConfig::Processes,
             "Processes to track per-process I/O (list of TrackedProcess). "
             "PID 0 inside any entry is resolved to the current process at runtime.")
         .def_readwrite("flush_interval_ms",     &DiskProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms.")
+            "Periodic flush interval in ms (default 5000; 0 = 5000).")
         .def_readwrite("output_file",           &DiskProfilerConfig::outputFile,
             "Path to disk_metrics.pb output file.");
 
@@ -109,7 +118,7 @@ PYBIND11_MODULE(_native, m) {
         "Configuration for EventProfiler — region + event annotations.")
         .def(py::init<>())
         .def_readwrite("flush_interval_ms", &EventProfilerConfig::flushIntervalMs,
-            "Periodic flush interval in ms.")
+            "Periodic flush interval in ms (default 5000; 0 = 5000).")
         .def_readwrite("output_file",       &EventProfilerConfig::outputFile,
             "Path to events.pb output file.");
 
@@ -247,12 +256,37 @@ PYBIND11_MODULE(_native, m) {
             "(binary wire format). Used by language bindings that build "
             "the config in-process; cupti_profiler.configure_suite() is "
             "the friendly wrapper around this.")
-        .def("configure", &ProfilerSuite::Configure,
+        .def("configure",
+            [](ProfilerSuite& self) {
+                auto err = self.Configure();
+                if (err != ProfilerError::Ok) {
+                    throw std::runtime_error(
+                        std::string("ProfilerSuite::Configure failed: ") + ToString(err));
+                }
+            },
             "Configure all enabled sub-profilers. Must be called after "
-            "load_config*.",
+            "load_config*. Under SIDECAR mode, raises RuntimeError if the "
+            "sidecar cannot be found or spawned (SidecarNotFound, "
+            "SidecarSpawnFailed), dies or rejects its config (SidecarExited, "
+            "SidecarBadHandshake), or cannot apply sidecar_cpus "
+            "(SidecarAffinityFailed). Also raises for an inconsistent GPU "
+            "config (InvalidConfig, reason on stderr: e.g. flush_interval_ms "
+            "below decode_interval_ms), in either mode.",
             py::call_guard<py::gil_scoped_release>())
-        .def("start",     &ProfilerSuite::Start,
-            "Start all enabled sub-profilers.",
+        .def("start",
+            [](ProfilerSuite& self) {
+                auto err = self.Start();
+                if (err != ProfilerError::Ok) {
+                    throw std::runtime_error(
+                        std::string("ProfilerSuite::Start failed: ") + ToString(err));
+                }
+            },
+            "Start all enabled sub-profilers. Raises RuntimeError if a "
+            "System/Disk probe did not start (ProbeStartFailed, e.g. its "
+            "output file cannot be opened; under SIDECAR reported by the "
+            "sidecar) or the sidecar did not answer (SidecarExited, "
+            "SidecarBadHandshake). The other probes are running; call "
+            "stop() as usual.",
             py::call_guard<py::gil_scoped_release>())
         .def("stop",      &ProfilerSuite::Stop,
             "Stop all sub-profilers and write session_metadata.pb.",
@@ -270,18 +304,74 @@ PYBIND11_MODULE(_native, m) {
              py::return_value_policy::reference_internal,
             "Returns the suite-owned EventProfiler.")
         .def("add_tracked_process",
-             [](ProfilerSuite& self, uint32_t pid, std::string alias) {
-                 self.AddTrackedProcess(pid, std::move(alias));
+             [](ProfilerSuite& self, uint32_t pid, std::string alias,
+                std::optional<bool> track_descendants) {
+                 if (track_descendants)
+                     self.AddTrackedProcess(pid, std::move(alias), *track_descendants);
+                 else
+                     self.AddTrackedProcess(pid, std::move(alias));
              },
              py::arg("pid"), py::arg("alias") = std::string{},
+             py::arg("track_descendants") = py::none(),
             "Start tracking a PID mid-run. Fans out to every probe that "
             "supports per-PID sampling (System + Disk). First sample for "
-            "the PID is one sample-tick after this call returns.")
+            "the PID is one sample-tick after this call returns. "
+            "track_descendants=None follows process_discovery.enabled; "
+            "True/False overrides it for this root (True: its children are "
+            "discovered, recursively unless direct_children_only, and "
+            "tracked as '<alias>/<comm>' until they exit).",
+             py::call_guard<py::gil_scoped_release>())
         .def("remove_tracked_process", &ProfilerSuite::RemoveTrackedProcess,
              py::arg("pid"),
             "Stop tracking a PID. The PID appears one more time in the "
             "next flush with TrackedProcessV2.removed=true (visualizer "
             "renders a removal marker), then is dropped.");
+
+    // -------------------------------------------------------------------
+    // Subreaper helper (opt-in). The user-facing, fully documented entry
+    // point is cupti_profiler.adopt_orphans() in __init__.py.
+    // -------------------------------------------------------------------
+    m.def("enable_child_subreaper", []() {
+            if (!EnableChildSubreaper()) {
+                PyErr_SetFromErrno(PyExc_OSError);   // reads errno
+                throw py::error_already_set();
+            }
+        },
+        "prctl(PR_SET_CHILD_SUBREAPER, 1) on this process and let descendant "
+        "tracking reap the orphans it saw adopted. See cupti_profiler.adopt_orphans().");
+    // Test-only (see <cupti_profiler/testing.h>); not a supported API.
+    m.def("_testing_arm_flush_gate", &testing::ArmFlushGate);
+    m.def("_testing_wait_flush_held",
+          [](double timeout_s) { return testing::WaitFlushHeld(static_cast<unsigned>(timeout_s * 1000)); },
+          py::arg("timeout_s"), py::call_guard<py::gil_scoped_release>());
+    m.def("_testing_release_flush_gate", &testing::ReleaseFlushGate);
+    m.def("_testing_set_flush_delay_ms", &testing::SetFlushDelayMs, py::arg("ms"));
+    m.def("_testing_set_stop_delay_ms", &testing::SetStopDelayMs, py::arg("ms"));
+    m.def("_testing_stall_next_decode_ms", &testing::StallNextDecodeMs, py::arg("ms"));
+    m.def("_testing_set_backlog_report_period_ms", &testing::SetBacklogReportPeriodMs, py::arg("ms"));
+    m.def("_testing_kill_after_next_read",
+          [](uint32_t pid, const std::string& probe) {
+              if (probe != "system" && probe != "disk")
+                  throw py::value_error("probe must be 'system' or 'disk'");
+              testing::KillAfterNextRead(pid, probe == "disk" ? testing::ReadProbe::Disk
+                                                              : testing::ReadProbe::System);
+          },
+          py::arg("pid"), py::arg("probe") = "system");
+    m.def("_testing_set_read_error",
+          [](uint32_t pid, const std::string& probe, int err) {
+              if (probe != "system" && probe != "disk")
+                  throw py::value_error("probe must be 'system' or 'disk'");
+              testing::SetReadError(pid, probe == "disk" ? testing::ReadProbe::Disk
+                                                         : testing::ReadProbe::System, err);
+          },
+          py::arg("pid"), py::arg("probe"), py::arg("err"));
+    m.def("_testing_warn_state_size", &testing::WarnStateSize);
+    m.def("_stop_running_at_exit", &StopRunningAtExit,
+        "Stop every running suite/probe, warning that stop() was not called. "
+        "Registered with atexit by the package; not for direct use.",
+        py::call_guard<py::gil_scoped_release>());
+    m.def("child_subreaper_enabled", &ChildSubreaperEnabled,
+        "True once enable_child_subreaper() has succeeded in this process.");
 
     // -------------------------------------------------------------------
     // CUDA stream helpers — let Python tests get a real cudaStream_t

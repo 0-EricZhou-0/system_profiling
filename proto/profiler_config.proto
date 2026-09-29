@@ -2,45 +2,133 @@ syntax = "proto3";
 
 import "metric_sample.proto";
 
+// How the SystemProfiler / DiskProfiler run. Selects between the
+// legacy in-process path (probes are threads inside the workload's
+// address space) and the sidecar path (probes are threads inside a
+// separately-forked cupti-profiler-sidecar process).
+//
+// Rationale: in the legacy layout, the sampler + flush threads count
+// toward the workload's per-PID CPU accounting — a small but non-zero
+// distortion for benchmarks that care about "what the workload alone
+// would use." SIDECAR mode moves those threads to a distinct PID so
+// they don't appear in the workload's per-PID CPU accounting, at the
+// cost of an extra process on the host.
+//
+// GPU + Events probes stay in-process regardless — CUPTI PM Sampling
+// binds to the workload's CUDA context, and EventTracker records
+// cudaEvents on workload-owned streams; neither can move.
+enum SystemProbeMode {
+    SYSTEM_PROBE_MODE_UNSPECIFIED = 0;
+    // In-process /proc readers (default; preserves the legacy shape).
+    SYSTEM_PROBE_MODE_LEGACY = 1;
+    // Out-of-process sidecar (cupti-profiler-sidecar) running the same
+    // /proc readers. Needs no capability for targets owned by the same
+    // uid. It stops gracefully, final flush included, when the host
+    // process exits or on SIGTERM, SIGINT, SIGHUP or another signal whose
+    // default action terminates it.
+    SYSTEM_PROBE_MODE_SIDECAR = 2;
+}
+
 message GPUProfilerConfig {
+    // Run the GPU probe (CUPTI PM sampling, device-wide counters) in this
+    // process. It needs a CUDA-capable device and CUPTI.
     bool enabled = 1;
     // Empty = device 0. Otherwise CUPTI PM Sampling opens one session
     // per index; the metric set in `metrics` is applied identically
     // across every device.
     repeated int32 device_indices = 2;
+    // PM samples per second. 0 = 100 Hz. 100-1000 Hz cost the same
+    // (docs/system-guide.md "GPU probe cost and placement"); the rate
+    // sets time resolution and trace size.
     uint64 sampling_frequency_hz = 3;
+    // Bytes of the GPU-side buffer the sampler writes to until the host
+    // decodes it. 0 = 512 MiB. Must hold two decode intervals of samples
+    // at up to 16 KiB each (measured 4-7 KB with 1-4 metrics on H100), or
+    // Configure() fails with InvalidConfig. An overflow is counted in
+    // GpuDecodeStats.hw_buffer_overflows; CUPTI returns no samples after it.
     uint64 hw_buffer_size = 4;
+    // Capacity, in samples, of the counter-data image one decode pass
+    // decodes into (two images, double-buffered; ~16 KB of host RAM per
+    // sample slot with 4 metrics). 0 = sized for the decode interval:
+    // ceil(sampling_frequency_hz x decode_interval_ms / 1000 x 4) + 64
+    // (a pass may start up to three intervals late without loss).
+    // Smaller than one pass loses samples: CUPTI 13.3 returns invalid
+    // samples once the image fills (counted in GpuDecodeStats).
     uint64 max_samples = 5;
+    // CUPTI metric names; they must fit one pass. The same set on every
+    // device; each GPUSample's values[] follow this order.
     repeated string metrics = 6;
+    // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
+    // Must not be less than decode_interval_ms (Configure() fails with
+    // InvalidConfig).
     uint64 flush_interval_ms = 7;
+    // GPU trace (GPUMetricsTrace frames), relative to output_dir.
     string output_file = 8;
+    // How often the host collects the samples the GPU buffered (one
+    // decode pass per interval). 0 = 1000 ms. The wait is interruptible:
+    // Stop() does not wait it out.
+    uint64 decode_interval_ms = 9;
 }
 
 message SystemProfilerConfig {
     bool enabled = 1;
-    uint64 sampling_frequency_hz = 2;
+    uint64 sampling_frequency_hz = 2;   // 0 = 100 Hz
     // Processes to track per-process. Empty = system-wide only.
     // PIDs can also be added/removed mid-run via
     // ProfilerSuite::AddTrackedProcess/RemoveTrackedProcess.
     repeated TrackedProcessV2 processes = 3;
+    // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 4;
     string output_file = 5;
+    // Where the sampler + flush threads run. UNSPECIFIED → LEGACY.
+    SystemProbeMode mode = 6;
 }
 
 message DiskProfilerConfig {
     bool enabled = 1;
-    uint64 sampling_frequency_hz = 2;
+    uint64 sampling_frequency_hz = 2;   // 0 = 100 Hz
     repeated string devices = 3;
     // See SystemProfilerConfig.processes for mid-run add/remove behavior.
     repeated TrackedProcessV2 processes = 4;
+    // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 5;
     string output_file = 6;
+    // Where the sampler + flush threads run. UNSPECIFIED → LEGACY.
+    // If both System and Disk are SIDECAR, one sidecar process serves
+    // both — the taskstats query returns CPU/mem/IO in a single struct,
+    // so the sidecar's SystemProfiler and DiskProfiler share one
+    // TaskstatsClient and one netlink round-trip per PID per tick.
+    SystemProbeMode mode = 7;
 }
 
 message EventsProfilerConfig {
     bool enabled = 1;
+    // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 2;
     string output_file = 3;          // events.pb
+}
+
+// Descendant tracking for the System + Disk probes. One setting drives
+// BOTH probes, because they share the tracked-process set. The scan runs
+// on the observer side: in the workload process under LEGACY, inside
+// the sidecar under SIDECAR.
+//
+// Guarantee: a process that is a child of a tracked process for at
+// least one full scan interval is discovered, and once discovered it is
+// tracked until it exits, regardless of reparenting. A child that lives
+// less than one interval may be missed; lower scan_interval_ms to catch
+// it. See docs/system-guide.md "Descendant tracking".
+message ProcessDiscoveryConfig {
+    // false (default): trace the listed PIDs only. A per-root override
+    // (ProfilerSuite::AddTrackedProcess(pid, alias, trackDescendants))
+    // wins over this for that root.
+    bool   enabled              = 1;
+    // false (default) => RECURSIVE: children of discovered processes are
+    // discovered too. true => only direct children of the listed roots.
+    // (proto3 bools default to false, hence the inverted name.)
+    bool   direct_children_only = 2;
+    // How often every tracked process's children are scanned. 0 => 100.
+    uint64 scan_interval_ms     = 3;
 }
 
 message ProfilerSuiteConfig {
@@ -65,4 +153,27 @@ message ProfilerSuiteConfig {
     // appended. Empty = built-ins only — no file is required at
     // runtime.
     string metric_catalog_path = 7;
+
+    // Descendant tracking for the System + Disk probes. Unset = off.
+    ProcessDiscoveryConfig process_discovery = 8;
+
+    // CPUs the sidecar process (and every thread it runs) is pinned to,
+    // e.g. a core the workload does not use, so SIDECAR mode means less
+    // interference and not only cleaner accounting. Empty (default) = no
+    // pinning: the sidecar inherits this process's affinity. Applied by
+    // the sidecar before it starts any thread; a set it cannot use (a CPU
+    // outside this job's cpuset, say) fails Configure() with
+    // SidecarAffinityFailed. Ignored, with a note, when no probe runs in
+    // SIDECAR mode — the host's own affinity is never changed.
+    repeated uint32 sidecar_cpus = 9;
+
+    // false (default): Start() installs handlers for the catchable
+    // signals whose default action ends the process (SIGTERM, SIGINT,
+    // SIGHUP, SIGQUIT, SIGSEGV, ...): on one, every probe is stopped and
+    // flushed, then the handler that was there before runs (or the
+    // default action), so the exit status is unchanged. true: no handler
+    // is installed and the host's signal dispositions are left alone; a
+    // fatal signal then loses what was not flushed yet (up to one flush
+    // interval). (proto3 bools default to false, hence the name.)
+    bool disable_signal_handlers = 10;
 }

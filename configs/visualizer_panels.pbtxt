@@ -88,17 +88,28 @@ panels {
     title: "Disk Bandwidth"
     series_glob: "disk__*_bytes.*"
     unit_override: UNIT_BYTES_PER_SEC
-    # Companion panel: cumulative bytes read / written per device.
+    # Companion panel: cumulative bytes read / written per device (one
+    # colour per device, read solid, write dashed).
     aggregation: PANEL_AGGREGATION_INTEGRATE
 }
 panels {
     title: "Disk Queue Depth"
     series_glob: "disk__*_inflight"
 }
+# Per-PID I/O is two layers that answer different questions (see
+# docs/metric-model.md, "Per-PID I/O counters"), so they get separate
+# panels rather than five overlapping series per PID.
 panels {
-    title: "Per-PID I/O"
-    series_glob: "proc__io_*"
+    title: "Per-PID I/O, syscall layer (rchar / wchar)"
+    series_glob: "proc__io_?char.*"
     unit_override: UNIT_BYTES_PER_SEC
-    # Companion panel: cumulative bytes per PID (rchar + wchar).
+    # Companion panel: cumulative bytes per PID.
+    aggregation: PANEL_AGGREGATION_INTEGRATE
+}
+panels {
+    title: "Per-PID I/O, storage layer (read_bytes / write_bytes / cancelled)"
+    series_glob: "proc__io_*_bytes.*"
+    unit_override: UNIT_BYTES_PER_SEC
+    # Companion panel: cumulative bytes per PID.
     aggregation: PANEL_AGGREGATION_INTEGRATE
 }

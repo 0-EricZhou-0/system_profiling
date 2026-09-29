@@ -37,7 +37,17 @@ add_library(cupti_profiler SHARED
     src/metric_catalog.cpp
     src/metric_catalog_builtins.cpp
     src/builtin_catalog.cpp
+    src/profiler_error.cpp
+    src/sidecar_process.cpp
     src/process_tracking_probe.cpp
+    src/warn_limiter.cpp
+    src/lifecycle.cpp
+    src/flush_backlog.cpp
+    src/testing_hooks.cpp
+    # Descendant tracking, subreaper helper, startup situation report
+    src/process_discovery.cpp
+    src/child_subreaper.cpp
+    src/situation_report.cpp
     # Orchestrator
     src/profiler_suite.cpp
     # Generated protobuf sources
@@ -73,6 +83,31 @@ target_link_libraries(cupti_profiler
 )
 
 target_compile_definitions(cupti_profiler PRIVATE CUPTI_PROFILER_EXPORTS)
+
+# The cupti-profiler-sidecar binary needs to parse ProfilerSuiteConfig
+# from the pipe on startup — that requires the proto symbols to be
+# visible in libcupti_profiler.so. The library's default hidden
+# visibility hides them along with everything else; override that for
+# just the generated proto TUs so the sidecar link resolves cleanly.
+# We do NOT link the proto .cc's into the sidecar directly because
+# protobuf's descriptor-database would double-register and abort.
+set_source_files_properties(
+    ${MC_PROTO_SRCS} ${MS_PROTO_SRCS} ${PN_PROTO_SRCS}
+    ${GPU_PROTO_SRCS} ${SYS_PROTO_SRCS} ${DISK_PROTO_SRCS}
+    ${EVT_PROTO_SRCS} ${SESS_PROTO_SRCS} ${CFG_PROTO_SRCS}
+    PROPERTIES COMPILE_FLAGS "-fvisibility=default"
+)
+
+# Baked-in default path for the sidecar binary. Env var
+# CUPTI_PROFILER_SIDECAR overrides at runtime; without either, the
+# library reports SidecarNotFound if a caller requests SIDECAR mode.
+if(NOT CUPTI_PROFILER_SIDECAR_PATH)
+    set(CUPTI_PROFILER_SIDECAR_PATH
+        "${CMAKE_BINARY_DIR}/tools/cupti-profiler-sidecar"
+        CACHE PATH "Absolute path to cupti-profiler-sidecar (default = build tree)")
+endif()
+target_compile_definitions(cupti_profiler PRIVATE
+    CUPTI_PROFILER_SIDECAR_PATH="${CUPTI_PROFILER_SIDECAR_PATH}")
 
 set_target_properties(cupti_profiler PROPERTIES
     CXX_STANDARD 20

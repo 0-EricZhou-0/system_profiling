@@ -25,7 +25,15 @@ public:
     CUptiResult ResetCounterDataImage(std::vector<uint8_t>& counterDataImage);
     CUptiResult Start();
     CUptiResult Stop();
-    CUptiResult DecodeData(std::vector<uint8_t>& counterDataImage);
+    /// One cuptiPmSamplingDecodeData call. Not fatal: returns CUPTI's
+    /// result (CUPTI_ERROR_OUT_OF_MEMORY = the hardware buffer overflowed)
+    /// and fills why decoding stopped and CUPTI's overflow flag.
+    struct DecodeOutcome {
+        CUptiResult result = CUPTI_SUCCESS;
+        CUpti_PmSampling_DecodeStopReason stopReason = CUPTI_PM_SAMPLING_DECODE_STOP_REASON_OTHER;
+        bool overflow = false;
+    };
+    DecodeOutcome DecodeData(std::vector<uint8_t>& counterDataImage);
 
     CUpti_PmSampling_Object* GetPmSamplerObject() { return m_pmSamplerObject; }
 

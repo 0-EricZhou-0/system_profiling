@@ -2,7 +2,10 @@
 #pragma once
 
 #include <cupti_profiler/process_tracking_probe.h>
+#include <cupti_profiler/system_profiler.h>   // SystemProbeMode
 #include <cupti_profiler/tracked_process.h>
+
+#include <cupti_profiler/defaults.h>
 
 #include <cstdint>
 #include <memory>
@@ -26,13 +29,15 @@
 namespace cupti_profiler {
 
 struct CUPTI_PROFILER_API DiskProfilerConfig {
-    uint64_t samplingFrequencyHz = 10;              // 10 Hz
+    uint64_t samplingFrequencyHz = kDefaultDiskSamplingHz;     // 100 Hz
     std::vector<std::string> devices;   // block device names (e.g. "nvme0n1")
     // Processes to track per-process I/O (with optional display aliases —
     // see SystemProfilerConfig::Processes).
     std::vector<TrackedProcess> Processes;
-    uint64_t flushIntervalMs = 5000;
+    // Periodic flush to outputFile. 0 = kDefaultFlushIntervalMs (5 s).
+    uint64_t flushIntervalMs = kDefaultFlushIntervalMs;
     std::string outputFile;
+    SystemProbeMode mode = SystemProbeMode::Legacy;
 };
 
 class CUPTI_PROFILER_API DiskProfiler : public ProcessTrackingProbe {
@@ -46,11 +51,19 @@ public:
     void Configure(const DiskProfilerConfig& config);
     void Start();
 
+    /// True between a Start() that succeeded and Stop(). Start() fails
+    /// (logged, returns with nothing running) when called before
+    /// Configure() or when the output file cannot be opened.
+    bool IsRunning() const;
+
     /// Signal sampling to stop (non-blocking). Call Stop() after to join and flush.
     void SignalStop();
 
     /// Join threads, flush remaining data, close file.
     void Stop();
+
+    // SetHostReaper / NoteAdoptedExit: see ProcessTrackingProbe
+    // (reap chains, IoReapAdjustment in proto/disk_metrics.proto).
 
 private:
     class Impl;

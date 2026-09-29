@@ -1,5 +1,7 @@
 #include <cupti_profiler/event_profiler.h>
 
+#include "lifecycle.h"
+#include "stop_signal.h"
 #include "event_tracker_internal.h"
 #include "event_flush_thread.h"
 
@@ -32,7 +34,7 @@ public:
     std::mutex outMutex;
 
     std::thread flushThread;
-    std::atomic<bool> stopFlush{false};
+    internal::StopSignal stopFlush;
 
     internal::EventPendingFlushStats flushStatsPending;
     std::mutex flushStatsMutex;
@@ -43,6 +45,10 @@ public:
 
     bool configured = false;
     bool running = false;
+    // Serializes Stop() (the host, the signal flusher and the exit hook
+    // may all call it).
+    std::mutex stopMutex;
+    EventProfiler* owner = nullptr;   // the object Stop() is called on
 };
 
 EventProfiler::EventProfiler() : m_impl(std::make_unique<Impl>()) {
@@ -50,16 +56,29 @@ EventProfiler::EventProfiler() : m_impl(std::make_unique<Impl>()) {
     m_impl->gpu     = std::unique_ptr<EventTracker>(new EventTracker(EventTracker::Domain::GPU));
 }
 EventProfiler::~EventProfiler() {
-    if (m_impl && m_impl->running) Stop();
+    if (m_impl && m_impl->running) {
+        internal::lifecycle::WarnNotStopped("EventProfiler", "when it was destroyed");
+        Stop();
+    }
 }
-EventProfiler::EventProfiler(EventProfiler&&) noexcept = default;
-EventProfiler& EventProfiler::operator=(EventProfiler&&) noexcept = default;
+EventProfiler::EventProfiler(EventProfiler&& o) noexcept : m_impl(std::move(o.m_impl)) {
+    if (m_impl) m_impl->owner = this;
+}
+EventProfiler& EventProfiler::operator=(EventProfiler&& o) noexcept {
+    if (this != &o) {
+        if (m_impl && m_impl->running) Stop();
+        m_impl = std::move(o.m_impl);
+        if (m_impl) m_impl->owner = this;
+    }
+    return *this;
+}
 
 EventTracker& EventProfiler::GetGenericTracker() { return *m_impl->generic; }
 EventTracker& EventProfiler::GetGpuTracker()     { return *m_impl->gpu; }
 
 void EventProfiler::Configure(const EventProfilerConfig& config) {
     m_impl->config = config;
+    m_impl->config.flushIntervalMs = ResolveFlushIntervalMs(config.flushIntervalMs);
     m_impl->configured = true;
 }
 
@@ -86,8 +105,8 @@ void EventProfiler::Start() {
     m_impl->wallClockEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
-    m_impl->stopFlush = false;
-    if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
+    m_impl->stopFlush.Reset();
+    if (m_impl->outFile.is_open()) {
         m_impl->flushThread = std::thread(internal::EventFlushThreadFunc,
                                           std::ref(*m_impl->generic),
                                           std::ref(*m_impl->gpu),
@@ -103,17 +122,22 @@ void EventProfiler::Start() {
     }
 
     m_impl->running = true;
+    m_impl->owner = this;
+    internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Probe, "EventProfiler",
+                                  [impl = m_impl.get()] { impl->owner->Stop(); });
     std::cout << "[Events] Profiler started\n";
 }
 
 void EventProfiler::SignalStop() {
     if (!m_impl->running) return;
-    m_impl->stopFlush = true;
+    m_impl->stopFlush.Set();
 }
 
 void EventProfiler::Stop() {
+    std::lock_guard<std::mutex> stopLock(m_impl->stopMutex);
+    internal::lifecycle::StopScope stopping;
     if (!m_impl->running) return;
-    m_impl->stopFlush = true;
+    m_impl->stopFlush.Set();
     if (m_impl->flushThread.joinable()) m_impl->flushThread.join();
 
     // Final flush — block until any in-flight cudaEvents complete so the last
@@ -153,6 +177,8 @@ void EventProfiler::Stop() {
             fs->set_timestamp_ns(m_impl->flushStatsPending.timestampNs);
             fs->set_bytes_written(m_impl->flushStatsPending.bytesWritten);
             fs->set_interval_ns(m_impl->flushStatsPending.intervalNs);
+            fs->set_duration_ns(m_impl->flushStatsPending.durationNs);
+            fs->set_slow_flushes(m_impl->flushStatsPending.slowFlushes);
             m_impl->flushStatsPending.valid = false;
         }
 
@@ -167,6 +193,7 @@ void EventProfiler::Stop() {
     }
 
     m_impl->running = false;
+    internal::lifecycle::Unregister(m_impl.get());
 }
 
 } // namespace cupti_profiler

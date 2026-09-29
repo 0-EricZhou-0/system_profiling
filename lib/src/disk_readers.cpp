@@ -1,8 +1,11 @@
 #include "disk_readers.h"
 
+#include <cerrno>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <unistd.h>
 
 namespace cupti_profiler {
 namespace internal {
@@ -62,21 +65,53 @@ DiskInflightSnapshot ReadDiskInflight(const std::string& device) {
 PIDIOSnapshot ReadPIDIO(uint32_t pid) {
     PIDIOSnapshot s;
     std::string path = "/proc/" + std::to_string(pid) + "/io";
-    std::ifstream f(path);
-    if (!f) {
+    // open/read directly, for the errno: the kernel checks access both
+    // at open (file mode, owner) and at read (ptrace access).
+    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        s.accessible = false;
+        s.error = errno;
+        return s;
+    }
+    std::string text;
+    char buf[512];
+    for (;;) {
+        ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { s.error = errno; break; }
+        if (n == 0) break;
+        text.append(buf, static_cast<size_t>(n));
+    }
+    ::close(fd);
+    if (s.error) {
         s.accessible = false;
         return s;
     }
+    std::istringstream f(text);
 
-    // Format: key: value (one per line)
-    // We want: read_bytes and write_bytes (physical I/O)
+    // Format: "key: value", one per line.
+    struct Field { const char* key; size_t len; uint64_t PIDIOSnapshot::* dst; };
+    static constexpr Field kFields[] = {
+        {"rchar: ",                 7, &PIDIOSnapshot::rchar},
+        {"wchar: ",                 7, &PIDIOSnapshot::wchar},
+        {"read_bytes: ",           12, &PIDIOSnapshot::readBytes},
+        {"write_bytes: ",          13, &PIDIOSnapshot::writeBytes},
+        {"cancelled_write_bytes: ", 23, &PIDIOSnapshot::cancelledWriteBytes},
+    };
     std::string line;
+    int found = 0;
     while (std::getline(f, line)) {
-        if (line.compare(0, 12, "read_bytes: ") == 0) {
-            std::istringstream(line.substr(12)) >> s.readBytes;
-        } else if (line.compare(0, 13, "write_bytes: ") == 0) {
-            std::istringstream(line.substr(13)) >> s.writeBytes;
+        for (const auto& k : kFields) {
+            if (line.compare(0, k.len, k.key) == 0) {
+                std::istringstream(line.substr(k.len)) >> s.*k.dst;
+                ++found;
+                break;
+            }
         }
+    }
+    if (found < 5) {   // never zeros for a reading
+        s.accessible = false;
+        s.error = ENODATA;
     }
     return s;
 }

@@ -10,12 +10,14 @@ Source: [`examples/full_system_profiling.cu`](../../examples/full_system_profili
 Runs **the same GEMM + vecAdd workload** as [`gemm_profiling`](gemm_profiling.md), but
 with three profilers collecting in parallel:
 
-- **GPU** — CUPTI PM sampling at the rate set in the config (default 10 kHz).
+- **GPU** — CUPTI PM sampling at the rate set in the config (default 100 Hz).
   SM cycles, warp occupancy, DRAM throughput, PCIe read/write, NVLink rx/tx.
 - **System** — `/proc`-based CPU + memory sampling (system-wide and per-PID)
   at a separate rate (default 100 Hz).
 - **Disk** — `/proc/diskstats` + `/sys/block/*/inflight` + `/proc/[PID]/io` for
-  per-device throughput and per-PID IO (default 100 Hz).
+  per-device throughput and per-PID IO — all five `/proc/[PID]/io` byte
+  counters, see [metric-model.md](../metric-model.md#per-pid-io-counters-who-records-what)
+  (default 100 Hz).
 
 Each profiler runs two threads (sample + flush) and writes its own length-delimited
 `.pb` file. Timestamps are anchored to `steady_clock` with a sync anchor so GPU,

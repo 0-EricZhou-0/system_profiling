@@ -100,13 +100,16 @@ CUptiResult CuptiPmSampling::Stop() {
     return CUPTI_SUCCESS;
 }
 
-CUptiResult CuptiPmSampling::DecodeData(std::vector<uint8_t>& counterDataImage) {
+CuptiPmSampling::DecodeOutcome CuptiPmSampling::DecodeData(std::vector<uint8_t>& counterDataImage) {
     CUpti_PmSampling_DecodeData_Params p = {CUpti_PmSampling_DecodeData_Params_STRUCT_SIZE};
     p.pPmSamplingObject = m_pmSamplerObject;
     p.pCounterDataImage = counterDataImage.data();
     p.counterDataImageSize = counterDataImage.size();
-    CUPTI_API_CALL(cuptiPmSamplingDecodeData(&p));
-    return CUPTI_SUCCESS;
+    DecodeOutcome o;
+    o.result     = cuptiPmSamplingDecodeData(&p);
+    o.stopReason = p.decodeStopReason;
+    o.overflow   = p.overflow != 0;
+    return o;
 }
 
 void CuptiPmSampling::GetChipName(int deviceIndex, std::string& chipName) {

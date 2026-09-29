@@ -44,13 +44,127 @@ message GPUSample {
     repeated double values    = 3;
 }
 
-// Tracked process with a removal marker. After RemoveTrackedProcess()
-// is called, the next flush emits the PID with removed=true once,
-// then the PID is dropped from subsequent flushes.
+// One row of the trace's process table: a tracked process, with a
+// removal marker. Replayed in every flush while the process is tracked,
+// so each flush is self-contained.
+//
+// Removal: after RemoveTrackedProcess(), or once the probe sees the
+// process exit (every tracked PID — listed or discovered, with
+// descendant tracking on or off — is watched through a pidfd), the next
+// flush emits the entry with removed=true once, then the PID is dropped
+// from subsequent flushes. An exited process is never sampled again
+// under that entry; a later process that gets the same PID number is a
+// different process and appears as a new entry after this one is gone.
+//
+// Processes found by descendant tracking (ProcessDiscoveryConfig) carry
+// discovered=true; listed roots carry discovered=false. Together with
+// parent_pid this lets a reader rebuild the tree.
 message TrackedProcessV2 {
-    uint32 pid    = 1;
-    string alias  = 2;
-    bool   removed = 3;
+    uint32 pid        = 1;
+    // Display name. Roots: the alias they were listed with. Discovered:
+    // "<label>/<comm>", following comm (e.g. "vllm/python3.12" becomes
+    // "vllm/VLLM::EngineCor" when the process renames itself). A reader
+    // should take the alias of the latest flush, or use comm_history.
+    string alias      = 2;
+    bool   removed    = 3;
+    // The parent the process had when it was registered: for a
+    // discovered process, the tracked parent it was found under; for a
+    // listed root, its parent at the time it was listed (0 if it did not
+    // exist). Not updated on reparenting.
+    uint32 parent_pid = 4;
+    bool   discovered = 5;   // kind: true = found by descendant tracking, false = listed root
+    // System trace, every tracked process (the head): CPU time (ns,
+    // process CPU clock) the process had used before its first sample —
+    // from its fork until the first reading after it was registered.
+    // Recorded once, here, and never folded into a sample, so it cannot
+    // show up as a spike in the first interval; the samples count from
+    // registration. For a discovered process that is its CPU from fork
+    // to discovery; for a root started long before the trace, it is its
+    // entire CPU up to attach. A process tracked from its first sample
+    // to its exit accounts for cpu_before_tracking_ns + the samples +
+    // its CpuTail (system_metrics.proto; discovered processes only).
+    // (Named cpu_before_discovery_ns and set for discovered processes
+    // only until 2026-09-25.)
+    uint64 cpu_before_tracking_ns = 6;
+    // Roots: the alias they were listed with. Discovered: the alias of
+    // the root they descend from (alias = label + "/" + comm).
+    string label      = 7;
+    // Current /proc/<pid>/comm (at most 15 characters), re-read every
+    // 100 ms, so renames (prctl(PR_SET_NAME), exec) are followed.
+    string comm       = 8;
+    // When the process started: /proc/<pid>/stat field 22 on the trace
+    // clock (the samples' timestamp_ns clock). Kernel-recorded, but in
+    // USER_HZ ticks: 10 ms resolution. 0 = unknown.
+    uint64 start_time_ns = 9;
+    // With removed=true after the process exited: the first instant the
+    // probe saw it gone (trace clock). The exit happened at most one
+    // sampling tick earlier, and no sample of it is later than this.
+    // 0 while alive, and for a process removed by request.
+    uint64 end_time_ns   = 10;
+    // Every comm the process has had, oldest first, each with the trace
+    // time it was first seen (the first entry: at registration; later
+    // ones: within 100 ms of the rename). At most 16: the first and the
+    // 15 most recent.
+    repeated CommChange comm_history = 11;
+    // Disk trace, every tracked process (the I/O head; the analogue of
+    // cpu_before_tracking_ns): its /proc/<pid>/io counters at its first
+    // reading, the tick after registration — the I/O it did before its
+    // first sample (for a root started long before the trace, its whole
+    // I/O up to attach). Recorded once, never folded into a sample; the
+    // samples count from that reading, so a process's counters at any
+    // later reading equal io_before_tracking + its samples up to there
+    // (for an IoReapAdjustment child: last_seen). Unset if the process
+    // was never read (exited before its first reading, or unreadable).
+    IoCounters io_before_tracking = 12;
+    // A per-PID file of this process, while it was alive and not exiting,
+    // could not be read (another uid, not dumpable, hidepid, or another
+    // error; the probe warns once per process on stderr): the first
+    // instant (trace clock; 0 = never) and on how many ticks. Missing
+    // values are missing, not zero:
+    //   Disk trace, /proc/<pid>/io: no ProcessSample on those ticks.
+    //   System trace, /proc/<pid>/statm: its memory values are NaN in
+    //   those ProcessSamples (its CPU is still sampled).
+    // (Separately, not counted here: a sample read while the process was
+    // exiting — /proc/<pid>/statm reads RSS 0 once the kernel has torn
+    // its memory down — has NaN memory values too: that 0 is the exit,
+    // not the process's memory.)
+    // A process that is exiting is not counted: its /proc/<pid>/io is
+    // unreadable (EACCES) from the kernel's teardown of its memory until
+    // it is reaped, which is its exit, not a permission problem.
+    uint64 io_unreadable_since_ns  = 13;
+    uint32 io_unreadable_ticks     = 14;
+    uint64 mem_unreadable_since_ns = 15;
+    uint32 mem_unreadable_ticks    = 16;
+}
+
+// The five /proc/<pid>/io counters, in bytes.
+message IoCounters {
+    uint64 rchar                 = 1;
+    uint64 wchar                 = 2;
+    uint64 read_bytes            = 3;
+    uint64 write_bytes           = 4;
+    uint64 cancelled_write_bytes = 5;
+}
+
+message CommChange {
+    uint64 timestamp_ns = 1;
+    string comm         = 2;
+}
+
+// Descendant tracking's own cost, attached to every system/disk flush
+// while discovery runs. Counters and percentiles are cumulative since
+// the probe started, so the last flush of a run summarises all of it.
+// Percentiles come from a log-linear histogram (1/16-octave buckets,
+// <= 6.25% relative error); max is exact.
+message DiscoveryStats {
+    uint64 scan_interval_ns = 1;   // configured interval
+    uint64 scans            = 2;   // scans completed
+    uint64 scan_p50_ns      = 3;   // one scan's wall time, observer side
+    uint64 scan_p99_ns      = 4;
+    uint64 scan_max_ns      = 5;
+    uint64 discovered       = 6;   // processes registered by discovery
+    uint64 exited           = 7;   // discovered processes seen exiting
+    uint64 rejected         = 8;   // PID-reuse guard rejections
 }
 
 // GPU device-specific information. Includes peaks that are
@@ -95,4 +209,10 @@ message TraceHeader {
 message FlushStats {
     uint64 flush_byte_size       = 1;
     uint64 flush_interval_ns     = 2;
+    // How long that flush took, from draining the buffers to written.
+    uint64 flush_duration_ns     = 3;
+    // Flushes of this probe so far that took longer than the flush
+    // interval: writing was not keeping up and buffered data grew
+    // (also warned about on stderr, rate-limited; nothing is dropped).
+    uint64 slow_flushes          = 4;
 }

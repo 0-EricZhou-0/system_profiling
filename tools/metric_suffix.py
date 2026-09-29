@@ -64,12 +64,44 @@ def pretty_entity(entity: str) -> str:
     return ENTITY_PRETTY.get(entity.lower(), entity.upper())
 
 
-def pretty_counter(counter: str) -> str:
-    """`warps_active` -> `Active Warps`, `cycles_active` -> `Cycles Active`,
-    `read_throughput` -> `Read Throughput`. Best-effort; relies on
-    snake_case + a handful of word reorderings."""
+# Counters whose name means something else for a given entity: a
+# process's `cycles_active` is its on-CPU time (% of one core), not GPU
+# active cycles. Keyed by (entity, counter).
+ENTITY_COUNTER_PRETTY: dict[tuple[str, str], str] = {
+    ("proc", "cycles_active"): "CPU",
+}
+
+
+# Words written as acronyms wherever they appear in a counter name.
+ACRONYMS: dict[str, str] = {
+    "io": "IO", "rss": "RSS", "vms": "VMS", "cpu": "CPU", "gpu": "GPU", "sm": "SM",
+    "dram": "DRAM", "pcie": "PCIe", "nvlink": "NVLink", "l1": "L1", "l2": "L2",
+    "tlb": "TLB", "numa": "NUMA",
+}
+
+# Counters that are a kernel-exported record's fields, named after it:
+# `<prefix>_<field>`; the field keeps the kernel's own spelling
+# (`io_read_bytes` -> "IO read_bytes": /proc/<pid>/io's read_bytes).
+KERNEL_FIELD_PREFIXES: tuple[str, ...] = ("io",)
+
+
+def pretty_counter(counter: str, entity: str = "") -> str:
+    """`warps_active` -> `Active Warps`, `cycles_active` -> `Active Cycles`
+    (but `CPU` for entity `proc`), `read_throughput` -> `Read Throughput`.
+    Acronyms fully capitalised (ACRONYMS); a kernel field keeps its own
+    name after its record's prefix (KERNEL_FIELD_PREFIXES: `io_rchar` ->
+    `IO rchar`); an acronym followed only by `bytes` is the acronym
+    (`rss_bytes` -> `RSS`: the unit is on the axis)."""
     if not counter:
         return ""
+    special = ENTITY_COUNTER_PRETTY.get((entity.lower(), counter))
+    if special:
+        return special
+    head, _, rest = counter.partition("_")
+    if head in KERNEL_FIELD_PREFIXES and rest:
+        return f"{ACRONYMS.get(head, head)} {rest}"
+    if head in ACRONYMS and rest == "bytes":
+        return ACRONYMS[head]
     # Word reorderings for the most common counters where the natural
     # English order differs from the underscore order.
     REORDER = {
@@ -80,7 +112,7 @@ def pretty_counter(counter: str) -> str:
     }
     if counter in REORDER:
         return REORDER[counter]
-    return " ".join(word.capitalize() for word in counter.split("_"))
+    return " ".join(ACRONYMS.get(word, word.capitalize()) for word in counter.split("_"))
 
 
 # ---------------------------------------------------------------------------

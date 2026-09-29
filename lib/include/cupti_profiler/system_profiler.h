@@ -4,6 +4,8 @@
 #include <cupti_profiler/process_tracking_probe.h>
 #include <cupti_profiler/tracked_process.h>
 
+#include <cupti_profiler/defaults.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -25,15 +27,27 @@
 
 namespace cupti_profiler {
 
+// Where the sampler + flush threads live. LEGACY runs them in the
+// workload's address space (existing behavior); SIDECAR moves them
+// to an out-of-process cupti-profiler-sidecar so they don't inflate
+// the workload's per-PID CPU accounting. See
+// proto/profiler_config.proto :: SystemProbeMode for the wire enum.
+enum class SystemProbeMode {
+    Legacy  = 1,
+    Sidecar = 2,
+};
+
 struct CUPTI_PROFILER_API SystemProfilerConfig {
-    uint64_t samplingFrequencyHz = 100;             // 100 Hz
+    uint64_t samplingFrequencyHz = kDefaultSystemSamplingHz;   // 100 Hz
     // Processes to track per-process. Empty = system-wide only.
     // Each entry carries a PID and an optional display alias; visualizers
     // render labels as "<alias> (PID xxx)" when alias is non-empty,
     // otherwise plain "PID xxx".
     std::vector<TrackedProcess> Processes;
-    uint64_t flushIntervalMs = 5000;
+    // Periodic flush to outputFile. 0 = kDefaultFlushIntervalMs (5 s).
+    uint64_t flushIntervalMs = kDefaultFlushIntervalMs;
     std::string outputFile;
+    SystemProbeMode mode = SystemProbeMode::Legacy;
 };
 
 class CUPTI_PROFILER_API SystemProfiler : public ProcessTrackingProbe {
@@ -47,6 +61,11 @@ public:
 
     void Configure(const SystemProfilerConfig& config);
     void Start();
+
+    /// True between a Start() that succeeded and Stop(). Start() fails
+    /// (logged, returns with nothing running) when called before
+    /// Configure() or when the output file cannot be opened.
+    bool IsRunning() const;
 
     /// Signal sampling to stop (non-blocking). Call Stop() after to join and flush.
     void SignalStop();

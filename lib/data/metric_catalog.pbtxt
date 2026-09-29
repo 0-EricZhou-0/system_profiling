@@ -126,7 +126,7 @@ metrics {
   scope: SCOPE_PROCESS
   peak_expr: "ncpus_x_100"
   smoothable: true
-  description: "Per-PID on-CPU time as % of one core, aggregated across every thread of the process. Sum of /proc/<pid>/task/*/schedstat sum_exec_runtime deltas (ns) over actual wall-clock between ticks \342\200\224 nanosecond-precise, no CLK_TCK quantization. >100% means multi-core use; the panel peak_expr caps the axis at ncpus \303\227 100."
+  description: "Per-PID on-CPU time as % of one core, for the whole process. Delta of the process CPU clock (clock_getcpuclockid: sum_exec_runtime of every thread, including threads that exited between ticks) in ns over actual wall-clock between ticks. No CLK_TCK quantization; a thread that runs without being descheduled has its time folded in at each scheduler tick (CONFIG_HZ, 4 ms at 250 Hz), so one sample can be off by up to a tick per running thread, while the sum over samples stays exact. >100% means multi-core use; the panel peak_expr caps the axis at ncpus \303\227 100."
 }
 metrics {
   fqn: "proc__rss_bytes"
@@ -212,7 +212,7 @@ metrics {
   unit: UNIT_BYTES_PER_SEC
   scope: SCOPE_PROCESS
   smoothable: true
-  description: "Per-PID read bandwidth (syscall layer). /proc/<pid>/io rchar delta. INCLUDES page-cache hits \342\200\224 NOT physical-disk reads."
+  description: "Per-PID syscall-layer read rate: /proc/<pid>/io rchar delta over the actual interval. Bytes returned by read()-family calls (read, pread, readv, sendfile, ...) on ANY fd \342\200\224 files, pipes, sockets, ttys \342\200\224 whether they came from the page cache or from storage. Never counts mmap: pages touched through a mapping are invisible here. Own I/O only: when this process reaps a tracked child, the kernel adds the child\'s lifetime I/O to its counters, and the child\'s counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those."
 }
 metrics {
   fqn: "proc__io_wchar.sum.per_second"
@@ -224,5 +224,41 @@ metrics {
   unit: UNIT_BYTES_PER_SEC
   scope: SCOPE_PROCESS
   smoothable: true
-  description: "Per-PID write bandwidth (syscall layer). /proc/<pid>/io wchar delta. Bytes the process ASKED to write \342\200\224 flush to block layer may differ."
+  description: "Per-PID syscall-layer write rate: /proc/<pid>/io wchar delta over the actual interval. Bytes accepted by write()-family calls on ANY fd (files, pipes, sockets, ttys), counted at the call, not when (or whether) they reach storage. Never counts stores through an mmap. Own I/O only: when this process reaps a tracked child, the kernel adds the child\'s lifetime I/O to its counters, and the child\'s counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those."
+}
+metrics {
+  fqn: "proc__io_read_bytes.sum.per_second"
+  type: METRIC_TYPE_COUNTER
+  entity: "proc"
+  counter: "io_read_bytes"
+  rollup: "sum"
+  submetric: "per_second"
+  unit: UNIT_BYTES_PER_SEC
+  scope: SCOPE_PROCESS
+  smoothable: true
+  description: "Per-PID storage-layer read rate: /proc/<pid>/io read_bytes delta over the actual interval. Bytes this process caused to be fetched from storage \342\200\224 read() misses AND page faults on mmap\'d files that miss the page cache. Page-cache hits count 0, so a warm read or a warm mmap shows nothing. Own I/O only: when this process reaps a tracked child, the kernel adds the child\'s lifetime I/O to its counters, and the child\'s counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those."
+}
+metrics {
+  fqn: "proc__io_write_bytes.sum.per_second"
+  type: METRIC_TYPE_COUNTER
+  entity: "proc"
+  counter: "io_write_bytes"
+  rollup: "sum"
+  submetric: "per_second"
+  unit: UNIT_BYTES_PER_SEC
+  scope: SCOPE_PROCESS
+  smoothable: true
+  description: "Per-PID storage-layer write rate: /proc/<pid>/io write_bytes delta over the actual interval. Bytes of file pages this process DIRTIED in the page cache, counted when dirtied, not at writeback (which may happen much later, or never \342\200\224 see io_cancelled_write_bytes). Writes to pipes and sockets count 0. Own I/O only: when this process reaps a tracked child, the kernel adds the child\'s lifetime I/O to its counters, and the child\'s counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those."
+}
+metrics {
+  fqn: "proc__io_cancelled_write_bytes.sum.per_second"
+  type: METRIC_TYPE_COUNTER
+  entity: "proc"
+  counter: "io_cancelled_write_bytes"
+  rollup: "sum"
+  submetric: "per_second"
+  unit: UNIT_BYTES_PER_SEC
+  scope: SCOPE_PROCESS
+  smoothable: true
+  description: "Per-PID rate of dirtied-then-discarded bytes: /proc/<pid>/io cancelled_write_bytes delta over the actual interval. Pages counted in io_write_bytes that were thrown away before writeback (file truncated or deleted while dirty). Bytes that actually reached storage ~= io_write_bytes - io_cancelled_write_bytes. Own I/O only: when this process reaps a tracked child, the kernel adds the child\'s lifetime I/O to its counters, and the child\'s counters at its last reading are subtracted here; each such subtraction is an IoReapAdjustment in the disk trace, and the raw /proc/<pid>/io delta is this plus those."
 }

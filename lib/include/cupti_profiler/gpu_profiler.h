@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cupti_profiler/defaults.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -39,13 +41,26 @@ struct CUPTI_PROFILER_API ProfilerConfig {
     // device 0 only. All devices' samples are funneled into a single
     // GPUMetricsTrace stream tagged with `gpu_index`.
     std::vector<int> deviceIndices;
-    uint64_t samplingFrequencyHz = 10000;          // 10 kHz
+    uint64_t samplingFrequencyHz = kDefaultGpuSamplingHz;   // 100 Hz
     size_t hwBufferSize = 512 * 1024 * 1024;    // 512 MB
-    uint64_t maxSamples = 50000;
+    // Counter-data image capacity, in samples, for ONE decode pass (the
+    // image is re-initialized after every pass; ~16 KB of host RAM per
+    // slot with 4 metrics on H100). 0 = sized for the decode interval:
+    // ceil(samplingFrequencyHz x decodeIntervalMs / 1000 x 4) + 64: room
+    // for a pass that starts up to three intervals late.
+    // Smaller than one pass loses samples (CUPTI 13.3 returns invalid
+    // samples once the image fills); counted in GpuDecodeStats.
+    uint64_t maxSamples = 0;
     std::vector<std::string> metrics;
 
-    // Periodic flush. 0 = disabled (single write at end).
-    uint64_t flushIntervalMs = 10000;
+    // How often the host collects the samples the GPU buffered: one
+    // decode pass (cuptiPmSamplingDecodeData until the hardware buffer
+    // is drained, then metric evaluation) per interval. 0 = 1000 ms.
+    uint64_t decodeIntervalMs = kDefaultDecodeIntervalMs;
+
+    // Periodic flush to outputFile. 0 = kDefaultFlushIntervalMs (5 s).
+    // Must not be less than decodeIntervalMs.
+    uint64_t flushIntervalMs = kDefaultFlushIntervalMs;
 
     // Output file path. Empty = no file output.
     std::string outputFile;
@@ -72,6 +87,9 @@ public:
     /// Initialize the profiler. Must be called before Start().
     /// The caller must have active CUDA contexts on every index in
     /// config.deviceIndices (or on device 0 if the list is empty).
+    /// Throws std::invalid_argument, before touching the GPU, for an
+    /// inconsistent config: flushIntervalMs below
+    /// decodeIntervalMs.
     void Configure(const ProfilerConfig& config);
 
     /// Start PM sampling, background decode threads (one per device),

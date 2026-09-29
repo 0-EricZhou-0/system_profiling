@@ -24,7 +24,7 @@ GPU Workload (cuBLAS SGEMM + vectorAdd)
         ↓
 CUPTI PM Sampling @ 10 kHz (GPU HW ring buffer, 512 MB)
         ↓
-Background Decode Thread (drains every 5 ms)
+Background Decode Thread (drains once per decode interval, 1 s by default)
         ↓
 cuptiPmSamplingDecodeData() → raw counter samples
         ↓
@@ -62,7 +62,7 @@ cuptiPmSamplingCreateCounterDataImage();
 
 // 5. Sample loop
 cuptiPmSamplingStart();
-// ... decode thread calls cuptiPmSamplingDecodeData() every 5 ms ...
+// ... decode thread calls cuptiPmSamplingDecodeData() once per decode interval ...
 cuptiPmSamplingStop();
 
 // 6. Evaluate
@@ -91,10 +91,10 @@ CLI flags:
   -i, --interval <ns>       Sampling interval in ns   (default: 100,000 = 0.1 ms = 10 kHz)
   -o, --output <file>       Output protobuf file      (default: gpu_metrics.pb)
 
-Hardcoded:
-  Max samples:              50,000
+Library defaults (configurable, see docs/system-guide.md):
+  Max samples:              0 = sized for one decode pass (rate x interval x 4 + 64: a pass may start 3 intervals late)
   HW buffer size:           512 MB
-  Decode poll interval:     5 ms
+  Decode interval:          1000 ms (a hardcoded 5 ms until 2026-09-28)
   Trigger mode:             GPU_TIME_INTERVAL (requires Ampere+)
   Min compute capability:   7.5 (Turing+)
 ```
@@ -135,7 +135,7 @@ PM Sampling reads hardware performance counters at a fixed interval without repl
 - **Background decode thread** adds CPU overhead proportional to sampling frequency
 - **GPU-side cost** is the counter read itself, which is minimal at reasonable intervals
 
-The main risk is **hardware buffer overflow** if the decode thread cannot drain samples fast enough. This repo mitigates that with a 512 MB buffer and 5 ms polling.
+The main risk is **hardware buffer overflow** if the decode thread cannot drain samples fast enough. This repo checks at configuration that the 512 MB (default) buffer holds two decode intervals of samples, and counts and reports any overflow. The host-side cost is the decode itself: see [system-guide.md, GPU probe cost and placement](system-guide.md#gpu-probe-cost-and-placement) for measurements on a vLLM server (a fixed ~+0.2% decode / ~+1% prefill cost of PM sampling being enabled, the same at 100–1000 Hz).
 
 ```text ln:false
 Sampling interval vs. overhead tradeoff:
@@ -143,10 +143,14 @@ Sampling interval vs. overhead tradeoff:
   Interval       Frequency    Overhead estimate
   ─────────────  ───────────  ─────────────────
   1,000,000 ns   1 kHz        Negligible
-    100,000 ns   10 kHz       Low (this repo's default)
+  10,000,000 ns  100 Hz       Library default (same cost as 1 kHz, measured)
+    100,000 ns   10 kHz       Low
      10,000 ns   100 kHz      Moderate — watch for buffer pressure
       1,000 ns   1 MHz        High — likely buffer overflow
 ```
+
+> [!WARNING]
+> PM Sampling silences Activity-API kernel tracing (`CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL`) on H100 / CUPTI 12.8: the two cannot run in the same pass. See [CUPTI hardware findings](cupti-hardware-findings.md#1-pm-sampling-and-activity-api-kernel-tracing-cannot-run-concurrently).
 
 ### PC Sampling (moderate–high overhead)
 
@@ -184,6 +188,9 @@ Effective slowdown for full metric collection:
 
 > [!CAUTION]
 > Linaro Forge documentation warns that full metric collection "may have a significant impact on the target program, potentially resulting in orders of magnitude slowdown." Never enable this in production.
+
+> [!NOTE]
+> On Turing and newer the legacy Event/Metric API is gated off before its overhead is even the question — see [CUPTI hardware findings](cupti-hardware-findings.md#3-the-legacy-eventmetric-api-is-gated-off-on-turing-and-newer).
 
 ### Range Profiling API
 
@@ -257,7 +264,7 @@ This lets profiling tools **subtract CUPTI's own overhead** from reported timeli
 | Approach                          | Typical overhead | Best for                         |
 | --------------------------------- | ---------------- | -------------------------------- |
 | CUPTI Activity Tracing            | 2–5%             | Timeline / trace collection      |
-| CUPTI PM Sampling (this repo)     | Low at 10 kHz    | Continuous HW counter monitoring |
+| CUPTI PM Sampling (this repo)     | Low (100 Hz–1 kHz measured) | Continuous HW counter monitoring |
 | CUPTI PC Sampling (low rate)      | 1–5%             | Instruction-level hotspots       |
 | CUPTI PC Sampling (high rate)     | 2×–5× (Volta+)   | Detailed warp analysis           |
 | CUPTI Metric Collection (full)    | 10×–46×+          | Per-kernel deep analysis         |
@@ -296,7 +303,8 @@ Rule of thumb for PM Sampling interval:
   Goal                              Recommended interval
   ──────────────────────────────    ────────────────────
   Low-overhead monitoring           1,000,000 ns (1 kHz)
-  Balanced resolution/overhead      100,000 ns (10 kHz) ← this repo
+  Balanced resolution/overhead      100,000 ns (10 kHz)
+  This repo's default               10,000,000 ns (100 Hz)
   High-resolution analysis          10,000 ns (100 kHz)
   Maximum detail (short runs)       1,000 ns (1 MHz) — watch buffer overflow
 ```
@@ -310,7 +318,7 @@ Rule of thumb for PM Sampling interval:
 | PM Sampling over metric collection        | Avoids kernel serialization and replay                                       |
 | Single-pass enforcement                   | Eliminates multi-pass overhead entirely                                      |
 | `GPU_TIME_INTERVAL` trigger mode          | Stable frequency independent of workload, requires Ampere+                   |
-| 512 MB hardware buffer                    | Prevents overflow at 10 kHz sampling with decode thread polling every 5 ms   |
+| 512 MB hardware buffer                    | Holds over a minute of samples at 1 kHz; the host decodes once a second      |
 | Background decode thread                  | Decouples buffer draining from workload execution                            |
 | Event-based region timing                 | CUDA events + CUPTI reference clock avoids conflicts with active PM sampling |
 | Protobuf serialization                    | Compact binary format, language-neutral, handles 50k samples efficiently     |

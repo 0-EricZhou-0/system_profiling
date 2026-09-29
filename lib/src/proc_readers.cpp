@@ -1,11 +1,19 @@
 #include "proc_readers.h"
 
-#include <cctype>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
-#include <dirent.h>
+#include <ctime>
+#include <fcntl.h>
 #include <fstream>
+#include <poll.h>
 #include <sstream>
+#include <sys/syscall.h>
 #include <unistd.h>
+
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434   // same number on every architecture
+#endif
 
 namespace cupti_profiler {
 namespace internal {
@@ -26,35 +34,17 @@ CPUStatSnapshot ReadCPUStat() {
     return s;
 }
 
-PIDThreadCpuMap ReadPIDSchedStatPerThread(uint32_t pid) {
-    PIDThreadCpuMap m;
-    std::string taskDir = "/proc/" + std::to_string(pid) + "/task";
-    DIR* d = opendir(taskDir.c_str());
-    if (!d) return m;
-
-    // Each /proc/<pid>/task/<tid>/schedstat format
-    // (Documentation/scheduler/sched-stats.rst):
-    //   <sum_exec_runtime> <run_delay> <pcount>
-    // We only consume field 1 — the nanoseconds this thread has spent
-    // on a CPU. The two trailing fields (runqueue wait, schedule
-    // count) are gated by the kernel.sched_schedstats sysctl and not
-    // used by this profiler.
-    while (struct dirent* e = readdir(d)) {
-        const char* n = e->d_name;
-        if (!std::isdigit(static_cast<unsigned char>(n[0]))) continue;
-        uint32_t tid = static_cast<uint32_t>(std::strtoul(n, nullptr, 10));
-        if (tid == 0) continue;
-
-        std::string path = taskDir + "/" + n + "/schedstat";
-        std::ifstream f(path);
-        if (!f) continue;     // thread exited mid-walk
-        uint64_t ns = 0;
-        f >> ns;
-        if (!f) continue;
-        m.emplace(tid, ns);
-    }
-    closedir(d);
-    return m;
+std::optional<uint64_t> ReadPIDCpuTimeNs(uint32_t pid) {
+    // A process CPU clock covers the whole thread group, including
+    // threads that have already exited. Per-thread
+    // /proc/<pid>/task/*/schedstat would miss those, and
+    // /proc/<pid>/schedstat reports only the group leader.
+    clockid_t clk;
+    if (clock_getcpuclockid(static_cast<pid_t>(pid), &clk) != 0) return std::nullopt;
+    struct timespec ts;
+    if (clock_gettime(clk, &ts) != 0) return std::nullopt;
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull
+         + static_cast<uint64_t>(ts.tv_nsec);
 }
 
 MemInfoSnapshot ReadMemInfo() {
@@ -85,20 +75,137 @@ MemInfoSnapshot ReadMemInfo() {
     return s;
 }
 
-PIDStatmSnapshot ReadPIDStatm(uint32_t pid) {
-    PIDStatmSnapshot s;
-    std::string path = "/proc/" + std::to_string(pid) + "/statm";
-    std::ifstream f(path);
-    if (!f) return s;
-
+std::optional<PIDStatmSnapshot> ReadPIDStatm(uint32_t pid, int* err) {
+    errno = 0;
+    auto text = ReadSmallFile("/proc/" + std::to_string(pid) + "/statm");
+    if (!text) {
+        if (err) *err = errno ? errno : EIO;
+        return std::nullopt;
+    }
     // Format: size resident shared text lib data dt
-    f >> s.VMSPages >> s.RSSPages >> s.sharedPages;
+    PIDStatmSnapshot s;
+    std::istringstream f(*text);
+    if (!(f >> s.VMSPages >> s.RSSPages >> s.sharedPages)) {
+        if (err) *err = ENODATA;
+        return std::nullopt;
+    }
     return s;
+}
+
+bool IsExiting(uint32_t pid) {
+    constexpr uint64_t kPfExiting = 0x4;
+    auto st = ReadProcStat("/proc", pid);
+    return !st || st->state == 'Z' || st->state == 'X' || (st->flags & kPfExiting);
+}
+
+ReadFailure ClassifyReadFailure(uint32_t pid, int err) {
+    if (err == ENOENT || err == ESRCH) return ReadFailure::Gone;
+    if (IsExiting(pid)) return ReadFailure::Gone;
+    if (err == EACCES || err == EPERM) return ReadFailure::Unreadable;
+    return ReadFailure::Other;
+}
+
+std::optional<std::string> ReadSmallFile(const std::string& path) {
+    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return std::nullopt;
+    std::string out;
+    char buf[4096];
+    for (;;) {
+        ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) {                      // not a partial file: errno kept
+            int e = errno;
+            ::close(fd);
+            errno = e;
+            return std::nullopt;
+        }
+        if (n == 0) break;
+        out.append(buf, static_cast<size_t>(n));
+    }
+    ::close(fd);
+    return out;
+}
+
+std::optional<ProcStat> ReadProcStat(const std::string& procRoot, uint32_t pid) {
+    auto text = ReadSmallFile(procRoot + "/" + std::to_string(pid) + "/stat");
+    if (!text) return std::nullopt;
+    // "pid (comm) state ppid ..." — comm may itself contain spaces and
+    // parentheses, so split at the LAST ')'.
+    size_t open = text->find('(');
+    size_t close = text->rfind(')');
+    if (open == std::string::npos || close == std::string::npos || close < open)
+        return std::nullopt;
+    ProcStat st;
+    st.comm = text->substr(open + 1, close - open - 1);
+    std::istringstream rest(text->substr(close + 1));
+    std::string field;
+    // Fields after comm: index 0 = state (field 3), 1 = ppid (4), ...,
+    // 6 = flags (9), 13 = cutime (16), 14 = cstime (17), 19 = starttime (22).
+    for (int i = 0; i <= 19 && (rest >> field); ++i) {
+        if (i == 0) st.state = field.empty() ? '?' : field[0];
+        else if (i == 1) st.ppid = static_cast<uint32_t>(std::strtoul(field.c_str(), nullptr, 10));
+        else if (i == 6) st.flags = std::strtoull(field.c_str(), nullptr, 10);
+        else if (i == 13) st.cutime = std::strtoull(field.c_str(), nullptr, 10);
+        else if (i == 14) st.cstime = std::strtoull(field.c_str(), nullptr, 10);
+        else if (i == 19) st.startTime = std::strtoull(field.c_str(), nullptr, 10);
+    }
+    if (st.state == '?') return std::nullopt;   // truncated or malformed
+    return st;
+}
+
+std::string UnreadableWarning(const char* probeTag, const char* file, uint32_t pid,
+                              const std::string& comm, int err, ReadFailure kind) {
+    const bool io = std::string(file) == "io";
+    std::string m = std::string("[") + probeTag + "] Warning: cannot read /proc/" +
+                    std::to_string(pid) + "/" + file + " of " + (comm.empty() ? "process" : comm) +
+                    " (pid " + std::to_string(pid) + "): " + std::strerror(err);
+    if (kind == ReadFailure::Unreadable)
+        m += io ? " -- not readable by this process: it runs as another uid or is not dumpable "
+                  "(reading needs the same uid and a dumpable process, or CAP_SYS_PTRACE)"
+                : " -- /proc is mounted with hidepid, or the process is another uid's";
+    m += io ? ". Its I/O is missing from the trace (not zero) while this lasts: "
+              "io_unreadable_since_ns / io_unreadable_ticks in the process table."
+            : ". Its memory values are NaN (missing, not zero) while this lasts: "
+              "mem_unreadable_since_ns / mem_unreadable_ticks in the process table.";
+    m += " At most once a second per process while it lasts.";
+    return m;
+}
+
+int PidfdOpen(uint32_t pid) {
+    return static_cast<int>(::syscall(SYS_pidfd_open, static_cast<pid_t>(pid), 0));
+}
+
+bool PidfdExited(int pidfd) {
+    struct pollfd p{pidfd, POLLIN, 0};
+    int r;
+    do { r = ::poll(&p, 1, 0); } while (r < 0 && errno == EINTR);
+    return r > 0;
 }
 
 long GetPageSize() {
     static long ps = sysconf(_SC_PAGESIZE);
     return ps;
+}
+
+std::string ProcRoot() {
+    const char* env = std::getenv("CUPTI_PROFILER_PROC_ROOT");   // test-only
+    std::string root = (env && *env) ? env : "/proc";
+    while (root.size() > 1 && root.back() == '/') root.pop_back();
+    return root;
+}
+
+uint64_t BootTicksToSteadyNs(uint64_t ticks) {
+    if (ticks == 0) return 0;
+    // Field 22 counts from boot on CLOCK_BOOTTIME, which runs on through
+    // suspend; CLOCK_MONOTONIC does not. Shift by their current offset.
+    struct timespec boot{}, mono{};
+    ::clock_gettime(CLOCK_BOOTTIME, &boot);
+    ::clock_gettime(CLOCK_MONOTONIC, &mono);
+    const int64_t offset =
+        (static_cast<int64_t>(boot.tv_sec) - mono.tv_sec) * 1000000000LL +
+        (static_cast<int64_t>(boot.tv_nsec) - mono.tv_nsec);
+    const int64_t ns = static_cast<int64_t>(ticks) * (1000000000LL / GetCLKTCK()) - offset;
+    return ns > 0 ? static_cast<uint64_t>(ns) : 0;
 }
 
 long GetCLKTCK() {

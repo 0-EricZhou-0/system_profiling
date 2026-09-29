@@ -28,4 +28,53 @@ message GPUMetricsTrace {
     // Per-flush write accounting; carries the PREVIOUS flush's stats
     // (the current flush's byte size is unknowable before write).
     repeated FlushStats flush_stats              = 5;
+
+    // Decode health per device, cumulative since Start(); on every
+    // flush, so the last message has the run's totals.
+    repeated GpuDecodeStats decode_stats         = 6;
+}
+
+// How well the host kept up with one device's PM sampler. A clean run
+// has samples_lost, invalid_samples, counter_data_full and
+// hw_buffer_overflows all 0. Anything else is also reported on stderr
+// ("[cupti-profiler] warning: GPU <n> ...").
+message GpuDecodeStats {
+    uint32 gpu_index           = 1;
+    // cuptiPmSamplingDecodeData calls.
+    uint64 decode_calls        = 2;
+    // Samples decoded and kept (the ones in `samples`).
+    uint64 samples             = 3;
+    // Samples missing between two kept ones, from the gap between one
+    // sample's end and the next one's start (consecutive samples are
+    // contiguous), in sampling intervals.
+    uint64 samples_lost        = 4;
+    // Samples CUPTI returned without timestamps (or not after the
+    // previous one); dropped. CUPTI 13.3 returns such samples after a
+    // decode that filled the counter-data image.
+    uint64 invalid_samples     = 5;
+    // Decodes that stopped because the counter-data image was full (the
+    // decode thread fell behind, or max_samples is too small). The samples
+    // beyond the image are lost (in samples_lost / invalid_samples); later
+    // passes are clean again.
+    uint64 counter_data_full   = 6;
+    // Decodes that reported a hardware-buffer overflow. CUPTI then returns
+    // nothing more until the sampler is re-enabled, which the probe does
+    // (sampler_restarts); the samples in between are in samples_lost.
+    uint64 hw_buffer_overflows = 7;
+    // Zero-length samples (start == end, a real time) CUPTI returned;
+    // dropped. CUPTI 13.3 returns one or two, stamped at the start of
+    // sampling, in the last decode after sampling stops. Not a loss.
+    uint64 empty_samples       = 8;
+    // Times the PM sampler was disabled and enabled again after a
+    // hardware-buffer overflow.
+    uint64 sampler_restarts    = 9;
+    // Samples longer than 1.5 sampling intervals; dropped. CUPTI's first
+    // sample after a start covers the time since sampling began (~0.3 s:
+    // one per run), and after a re-enable the whole gap (its samples are
+    // in samples_lost).
+    uint64 stretched_samples   = 10;
+    // Decode passes that started so late that the samples waiting filled
+    // more than 3/4 of a counter-data image: the decode thread is falling
+    // behind (warned about before an image overflows).
+    uint64 late_passes         = 11;
 }

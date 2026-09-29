@@ -7,6 +7,8 @@ and produces a tall, multi-panel PNG. Layout (top to bottom):
   - Event strip   : instantaneous markers from events.pb
   - Region strip  : named time intervals from events.pb, with shaded
                     overlays mirrored on every metric panel below
+  - Process timeline: one bar per tracked process, lane packed, with
+                    fork links (process_timeline.py)
   - GPU panels    : every layout entry whose FQNs were emitted by the
                     GPU probe
   - System panels : CPU + memory + per-PID CPU/RSS
@@ -55,6 +57,11 @@ import events_pb2  # noqa: E402
 import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 import metric_suffix  # noqa: E402
+import panel_legend  # noqa: E402
+import units  # noqa: E402
+import write_rate  # noqa: E402
+import process_timeline  # noqa: E402
+import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 
 
@@ -65,12 +72,18 @@ from metric_projector import TraceProjector  # noqa: E402
 PANEL_HEIGHT_METRIC = 1.7   # any metric panel
 PANEL_HEIGHT_EVENT  = 0.25  # event timeline strip
 PANEL_HEIGHT_REGION = 0.10  # region timeline strip
-PANEL_HEIGHT_FOOTER = 0.7   # write-rate text footer
+# Process timeline: one lane per process alive at the busiest instant.
+PROCESS_LANE_HEIGHT = 0.16  # inches per lane
+PROCESS_BAR_FILL    = 0.78  # bar height, fraction of a lane
+PROCESS_LABEL_FONTSIZE = 6.5
+TIMELINE_LABEL_PAD_PT = 8.0  # between outside labels, and a label's margin inside its bar
+PANEL_HEIGHT_FOOTER = 0.9   # write-rate table footer (title, header, probes, Total)
 
 SPACING_PANEL        = 0.55   # within a section
 SPACING_SECTION      = 0.90   # between sections (dashed sep at midpoint)
 SPACING_EVENT_REGION = 1.85   # event strip -> region strip
 SPACING_AFTER_REGION = 1.45   # region strip -> first metric panel
+SPACING_REGION_TIMELINE = 0.95  # region strip -> process timeline (title + duration labels)
 SPACING_TITLE        = 0.95   # title baseline above first strip
 
 FIG_WIDTH         = 21.0
@@ -86,7 +99,9 @@ YLABEL_FONTSIZE    = 11
 # unconditionally so every panel with a peak uses the same headroom
 # fraction (panel-level `y_max` overrides are ignored for these).
 YLIM_HEADROOM      = 1.10
-# Bold "Max: …" label rendered at the peak height. X is in axes
+# Bold "Peak: …" label rendered at the peak height: the panel's ceiling
+# (catalog / layout peak, e.g. 100 % or the GPU's peak bandwidth), not
+# the data's maximum. X is in axes
 # fraction (just inside the y-axis); Y is in data coordinates.
 MAX_LABEL_X_AXES_FRAC = 0.005
 
@@ -237,8 +252,9 @@ def _decimate_to_hz(ts_ns: np.ndarray, vals: np.ndarray,
 # Unit formatting
 # ---------------------------------------------------------------------------
 
-def _format_unit_axis(unit: int, peak_hint: float | None):
-    """Return (scale_fn, ylabel)."""
+def _format_unit_axis(unit: int, data_max: float | None):
+    """Return (scale_fn, ylabel). Bytes and bytes/s: the unit from the
+    largest value plotted on the axis (units.byte_unit: 2x thresholds)."""
     if unit in (mc_pb.UNIT_PCT, mc_pb.UNIT_PCT_OF_CORE):
         return (lambda v: v, "%")
     if unit == mc_pb.UNIT_RATIO:
@@ -247,17 +263,9 @@ def _format_unit_axis(unit: int, peak_hint: float | None):
         return (lambda v: v, "requests in-flight")
     if unit == mc_pb.UNIT_HZ:
         return (lambda v: v / 1e6, "MHz")
-    if unit == mc_pb.UNIT_BYTES:
-        ref = peak_hint if (peak_hint and peak_hint > 0) else 1024.0 ** 3
-        if ref >= 1024.0 ** 3:
-            return (lambda v: v / (1024.0 ** 3), "GiB")
-        if ref >= 1024.0 ** 2:
-            return (lambda v: v / (1024.0 ** 2), "MiB")
-        return (lambda v: v / 1024.0, "KiB")
-    if unit == mc_pb.UNIT_BYTES_PER_SEC:
-        if peak_hint is not None and peak_hint >= 1024.0 ** 3:
-            return (lambda v: v / (1024.0 ** 3), "GiB/s")
-        return (lambda v: v / (1024.0 ** 2), "MiB/s")
+    if unit in (mc_pb.UNIT_BYTES, mc_pb.UNIT_BYTES_PER_SEC):
+        div, label = units.byte_unit(data_max, rate=unit == mc_pb.UNIT_BYTES_PER_SEC)
+        return (lambda v: v / div, label)
     return (lambda v: v, "")
 
 
@@ -287,38 +295,6 @@ def _resolve_panel_peak(panel, descriptor, projector: TraceProjector) -> float |
 # ---------------------------------------------------------------------------
 # Series labels
 # ---------------------------------------------------------------------------
-
-def _series_label(series: metric_layout.ResolvedSeries,
-                  projector: TraceProjector,
-                  base: str | None = None) -> str:
-    """Compact legend label (panel title already carries the entity +
-    suffix). The long form lives in `<output>.legend.txt`.
-
-    `base` overrides `series.label_short`; pass the disambiguated
-    label from `metric_layout.disambiguate_short_labels` when rendering
-    multiple series in one panel so colliding entries (e.g. avg/max
-    rollups) stay distinguishable."""
-    if base is None:
-        base = series.label_short
-    key = series.scope_key
-    if series.scope == mc_pb.SCOPE_SYSTEM:
-        return base
-    if series.scope == mc_pb.SCOPE_PROCESS:
-        tp = projector.tracked_processes.get(int(key))
-        if tp and tp.alias:
-            return f"{base}  [{tp.alias} (PID {key})]"
-        return f"{base}  [PID {key}]"
-    if series.scope == mc_pb.SCOPE_DEVICE:
-        return f"{base}  [{key}]"
-    if series.scope == mc_pb.SCOPE_GPU:
-        # Single-GPU runs need no scope-key suffix — the panel title
-        # carries the entity + suffix. With multiple GPUs, label by
-        # index only; the device-name string just inflates the legend.
-        if len(projector.gpu_info) <= 1:
-            return base
-        return f"{base}  [GPU {key}]"
-    return base
-
 
 # ---------------------------------------------------------------------------
 # Aggregation helpers
@@ -357,22 +333,179 @@ def _trapz_cumulative(ts_ns: np.ndarray, vals: np.ndarray) -> np.ndarray:
 # Panel rendering
 # ---------------------------------------------------------------------------
 
-_COLOR_CYCLE = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+# Series line widths (the grey "+k more" ones thinner).
+SERIES_LINEWIDTH = 0.63
+OTHER_LINEWIDTH  = 0.42
+
+# panel_legend's line style index -> matplotlib linestyle.
+_METRIC_LINESTYLES = ["-", "--", ":", "-."]
+
+# Legends sit above their panel, outside the axes, in as many columns
+# as the widest entry allows; the panel title sits above the legend.
+# Which entries are listed: panel_legend (at most LEGEND_MAX_ENTRIES,
+# the rest drawn grey and counted in a "+k more" entry).
+LEGEND_FONTSIZE    = 7
+LEGEND_HANDLE_EM   = 2.0    # handle length
+LEGEND_TEXTPAD_EM  = 0.6    # handle -> text
+LEGEND_COLSPACE_EM = 1.5    # between columns
+LEGEND_ROWSPACE_EM = 0.3    # between rows
+LEGEND_BORDER_EM   = 0.4    # legend box padding (a light frame, as in v0.0.1)
+LEGEND_AXESPAD_EM  = 0.3    # legend bottom -> axes top
+LEGEND_TITLE_GAP_PT = 3.0   # legend top -> title baseline
+
+
+def _integrated_axis(panel, series_list, projection):
+    """The cumulative companion's per-series run totals (full-resolution
+    trapezoid integral) and its axis formatter: (cums, scale_fn, ylabel),
+    cums keyed by (fqn, scope_key), series without samples left out."""
+    source_unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
+        else series_list[0].descriptor.unit
+    integrated_unit = _INTEGRATED_UNIT.get(source_unit, mc_pb.UNIT_UNSPECIFIED)
+    cums = {}
+    max_total = 0.0
+    for s in series_list:
+        ts_ns, vals = projection[(s.fqn, s.scope_key)]
+        if ts_ns.size == 0:
+            continue
+        cum = _trapz_cumulative(ts_ns, vals.astype(np.float64))
+        cums[(s.fqn, s.scope_key)] = (ts_ns, cum)
+        if cum.size and cum[-1] > max_total:
+            max_total = float(cum[-1])
+    scale_fn, ylabel = _format_unit_axis(integrated_unit, max_total)
+    return cums, scale_fn, ylabel
+
+
+class _LegendPlan:
+    """Colours, line styles and legend entries of one panel, decided
+    before the figure is laid out so each panel's legend height can be
+    reserved above it.
+
+    styles:  (fqn, scope_key) -> (color, linestyle, listed); series not
+             listed in the legend are drawn in panel_legend.OTHER_COLOR.
+    entries: [(label, color, linestyle)] in legend order.
+    """
+
+    def __init__(self, p: panel_legend.Plan, avail_width_pt: float):
+        self.source = p
+        self.styles = {k: (c, _METRIC_LINESTYLES[st], listed)
+                       for k, (c, st, listed) in p.styles.items()}
+        self.zorder = {k: 2 + i / 1000 for i, k in enumerate(p.order)}
+        self.entries = [(lab, c, _METRIC_LINESTYLES[st]) for lab, c, st, _keys in p.entries]
+        # The line-style key (black entries) on a row of its own, first;
+        # the processes on the rows under it. matplotlib fills a legend
+        # column by column, so each column gets its key entry (or a blank)
+        # on top and its share of the rest under it.
+        key = [e for e in self.entries if e[1] == panel_legend.METRIC_COLOR]
+        rest = [e for e in self.entries if e[1] != panel_legend.METRIC_COLOR]
+        self.ncol, self.nrows = _legend_grid([e[0] for e in (rest or key)], avail_width_pt)
+        self.grid = self.entries
+        if key and rest:
+            self.ncol = max(self.ncol, len(key))
+            per_col = -(-len(rest) // self.ncol)
+            self.grid = []
+            for c in range(self.ncol):
+                column = rest[c * per_col:(c + 1) * per_col]
+                self.grid += [key[c] if c < len(key) else None] + column + [None] * (per_col - len(column))
+            self.nrows = per_col + 1
+
+    @property
+    def height_pt(self) -> float:
+        """Height the legend takes above the axes, up to the title."""
+        if not self.entries:
+            return 0.0
+        fs = LEGEND_FONTSIZE
+        row = 1.25 * fs
+        return (self.nrows * row + (self.nrows - 1) * LEGEND_ROWSPACE_EM * fs
+                + 2 * LEGEND_BORDER_EM * fs + LEGEND_AXESPAD_EM * fs
+                + LEGEND_TITLE_GAP_PT)
+
+
+_TEXT_TO_PATH = None
+
+
+def _text_width_pt(text: str, fontsize: float) -> float:
+    global _TEXT_TO_PATH
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.textpath import TextToPath
+    if _TEXT_TO_PATH is None:
+        _TEXT_TO_PATH = TextToPath()
+    w, _h, _d = _TEXT_TO_PATH.get_text_width_height_descent(
+        text, FontProperties(size=fontsize), ismath=False)
+    return w
+
+
+def _legend_grid(labels: list[str], avail_width_pt: float) -> tuple[int, int]:
+    """(ncol, nrows) for a legend of `labels` spanning `avail_width_pt`:
+    as many equal columns as the widest entry allows."""
+    if not labels:
+        return 1, 0
+    fs = LEGEND_FONTSIZE
+    widest = max(_text_width_pt(lab, fs) for lab in labels)
+    entry = (LEGEND_HANDLE_EM + LEGEND_TEXTPAD_EM) * fs + widest
+    col = entry + LEGEND_COLSPACE_EM * fs
+    ncol = max(1, min(len(labels), int((avail_width_pt + LEGEND_COLSPACE_EM * fs) // col)))
+    return ncol, -(-len(labels) // ncol)
+
+
+def _plan_legend(panel, series_list: list[metric_layout.ResolvedSeries], kind: str,
+                 projector: TraceProjector, projection: dict,
+                 pid_color_map: dict[int, str], avail_width_pt: float,
+                 metric_colors: dict | None = None) -> _LegendPlan:
+    """Colours and legend entries of one panel (panel_legend.plan); a
+    cumulative companion's are ranked by run total."""
+    if kind == "integrated":
+        cums, _scale_fn, _ylabel = _integrated_axis(panel, series_list, projection)
+        p = panel_legend.plan(series_list, projector, projection, pid_color_map,
+                              totals={k: float(c[-1]) if c.size else 0.0
+                                      for k, (_t, c) in cums.items()},
+                              metric_colors=metric_colors)
+    else:
+        p = panel_legend.plan(series_list, projector, projection, pid_color_map,
+                              metric_colors=metric_colors)
+    return _LegendPlan(p, avail_width_pt)
+
+
+def _draw_legend(ax, plan: _LegendPlan) -> None:
+    """The plan's legend, above the axes (outside them), left-aligned."""
+    if not plan.entries:
+        return
+    from matplotlib.lines import Line2D
+    handles = [Line2D([], [], color=e[1], linestyle=e[2],
+                      lw=1.0 if e[1] == panel_legend.METRIC_COLOR else 1.5, label=e[0])
+               if e else Line2D([], [], alpha=0.0, label="")          # a blank cell
+               for e in plan.grid]
+    fs = LEGEND_FONTSIZE
+    ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
+              ncol=plan.ncol, fontsize=fs, frameon=True, framealpha=0.9,
+              edgecolor="#cccccc",
+              borderaxespad=LEGEND_AXESPAD_EM, borderpad=LEGEND_BORDER_EM,
+              handlelength=LEGEND_HANDLE_EM, handletextpad=LEGEND_TEXTPAD_EM,
+              columnspacing=LEGEND_COLSPACE_EM, labelspacing=LEGEND_ROWSPACE_EM)
+
+
+def _axes_width_pt(ax) -> float:
+    return ax.get_position().width * ax.figure.get_figwidth() * 72.0
+
+
+def _plot_styled(ax, time_s, y, key, plan: _LegendPlan) -> None:
+    color, ls, listed = plan.styles[key]
+    if listed:
+        line, = ax.plot(time_s, y, color=color, linewidth=SERIES_LINEWIDTH, linestyle=ls,
+                        zorder=plan.zorder[key])
+    else:
+        line, = ax.plot(time_s, y, color=panel_legend.OTHER_COLOR, linewidth=OTHER_LINEWIDTH,
+                        linestyle=ls, zorder=1)
+    line._series_key = key
 
 
 def _panel_title(panel, series_list: list[metric_layout.ResolvedSeries]) -> str:
-    """Use the pbtxt-supplied title verbatim if set; otherwise derive
-    one from the first resolved series. Falls through to the
-    descriptor's `description` (catalog-declared) before consulting
-    `metric_suffix.label_for(...)` (suffix-table derivation)."""
+    """The layout's title if it gives one; otherwise what the panel's
+    series share (metric_layout.shared_title)."""
     if panel.title:
         return panel.title
     if not series_list:
         return panel.series_glob
-    d = series_list[0].descriptor
-    if d.description:
-        return d.description
-    return metric_suffix.label_for(d.entity, d.counter, d.rollup, d.submetric)
+    return metric_layout.shared_title(series_list)
 
 
 def _render_metric_panel(
@@ -386,28 +519,24 @@ def _render_metric_panel(
     t0_ns: int,
     pid_color_map: dict[int, str],
     display_hz: float = 0.0,
+    plan: _LegendPlan | None = None,
+    fit_to_data: bool = False,
+    exit_lines: bool = True,
 ) -> None:
-    ax.set_title(_panel_title(panel, series_list), fontsize=10, loc="left")
+    if plan is None:
+        plan = _plan_legend(panel, series_list, "metric", projector, projection,
+                            pid_color_map, _axes_width_pt(ax))
+    ax.set_title(_panel_title(panel, series_list), fontsize=10, loc="left",
+                 pad=plan.height_pt or None)
     ax.grid(True, alpha=0.3)
 
     unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
         else series_list[0].descriptor.unit
     peak_hint = _resolve_panel_peak(panel, series_list[0].descriptor, projector)
-    scale_fn, ylabel = _format_unit_axis(unit, peak_hint)
-    ax.set_ylabel(ylabel)
-
-    label_bases = metric_layout.disambiguate_short_labels(series_list)
-
-    color_idx = 0
+    plotted = []
     for series in series_list:
-        if (series.scope == mc_pb.SCOPE_PROCESS
-                and int(series.scope_key) in pid_color_map):
-            color = pid_color_map[int(series.scope_key)]
-        else:
-            color = _COLOR_CYCLE[color_idx % len(_COLOR_CYCLE)]
-            color_idx += 1
-
-        ts_ns, vals = projection[(series.fqn, series.scope_key)]
+        key = (series.fqn, series.scope_key)
+        ts_ns, vals = projection[key]
         if ts_ns.size == 0:
             continue
 
@@ -419,26 +548,41 @@ def _render_metric_panel(
         # filter so stride-based decimation doesn't fold high-frequency
         # content back into the visible band.
         ts_ns, vals = _decimate_to_hz(ts_ns, vals, sample_freq_hz, display_hz)
+        plotted.append((key, ts_ns, vals))
 
+    # The unit from what is plotted (not the ceiling).
+    scale_fn, ylabel = _format_unit_axis(unit, units.largest(v for _k, _t, v in plotted))
+    ax.set_ylabel(ylabel)
+    for key, ts_ns, vals in plotted:
         time_s = (ts_ns.astype(np.int64) - t0_ns) / 1e9
-        ax.plot(time_s, scale_fn(vals),
-                color=color, linewidth=0.9,
-                label=_series_label(series, projector,
-                                    base=label_bases[(series.fqn, series.scope_key)]))
+        _plot_styled(ax, time_s, scale_fn(vals), key, plan)
+    if exit_lines and panel_legend.wants_end_lines("metric", unit):
+        _draw_end_lines(ax, series_list, {k: (t, v) for k, t, v in plotted}, projector,
+                        plan, t0_ns, scale_fn)
 
     peak_scaled = None
-    if peak_hint is not None and peak_hint > 0:
+    data_max = units.largest(v for _k, _t, v in plotted)
+    if fit_to_data and units.off_scale(peak_hint, data_max):
+        # --fit-axis-to-data: the axis fits the data; the ceiling, far
+        # above it, is written instead of drawn.
+        unit_str = f" {ylabel}" if ylabel else ""
+        ax.text(MAX_LABEL_X_AXES_FRAC, 0.97,
+                f"Peak: {_fmt_plain(scale_fn(peak_hint))}{unit_str} (off-scale)",
+                transform=ax.transAxes, va="top", ha="left",
+                fontsize=8, color="black", fontweight="bold", zorder=5)
+        ax.set_ylim(0.0, max(scale_fn(data_max), 1e-12) * YLIM_HEADROOM)
+    elif peak_hint is not None and peak_hint > 0:
         peak_scaled = scale_fn(peak_hint)
-        # Dotted black horizontal reference line at the peak.
+        # Dotted black horizontal reference line at the peak (ceiling).
         ax.axhline(peak_scaled, color="black", linestyle=":",
                    linewidth=1.4, alpha=0.7)
-        # Bold black "Max: …" label near the y-axis at peak height
+        # Bold black "Peak: …" label near the y-axis at peak height
         # (data y, axes-fraction x). Plain numeric formatter so very
         # large peaks (e.g. ncpus_x_100 = 12800, peak DRAM in MiB/s)
         # don't end up as `1.28e+04`.
         unit_str = f" {ylabel}" if ylabel else ""
         ax.text(MAX_LABEL_X_AXES_FRAC, peak_scaled,
-                f"Max: {_fmt_plain(peak_scaled)}{unit_str}",
+                f"Peak: {_fmt_plain(peak_scaled)}{unit_str}",
                 transform=ax.get_yaxis_transform(),
                 va="bottom", ha="left",
                 fontsize=8, color="black", fontweight="bold",
@@ -449,7 +593,7 @@ def _render_metric_panel(
     # peak-bearing panel). No peak -> let matplotlib pick the top.
     if peak_scaled is not None:
         ax.set_ylim(0.0, peak_scaled * YLIM_HEADROOM)
-    else:
+    elif not (fit_to_data and units.off_scale(peak_hint, data_max)):
         ax.set_ylim(bottom=0.0)
 
     # Plain (non-scientific) numeric tick labels on both axes.
@@ -458,9 +602,21 @@ def _render_metric_panel(
         fmt.set_scientific(False)
         axis.set_major_formatter(fmt)
 
-    ax.legend(loc="upper right", fontsize=7, framealpha=0.85)
+    _draw_legend(ax, plan)
     ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
+
+
+def _draw_end_lines(ax, series_list, plotted: dict, projector, plan, t0_ns: int,
+                    scale_fn) -> None:
+    """Each exited process's end: dashed, black, 0 -> its series' last
+    value (panel_legend.end_lines)."""
+    for key, t_ns, v in panel_legend.end_lines(series_list, plotted, projector, plan.source):
+        x = (t_ns - t0_ns) / 1e9
+        line, = ax.plot([x, x], [0.0, scale_fn(v)], color=panel_legend.END_LINE_COLOR,
+                        linestyle="--", linewidth=SERIES_LINEWIDTH,
+                        zorder=plan.zorder.get(key, 1) + 0.5)
+        line._end_line = key
 
 
 def _render_integrated_panel(
@@ -473,85 +629,43 @@ def _render_integrated_panel(
     pid_color_map: dict[int, str],
     sample_freq_hz: float = 0.0,
     display_hz: float = 0.0,
+    plan: _LegendPlan | None = None,
+    exit_lines: bool = True,
 ) -> None:
     """Companion to _render_metric_panel — plots ∫ y dt of each series.
 
     Uses the panel's source unit (descriptor.unit, possibly overridden
     by panel.unit_override) and looks up the integrated unit in
     _INTEGRATED_UNIT. If the source unit isn't integrable, the panel
-    falls back to UNIT_UNSPECIFIED (no axis label, auto-scale).
+    falls back to UNIT_UNSPECIFIED (no axis label, auto-scale). The
+    legend ranks the series by run total (full-resolution series) and
+    names them only.
     """
-    source_unit = panel.unit_override if panel.unit_override != mc_pb.UNIT_UNSPECIFIED \
-        else series_list[0].descriptor.unit
-    integrated_unit = _INTEGRATED_UNIT.get(source_unit, mc_pb.UNIT_UNSPECIFIED)
+    if plan is None:
+        plan = _plan_legend(panel, series_list, "integrated", projector, projection,
+                            pid_color_map, _axes_width_pt(ax))
     title = _panel_title(panel, series_list) + "  (cumulative)"
-    ax.set_title(title, fontsize=10, loc="left")
+    ax.set_title(title, fontsize=10, loc="left", pad=plan.height_pt or None)
     ax.grid(True, alpha=0.3)
 
-    # First-pass max to size the byte-unit axis (KiB / MiB / GiB).
-    # Compute the cumulative arrays once, stash, plot.
-    max_total = 0.0
-    series_cumulatives: list[tuple[metric_layout.ResolvedSeries, np.ndarray, np.ndarray]] = []
-    for series in series_list:
-        ts_ns, vals = projection[(series.fqn, series.scope_key)]
-        if ts_ns.size == 0:
-            continue
-        cum = _trapz_cumulative(ts_ns, vals.astype(np.float64))
-        series_cumulatives.append((series, ts_ns, cum))
-        if cum.size and cum[-1] > max_total:
-            max_total = float(cum[-1])
-
-    scale_fn, ylabel = _format_unit_axis(integrated_unit,
-                                          peak_hint=max_total if max_total > 0 else None)
+    cums, scale_fn, ylabel = _integrated_axis(panel, series_list, projection)
     ax.set_ylabel(ylabel)
 
-    label_bases = metric_layout.disambiguate_short_labels(series_list)
-
-    color_idx = 0
-    for series, ts_ns, cum in series_cumulatives:
-        if (series.scope == mc_pb.SCOPE_PROCESS
-                and int(series.scope_key) in pid_color_map):
-            color = pid_color_map[int(series.scope_key)]
-        else:
-            color = _COLOR_CYCLE[color_idx % len(_COLOR_CYCLE)]
-            color_idx += 1
-        # Decimate the cumulative curve for display; the run-total
-        # annotation below uses cum[-1] which is computed from the
-        # full-resolution series, so the total stays faithful.
-        ts_plot, cum_plot = _decimate_to_hz(ts_ns, cum,
-                                            sample_freq_hz, display_hz)
+    for key, (ts_ns, cum) in cums.items():
+        # Decimate the cumulative curve for display; the legend ranks
+        # by cum[-1] of the full-resolution series.
+        ts_plot, cum_plot = _decimate_to_hz(ts_ns, cum, sample_freq_hz, display_hz)
         time_s = (ts_plot.astype(np.int64) - t0_ns) / 1e9
-        ax.plot(time_s, scale_fn(cum_plot),
-                color=color, linewidth=0.9,
-                label=_series_label(series, projector,
-                                    base=label_bases[(series.fqn, series.scope_key)]))
-
-    # Annotate each series' run total at the right edge so the
-    # cumulative value is readable without squinting at the axis.
-    if series_cumulatives:
-        total_label_lines = []
-        for series, _ts, cum in series_cumulatives:
-            if cum.size == 0:
-                continue
-            total_label_lines.append(
-                f"{_series_label(series, projector, base=label_bases[(series.fqn, series.scope_key)])} = "
-                f"{_fmt_plain(scale_fn(float(cum[-1])))}"
-                f"{(' ' + ylabel) if ylabel else ''}"
-            )
-        if total_label_lines:
-            ax.text(0.99, 0.04, "\n".join(total_label_lines),
-                    transform=ax.transAxes, ha="right", va="bottom",
-                    fontsize=7, color="black",
-                    bbox=dict(facecolor="white", alpha=0.75,
-                              edgecolor="#cccccc", linewidth=0.5,
-                              boxstyle="round,pad=0.25"))
+        _plot_styled(ax, time_s, scale_fn(cum_plot), key, plan)
+    if exit_lines and panel_legend.wants_end_lines("integrated", mc_pb.UNIT_UNSPECIFIED):
+        _draw_end_lines(ax, series_list, cums, projector, plan, t0_ns, scale_fn)
 
     ax.set_ylim(bottom=0.0)
     for axis in (ax.xaxis, ax.yaxis):
         fmt = ticker.ScalarFormatter(useOffset=False, useMathText=False)
         fmt.set_scientific(False)
         axis.set_major_formatter(fmt)
-    ax.legend(loc="upper left", fontsize=7, framealpha=0.85)
+    _draw_legend(ax, plan)
     ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
     ax.xaxis.set_minor_locator(ticker.AutoMinorLocator(2))
 
@@ -566,7 +680,7 @@ def _fmt_dur(s: float) -> str:
 
 def _fmt_plain(v: float) -> str:
     """Plain (non-scientific) numeric formatter — used for the bold
-    `Max: …` labels and any other axis-anchored numeric text. Avoids
+    `Peak: …` labels and any other axis-anchored numeric text. Avoids
     `1.2e+04` style output regardless of magnitude."""
     if v == int(v):
         return f"{int(v):,}"
@@ -611,12 +725,10 @@ def _spread_rotated_label_groups(ax, groups, renderer,
     the group's members, so name + 2-line time stay vertically
     aligned regardless of which one is wider.
 
-    Algorithm: sort groups by current bbox center. Right half walks
-    left-to-right, pushing rightward when a group's left edge would
-    cross the previous group's right edge plus padding. Left half
-    walks right-to-left, pushing leftward by the same rule. Both
-    halves use a soft clamp at the strip's axis bounds +/-
-    LABEL_CLAMP_CLEARANCE_PX."""
+    Placement: label_spread.spread_1d (overlapping groups merge into
+    clusters centred on their members' true positions), with a soft
+    clamp at the strip's axis bounds +/- LABEL_CLAMP_CLEARANCE_PX. The
+    process timeline's outside labels use the same function."""
     if not groups:
         return
     items = []
@@ -636,39 +748,16 @@ def _spread_rotated_label_groups(ax, groups, renderer,
             "cx":      orig_cx,
             "width":   max_w,
         })
-    items.sort(key=lambda d: d["cx"])
-    n = len(items)
-    if n == 0:
+    if not items:
         return
     ax_bbox = ax.get_window_extent()
-    pivot = n // 2
-
     # Soft clamp: groups may extend LABEL_CLAMP_CLEARANCE_PX past
     # the strip's bounds before stopping.
-    right_clamp = ax_bbox.x1 + LABEL_CLAMP_CLEARANCE_PX
-    left_clamp  = ax_bbox.x0 - LABEL_CLAMP_CLEARANCE_PX
-
-    prev_right = -float("inf")
-    for k in range(pivot, n):
-        d = items[k]
-        left = d["cx"] - d["width"] / 2
-        if left < prev_right + padding_px:
-            d["cx"] += (prev_right + padding_px) - left
-        max_cx = right_clamp - d["width"] / 2
-        if d["cx"] > max_cx:
-            d["cx"] = max_cx
-        prev_right = d["cx"] + d["width"] / 2
-
-    next_left = float("inf")
-    for k in range(pivot - 1, -1, -1):
-        d = items[k]
-        right = d["cx"] + d["width"] / 2
-        if right > next_left - padding_px:
-            d["cx"] += (next_left - padding_px) - right
-        min_cx = left_clamp + d["width"] / 2
-        if d["cx"] < min_cx:
-            d["cx"] = min_cx
-        next_left = d["cx"] - d["width"] / 2
+    centres = label_spread.spread_1d([(d["orig_cx"], d["width"]) for d in items],
+                                     ax_bbox.x0 - LABEL_CLAMP_CLEARANCE_PX,
+                                     ax_bbox.x1 + LABEL_CLAMP_CLEARANCE_PX, padding_px)
+    for d, c in zip(items, centres):
+        d["cx"] = c
 
     pts_per_px = 72.0 / ax.figure.dpi
     for d in items:
@@ -769,6 +858,120 @@ def _render_event_strip(ax, events, t0_ns: int, xmax_s: float,
     return groups
 
 
+class _Timeline:
+    """The process timeline's data (process_timeline): processes, lanes,
+    fork links."""
+
+    def __init__(self, projector: TraceProjector, projection: dict, t0_ns: int, t_end_ns: int,
+                 width_pt: float):
+        first, last = {}, {}
+        for (fqn, key), (ts, _v) in projection.items():
+            if ts.size and projector.descriptors.get(fqn) is not None \
+                    and projector.descriptors[fqn].scope == mc_pb.SCOPE_PROCESS:
+                first[key] = min(first.get(key, int(ts[0])), int(ts[0]))
+                last[key] = max(last.get(key, int(ts[-1])), int(ts[-1]))
+        self.procs = process_timeline.build(projector.process_table, t0_ns, t_end_ns,
+                                            first_sample_ns=first, last_sample_ns=last)
+        self.lanes, self.n_lanes = process_timeline.pack_lanes(self.procs)
+        self.links = process_timeline.fork_links(self.procs, self.lanes)
+        self.labels, self.n_label_rows = process_timeline.place_labels(
+            self.procs, self.lanes, t0_ns, t_end_ns, width_pt,
+            lambda t: _text_width_pt(t, PROCESS_LABEL_FONTSIZE), pad_units=TIMELINE_LABEL_PAD_PT)
+
+    @property
+    def height_lanes(self) -> float:
+        """Lanes plus the rows of outside labels under them."""
+        return process_timeline.height_in_lanes(self.n_lanes, self.n_label_rows)
+
+    @property
+    def height_in(self) -> float:
+        return self.height_lanes * PROCESS_LANE_HEIGHT
+
+
+def _text_color_on(color: str) -> str:
+    r, g, b = mcolors.to_rgb(color)
+    return "black" if 0.299 * r + 0.587 * g + 0.114 * b > 0.6 else "white"
+
+
+def _render_process_timeline(ax, tl: _Timeline, t0_ns: int, xmax_s: float,
+                             pid_color_map: dict[int, str]) -> None:
+    """One bar per process (start -> end, lane packed), in the process's
+    colour from the per-process panels; listed roots outlined solid,
+    orphans (discovered, parent not tracked) dashed. A thin line joins
+    the parent's bar to each child's at the child's start (fork link).
+    Every bar is labelled: `comm (pid)` inside it where that fits (else
+    `comm`), otherwise in rows under the lanes, spread so no two labels
+    overlap, with a grey leader to its bar (drawn under the bars)."""
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    ax.set_xlim(0, xmax_s)
+    ax.set_ylim(tl.height_lanes, 0)          # lane 0 on top, label rows under the lanes
+    ax.set_yticks([])
+    ax.tick_params(bottom=False, labelbottom=False)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(nbins=20))
+    ax.grid(True, axis="x", alpha=0.3)
+    ax.set_ylabel("Process", fontsize=8)
+    ax.set_title("Processes (bars: lifetime, packed into the fewest lanes; lines: fork links)",
+                 fontsize=10, loc="left", pad=_timeline_legend_pad_pt())
+
+    for p in tl.procs:
+        lane = tl.lanes[p.key]
+        x0 = (p.start_ns - t0_ns) / 1e9
+        w = (p.end_ns - p.start_ns) / 1e9
+        color = pid_color_map.get(p.pid, "#9e9e9e")
+        edge, ls, lw = color, "-", 0.5
+        if p.kind == process_timeline.ROOT:
+            edge, lw = "black", 1.2
+        elif p.kind == process_timeline.ORPHAN:
+            edge, ls, lw = "black", "--", 0.9
+        ax.barh(lane + 0.5, max(w, xmax_s * 1e-4), left=x0, height=PROCESS_BAR_FILL,
+                color=color, edgecolor=edge, linestyle=ls, linewidth=lw, zorder=2)
+    labels_of = {lab.key: lab for lab in tl.labels}
+    for p in tl.procs:
+        lab = labels_of[p.key]
+        color = pid_color_map.get(p.pid, "#9e9e9e")
+        if lab.row < 0:
+            t = ax.text(lab.x_s, lab.lane + 0.5, lab.text, ha="center", va="center",
+                        fontsize=PROCESS_LABEL_FONTSIZE, color=_text_color_on(color),
+                        clip_on=True, zorder=4)
+        else:
+            y = process_timeline.label_row_y(tl.n_lanes, lab.row)
+            t = ax.text(lab.x_s, y, lab.text, ha="center", va="center",
+                        fontsize=PROCESS_LABEL_FONTSIZE, color="#333333", zorder=4)
+            ax.plot([lab.anchor_s, lab.x_s],
+                    [lab.lane + 0.5 + PROCESS_BAR_FILL / 2, y - process_timeline.LABEL_ROW * 0.42],
+                    color="#aaaaaa", lw=0.4, zorder=1)
+        t._process_key = p.key
+    for link in tl.links:
+        x = (link.t_ns - t0_ns) / 1e9
+        y0, y1 = link.parent_lane + 0.5, link.child_lane + 0.5
+        ax.plot([x, x], [y0, y1], color="#444444", lw=0.6, zorder=3, solid_capstyle="butt")
+        ax.plot([x], [y0], marker="o", markersize=1.8, color="#444444", zorder=3)
+
+    handles = [Patch(facecolor="#bbbbbb", edgecolor="black", linewidth=1.2, label="listed root"),
+               Patch(facecolor="#bbbbbb", edgecolor="#bbbbbb", label="discovered"),
+               Patch(facecolor="#bbbbbb", edgecolor="black", linestyle="--", linewidth=0.9,
+                     label="orphan (parent not tracked)"),
+               Line2D([], [], color="#444444", lw=0.8, marker="o", markersize=2,
+                      label="fork link (parent -> child)")]
+    fs = LEGEND_FONTSIZE
+    ax.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.0, 1.0),
+              ncol=len(handles), fontsize=fs, frameon=True, framealpha=0.9,
+              edgecolor="#cccccc",
+              borderaxespad=LEGEND_AXESPAD_EM, borderpad=LEGEND_BORDER_EM,
+              handlelength=LEGEND_HANDLE_EM, handletextpad=LEGEND_TEXTPAD_EM,
+              columnspacing=LEGEND_COLSPACE_EM)
+
+
+def _timeline_legend_pad_pt() -> float:
+    """Title pad above the timeline: its one-row legend."""
+    fs = LEGEND_FONTSIZE
+    return (1.25 * fs + 2 * LEGEND_BORDER_EM * fs + LEGEND_AXESPAD_EM * fs
+            + LEGEND_TITLE_GAP_PT)
+
+
 def _overlay_regions(metric_axes, regions, t0_ns: int) -> None:
     for ri, (_name, start_ns, end_ns) in enumerate(regions):
         r_start_s = (start_ns - t0_ns) / 1e9
@@ -845,27 +1048,7 @@ def _write_legend_file(out_path: Path, png_path: Path,
 # Footer
 # ---------------------------------------------------------------------------
 
-def _fmt_rate(bps: float) -> str:
-    if bps >= 1024 ** 3: return f"{bps / 1024**3:7.2f} GiB/s"
-    if bps >= 1024 ** 2: return f"{bps / 1024**2:7.2f} MiB/s"
-    if bps >= 1024:      return f"{bps / 1024:7.2f} KiB/s"
-    return f"{bps:7.0f}   B/s"
-
-
-def _build_footer_text(rows: list[tuple[str, float, float, int]]) -> str:
-    lines = ["Write rate — estimated vs measured (file_size / trace_duration):"]
-    total_est = total_meas = 0.0
-    total_samp = 0
-    for label, est, meas, n_samp in rows:
-        est_str = _fmt_rate(est) if est > 0 else "      —      "
-        lines.append(f"  {label:<7} est {est_str}   |   measured {_fmt_rate(meas)}   "
-                     f"|   samples {n_samp:>8}")
-        total_est += est
-        total_meas += meas
-        total_samp += n_samp
-    lines.append(f"  {'Total':<7} est {_fmt_rate(total_est)}   |   measured "
-                 f"{_fmt_rate(total_meas)}   |   samples {total_samp:>8}")
-    return "\n".join(lines)
+# The table itself: tools/write_rate.py (shared with the Bokeh page).
 
 
 # ---------------------------------------------------------------------------
@@ -966,6 +1149,16 @@ def _panel_group(series_list: list[metric_layout.ResolvedSeries],
 # Main
 # ---------------------------------------------------------------------------
 
+def _unit_scale_factor(text: str) -> float:
+    """argparse type for --unit-scale-factor (a clear error below 1)."""
+    try:
+        f = float(text)
+        units.set_scale_factor(f)          # validates
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return f
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -978,6 +1171,25 @@ def main() -> int:
     parser.add_argument("--panel-layout", default=None,
                         help="Override PanelLayout pbtxt (default: "
                              "configs/visualizer_panels.pbtxt)")
+    parser.add_argument("--fit-axis-to-data", action="store_true",
+                        help="Size a panel's y-axis to its data when its "
+                             "ceiling (the Peak line) is more than "
+                             f"{units.OFFSCALE_FACTOR:g}x the largest plotted "
+                             "value; the Peak is then written as 'Peak: <value> "
+                             "(off-scale)' instead of drawn. Default: off (the "
+                             "axis reaches the Peak).")
+    parser.add_argument("--no-exit-lines", action="store_true",
+                        help="Don't end each exited process's series in a "
+                             "dashed line down to 0 (per-process gauge and "
+                             "cumulative panels); the series just stops at "
+                             "its last value.")
+    parser.add_argument("--unit-scale-factor", type=_unit_scale_factor,
+                        default=units.DEFAULT_SCALE_FACTOR, metavar="F",
+                        help="Byte-unit threshold: an axis (and the footer "
+                             "rate) uses the largest prefix P with "
+                             "max value >= F x P (default: %(default)s; 1 = "
+                             "switch as soon as a value reaches the prefix; "
+                             "must be >= 1).")
     parser.add_argument("--smooth-window-s", type=float, default=0.0,
                         help="Boxcar smoothing window in seconds. 0 = none.")
     parser.add_argument("--display-hz", type=float, default=0.0,
@@ -990,18 +1202,61 @@ def main() -> int:
                              "data so the displayed totals stay faithful.")
     args = parser.parse_args()
 
-    metadata_path = Path(args.metadata).resolve()
+    rendered = build_figure(args.metadata, catalog=args.catalog,
+                            panel_layout=args.panel_layout,
+                            smooth_window_s=args.smooth_window_s,
+                            display_hz=args.display_hz,
+                            unit_scale_factor=args.unit_scale_factor,
+                            fit_axis_to_data=args.fit_axis_to_data,
+                            exit_lines=not args.no_exit_lines)
+    if rendered is None:
+        return 1
+
+    out_path = Path(args.output).resolve()
+    _log(f"saving to {out_path}")
+    rendered.fig.savefig(out_path, dpi=150)
+
+    legend_path = out_path.with_suffix(".legend.txt")
+    _write_legend_file(legend_path, out_path, rendered.resolved, rendered.projector)
+    _log(f"legend reference written to {legend_path}")
+
+    _log("done")
+    return 0
+
+
+class Rendered:
+    """build_figure's result: the figure, the resolved panels
+    ((panel, series_list, kind) in render order), the projector, and the
+    axes by role (`panel_axes`: (panel, series_list, kind, ax) per
+    metric panel, top to bottom; `region_ax`, `event_ax`)."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def build_figure(metadata, *, catalog=None, panel_layout=None,
+                 smooth_window_s: float = 0.0, display_hz: float = 0.0,
+                 unit_scale_factor: float = units.DEFAULT_SCALE_FACTOR,
+                 fit_axis_to_data: bool = False, exit_lines: bool = True):
+    """Render the trace whose session_metadata.pb is `metadata` into a
+    matplotlib figure (not saved). Returns a Rendered, or None when there
+    is nothing to plot. unit_scale_factor: see units.py (ValueError < 1).
+    fit_axis_to_data: see --fit-axis-to-data; exit_lines: see
+    --no-exit-lines."""
+    units.set_scale_factor(unit_scale_factor)
+    metadata_path = Path(metadata).resolve()
     _log(f"loading session metadata from {metadata_path}")
     meta = _load_session_metadata(metadata_path)
 
-    if args.catalog:
-        catalog = metric_catalog.load_catalog(args.catalog)
-        _log(f"catalog: {len(catalog.metrics)} descriptors (from {args.catalog})")
+    if catalog:
+        catalog_path = catalog
+        catalog = metric_catalog.load_catalog(catalog_path)
+        _log(f"catalog: {len(catalog.metrics)} descriptors (from {catalog_path})")
     else:
         catalog = metric_catalog.load_catalog_from_session_metadata(meta)
         _log(f"catalog: {len(catalog.metrics)} descriptors (inlined)")
 
-    layout_path = Path(args.panel_layout) if args.panel_layout \
+    layout_path = Path(panel_layout) if panel_layout \
         else _HERE.parent / "configs" / "visualizer_panels.pbtxt"
     layout = metric_layout.load_panel_layout(layout_path)
     _log(f"layout: {len(layout.panels)} panels (from {layout_path})")
@@ -1014,7 +1269,7 @@ def main() -> int:
     proj = projector.project()
     if not proj:
         _log("no samples — nothing to plot")
-        return 1
+        return None
 
     t0_ns, t_end_ns = _first_last_ns(projector, proj)
     # Include events in the time range so the strips don't overflow.
@@ -1026,7 +1281,7 @@ def main() -> int:
         if t_end_ns is None or e > t_end_ns: t_end_ns = e
     if t0_ns is None or t_end_ns is None or t_end_ns <= t0_ns:
         _log("no plottable time range")
-        return 1
+        return None
     xmax_s = (t_end_ns - t0_ns) / 1e9
 
     # Resolve catalog index (with synthesized fallback for GPU FQNs)
@@ -1060,7 +1315,7 @@ def main() -> int:
                 resolved.append((panel, series, "integrated"))
     if not resolved:
         _log("no panels resolved any series")
-        return 1
+        return None
 
     # Group resolved panels by source probe.
     groups: dict[str, list] = {"gpu": [], "system": [], "disk": []}
@@ -1068,54 +1323,62 @@ def main() -> int:
         g = _panel_group(series, projector.fqn_to_probe)
         groups.setdefault(g, []).append((panel, series, kind))
 
-    # Stable PID color map: shared across every per-PID panel so the
-    # same PID renders in the same color everywhere.
-    pid_color_map: dict[int, str] = {}
-    seen_pids: list[int] = []
-    for _g, panels in groups.items():
-        for _p, series_list, _k in panels:
-            for s in series_list:
-                if s.scope == mc_pb.SCOPE_PROCESS:
-                    pid = int(s.scope_key)
-                    if pid not in pid_color_map:
-                        pid_color_map[pid] = _COLOR_CYCLE[len(seen_pids) % len(_COLOR_CYCLE)]
-                        seen_pids.append(pid)
+    pid_color_map = panel_legend.pid_color_map([p for g in ("gpu", "system", "disk")
+                                                for p in groups.get(g, [])], proj)
+
+    # Legends (above each panel): colours, entries and height, decided
+    # now so each legend's height is reserved in the layout.
+    legend_width_pt = (FIG_WIDTH - FIG_MARGIN_LEFT - FIG_MARGIN_RIGHT) * 72.0
+    metric_colors = panel_legend.metric_color_map([p for g in ("gpu", "system", "disk")
+                                                   for p in groups.get(g, [])])
+    plans_by_group = {
+        g: [_plan_legend(panel, series_list, kind, projector, proj,
+                         pid_color_map, legend_width_pt, metric_colors)
+            for panel, series_list, kind in panels]
+        for g, panels in groups.items()}
 
     # ---------------- Build inches-based layout ----------------
-    sections: list[tuple[str, list[tuple[str, float]]]] = []
+    # Each entry: (kind, height, room reserved above it for its legend).
+    sections: list[tuple[str, list[tuple[str, float, float]]]] = []
 
-    annot_panels: list[tuple[str, float]] = []
+    annot_panels: list[tuple[str, float, float]] = []
     has_events  = bool(probes["events"]["events"])
     has_regions = bool(probes["events"]["regions"])
-    if has_events:  annot_panels.append(("event",  PANEL_HEIGHT_EVENT))
-    if has_regions: annot_panels.append(("region", PANEL_HEIGHT_REGION))
+    if has_events:  annot_panels.append(("event",  PANEL_HEIGHT_EVENT, 0.0))
+    if has_regions: annot_panels.append(("region", PANEL_HEIGHT_REGION, 0.0))
+    timeline = _Timeline(projector, proj, t0_ns, t_end_ns, legend_width_pt)
+    if timeline.procs:
+        annot_panels.append(("process", timeline.height_in, _timeline_legend_pad_pt() / 72.0))
     if annot_panels:
         sections.append(("annot", annot_panels))
 
     for group_key in ("gpu", "system", "disk"):
         if groups.get(group_key):
             sections.append((group_key,
-                             [("metric", PANEL_HEIGHT_METRIC)] * len(groups[group_key])))
+                             [("metric", PANEL_HEIGHT_METRIC, plan.height_pt / 72.0)
+                              for plan in plans_by_group[group_key]]))
 
     has_footer = bool(probes["gpu"]["traces"] or probes["system"]["traces"]
                        or probes["disk"]["traces"])
     if has_footer:
-        sections.append(("footer", [("footer", PANEL_HEIGHT_FOOTER)]))
+        sections.append(("footer", [("footer", PANEL_HEIGHT_FOOTER, 0.0)]))
 
     if not sections:
         _log("nothing to render")
-        return 1
+        return None
 
     def _within_group_gap(prev_kind, kind):
-        if prev_kind == "event" and kind == "region":
+        if prev_kind == "event":             # its time labels hang below it
             return SPACING_EVENT_REGION
+        if prev_kind == "region":            # its duration labels hang below it
+            return SPACING_REGION_TIMELINE
         return SPACING_PANEL
 
     def _between_section_gap(prev_section, next_section):
         return (SPACING_AFTER_REGION if prev_section[1][-1][0] == "region"
                 else SPACING_SECTION)
 
-    panel_h_sum = sum(h for _g, panels in sections for _k, h in panels)
+    panel_h_sum = sum(h + above for _g, panels in sections for _k, h, above in panels)
     small_sp_total = sum(_within_group_gap(panels[i-1][0], panels[i][0])
                           for _g, panels in sections for i in range(1, len(panels)))
     section_break_total = sum(_between_section_gap(sections[i-1], sections[i])
@@ -1136,20 +1399,21 @@ def main() -> int:
             gap = _between_section_gap(sections[si-1], sections[si])
             section_break_y_in.append(y_top_in - gap / 2)
             y_top_in -= gap
-        for pi, (panel_kind, h) in enumerate(panels):
+        for pi, (panel_kind, h, above) in enumerate(panels):
             if pi > 0:
                 y_top_in -= _within_group_gap(prev_kind, panel_kind)
-            y_top_in -= h
+            y_top_in -= above + h
             ax = fig.add_axes([left_frac, y_top_in / fig_h,
                                 width_frac, h / fig_h])
             placed.append((group_key, panel_kind, ax))
             prev_kind = panel_kind
 
     # Sort axes by role
-    event_ax = region_ax = footer_ax = None
+    event_ax = region_ax = footer_ax = process_ax = None
     metric_axes_by_group: dict[str, list] = {"gpu": [], "system": [], "disk": []}
     for group_key, panel_kind, ax in placed:
         if panel_kind == "event":  event_ax = ax
+        elif panel_kind == "process": process_ax = ax
         elif panel_kind == "region": region_ax = ax
         elif panel_kind == "footer": footer_ax = ax
         elif panel_kind == "metric":
@@ -1165,22 +1429,26 @@ def main() -> int:
                        "system": probes["system"]["freq_hz"],
                        "disk": probes["disk"]["freq_hz"]}
     for group_key in ("gpu", "system", "disk"):
-        for ax, (panel, series_list, kind) in zip(
-                metric_axes_by_group[group_key], groups[group_key]):
+        for ax, (panel, series_list, kind), plan in zip(
+                metric_axes_by_group[group_key], groups[group_key],
+                plans_by_group[group_key]):
             if kind == "integrated":
                 _render_integrated_panel(
                     ax, panel, series_list, projector, proj,
                     t0_ns=t0_ns, pid_color_map=pid_color_map,
                     sample_freq_hz=sample_freq_for[group_key],
-                    display_hz=args.display_hz)
+                    display_hz=display_hz, plan=plan, exit_lines=exit_lines)
                 continue
             _render_metric_panel(
                 ax, panel, series_list, projector, proj,
                 sample_freq_hz=sample_freq_for[group_key],
-                smooth_window_s=args.smooth_window_s,
+                smooth_window_s=smooth_window_s,
                 t0_ns=t0_ns,
                 pid_color_map=pid_color_map,
-                display_hz=args.display_hz,
+                display_hz=display_hz,
+                plan=plan,
+                fit_to_data=fit_axis_to_data,
+                exit_lines=exit_lines,
             )
 
     # ---------------- Strips + overlays ----------------
@@ -1195,6 +1463,9 @@ def main() -> int:
     if region_ax is not None:
         region_groups = _render_region_strip(
             region_ax, probes["events"]["regions"], t0_ns, xmax_s)
+
+    if process_ax is not None:
+        _render_process_timeline(process_ax, timeline, t0_ns, xmax_s, pid_color_map)
 
     if probes["events"]["regions"]:
         _overlay_regions(all_metric_axes, probes["events"]["regions"], t0_ns)
@@ -1247,7 +1518,7 @@ def main() -> int:
             est = probes["gpu"]["freq_hz"] * _est_bytes_per_sample(n_metrics)
             dur = _probe_duration_s("gpu")
             meas = os.path.getsize(probes["gpu"]["path"]) / dur if dur > 0 else 0.0
-            rows.append(("GPU", est, meas, probes["gpu"]["n_samples"]))
+            rows.append(("GPU", probes["gpu"]["freq_hz"], est, meas, probes["gpu"]["n_samples"]))
 
         # System row
         if probes["system"]["traces"]:
@@ -1262,7 +1533,8 @@ def main() -> int:
             est = probes["system"]["freq_hz"] * bytes_per_tick
             dur = _probe_duration_s("system")
             meas = os.path.getsize(probes["system"]["path"]) / dur if dur > 0 else 0.0
-            rows.append(("System", est, meas, probes["system"]["n_samples"]))
+            rows.append(("System", probes["system"]["freq_hz"], est, meas,
+                         probes["system"]["n_samples"]))
 
         # Disk row
         if probes["disk"]["traces"]:
@@ -1278,16 +1550,16 @@ def main() -> int:
             est = probes["disk"]["freq_hz"] * bytes_per_tick
             dur = _probe_duration_s("disk")
             meas = os.path.getsize(probes["disk"]["path"]) / dur if dur > 0 else 0.0
-            rows.append(("Disk", est, meas, probes["disk"]["n_samples"]))
+            rows.append(("Disk", probes["disk"]["freq_hz"], est, meas, probes["disk"]["n_samples"]))
 
         # Events row — emission rate is user-driven, only measured is meaningful.
         if probes["events"]["path"]:
             n_samp = len(probes["events"]["regions"]) + len(probes["events"]["events"])
             dur = xmax_s
             meas = os.path.getsize(probes["events"]["path"]) / dur if dur > 0 else 0.0
-            rows.append(("Events", 0.0, meas, n_samp))
+            rows.append(("Events", None, 0.0, meas, n_samp))
 
-        footer_text = _build_footer_text(rows) if rows else None
+        footer_text = write_rate.text(rows) if rows else None
         footer_ax.axis("off")
         if footer_text:
             footer_ax.text(0.01, 0.95, footer_text,
@@ -1340,16 +1612,13 @@ def main() -> int:
         if region_ax is not None:
             _spread_rotated_label_groups(region_ax, region_groups, renderer)
 
-    out_path = Path(args.output).resolve()
-    _log(f"saving to {out_path}")
-    fig.savefig(out_path, dpi=150)
-
-    legend_path = out_path.with_suffix(".legend.txt")
-    _write_legend_file(legend_path, out_path, resolved, projector)
-    _log(f"legend reference written to {legend_path}")
-
-    _log("done")
-    return 0
+    panel_axes = []
+    for g in ("gpu", "system", "disk"):
+        for ax, (panel, series_list, kind) in zip(metric_axes_by_group[g], groups[g]):
+            panel_axes.append((panel, series_list, kind, ax))
+    return Rendered(fig=fig, resolved=resolved, projector=projector,
+                    panel_axes=panel_axes, region_ax=region_ax, event_ax=event_ax,
+                    process_ax=process_ax, timeline=timeline)
 
 
 if __name__ == "__main__":

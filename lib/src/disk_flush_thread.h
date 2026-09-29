@@ -6,6 +6,7 @@
 #pragma once
 
 #include "metric_descriptor.h"
+#include "stop_signal.h"
 
 #include <cupti_profiler/disk_profiler.h>
 #include <cupti_profiler/process_tracking_probe.h>
@@ -16,6 +17,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 class DiskMetricsTrace;
@@ -39,13 +41,41 @@ struct DiskDeviceTick {
 struct DiskProcessTick {
     uint64_t timestamp_ns         = 0;
     uint32_t pid                  = 0;
-    double   rchar_bytes_per_sec  = 0.0;
-    double   wchar_bytes_per_sec  = 0.0;
+    // Rates (bytes/s over the actual interval) of the five
+    // /proc/<pid>/io counters, each named for the counter it carries.
+    double   rchar_bytes_per_sec                 = 0.0;
+    double   wchar_bytes_per_sec                 = 0.0;
+    double   read_bytes_per_sec                  = 0.0;
+    double   write_bytes_per_sec                 = 0.0;
+    double   cancelled_write_bytes_per_sec       = 0.0;
+};
+
+// The five /proc/<pid>/io counters of one reading, in bytes.
+struct IoCounterValues {
+    uint64_t rchar = 0, wchar = 0, readBytes = 0, writeBytes = 0, cancelledWriteBytes = 0;
+};
+
+// Reaped tracked children's I/O subtracted from their tracked parent's
+// sample (IoReapAdjustment in disk_metrics.proto).
+struct IoReapRecord {
+    uint64_t timestamp_ns = 0;   // the parent's sample
+    uint32_t parent_pid   = 0;
+    struct Child {
+        uint32_t        pid       = 0;
+        IoCounterValues lastSeen;           // its last reading
+        uint32_t        reapedBy  = 0;      // parent_pid, or a chain member
+        bool            ambiguous = false;  // listed, not subtracted
+    };
+    std::vector<Child> children;
+    bool     ambiguous    = false;   // some child is
+    // Raw parent delta minus the subtracted, per counter.
+    int64_t  remainder[5] = {0, 0, 0, 0, 0};
 };
 
 struct DiskSampleBatch {
     std::vector<DiskDeviceTick>  deviceTicks;
     std::vector<DiskProcessTick> processTicks;
+    std::vector<IoReapRecord>    ioReaps;
 };
 
 // Accessors for the descriptor arrays owned by disk_flush_thread.cpp.
@@ -58,6 +88,8 @@ std::span<const MetricDescriptor<DiskProcessTick>> GetDiskProcessMetrics();
 struct DiskPendingFlushStats {
     uint64_t bytesWritten = 0;
     uint64_t intervalNs   = 0;
+    uint64_t durationNs   = 0;   // drain to written
+    uint64_t slowFlushes  = 0;   // so far (FlushBacklog)
     bool     valid        = false;
 };
 
@@ -83,7 +115,7 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
                          uint32_t hostCpuCount,
                          const std::vector<std::string>& devices,
                          ProcessTrackingProbe& probe,
-                         std::atomic<bool>& stop,
+                         StopSignal& stop,
                          uint64_t flushIntervalMs,
                          uint64_t steadyClockRefNs,
                          uint64_t wallClockEpochNs,

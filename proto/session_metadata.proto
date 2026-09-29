@@ -4,7 +4,8 @@ import "metric_catalog.proto";
 
 // Session-level manifest. A single SessionMetadata message is written
 // (NOT length-delimited) to session_metadata.pb at ProfilerSuite::Start()
-// and re-emitted at Stop() with identical content. The write is atomic
+// and re-emitted at Stop() (identical except for situation lines about
+// roots added mid-run and the current subreaper state). The write is atomic
 // (tmp file + rename(2)) so tailers never see a torn file.
 //
 // Describes what was running and when, so consumers can interpret the
@@ -24,6 +25,17 @@ message ActiveProbe {
     uint64 sampling_frequency_hz = 3;  // 0 if not applicable (e.g. events)
 }
 
+// One line of the startup situation report: what the environment
+// allows, observed on the observer side at ProfilerSuite::Configure()
+// (plus one line per tracked root, added when the root is added).
+// Every line states what the observed value means for the trace.
+message SituationCheck {
+    string check       = 1;   // e.g. "pidfd_open", "target 1234"
+    string observed    = 2;   // e.g. "available", "uid 1000 (same); spawned"
+    string consequence = 3;   // what this means for the trace
+    bool   degraded    = 4;   // true = a guarantee is weaker than the default
+}
+
 message SessionMetadata {
     string hostname = 1;
     uint64 wall_clock_epoch_ns = 2;     // captured at suite Start()
@@ -36,4 +48,10 @@ message SessionMetadata {
     // GPU-specific descriptors appended at Configure() by walking
     // cuptiProfilerHostGetSubMetrics().
     MetricCatalog catalog = 5;
+
+    // Startup situation report: which tracking guarantees held while
+    // this trace was collected. Logged once at Configure(); the
+    // subreaper line is refreshed on every write, and per-root lines
+    // are appended as roots are added.
+    repeated SituationCheck situation = 6;
 }

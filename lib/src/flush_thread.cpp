@@ -1,11 +1,14 @@
 #include "flush_thread.h"
+#include "flush_backlog.h"
+#include "lifecycle.h"
+#include "testing_hooks.h"
+#include "delimited_write.h"
 
 #include "gpu_metrics.pb.h"
 #include "metric_sample.pb.h"
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl.h>
 
 #include <chrono>
+#include <pthread.h>
 #include <iostream>
 #include <thread>
 
@@ -71,22 +74,29 @@ GPUMetricsTrace BuildTrace(const std::string& hostname,
                 sample->add_values(v);
             }
         }
+
+        if (d.decode_stats) {
+            const auto& st = *d.decode_stats;
+            auto* ds = trace.add_decode_stats();
+            ds->set_gpu_index(d.gpu_index);
+            ds->set_decode_calls(st.decodeCalls.load());
+            ds->set_samples(st.samples.load());
+            ds->set_samples_lost(st.samplesLost.load());
+            ds->set_invalid_samples(st.invalidSamples.load());
+            ds->set_empty_samples(st.emptySamples.load());
+            ds->set_counter_data_full(st.counterDataFull.load());
+            ds->set_hw_buffer_overflows(st.hwBufferOverflows.load());
+            ds->set_sampler_restarts(st.samplerRestarts.load());
+            ds->set_stretched_samples(st.stretchedSamples.load());
+            ds->set_late_passes(st.latePasses.load());
+        }
     }
 
     return trace;
 }
 
 size_t WriteDelimitedToSized(const GPUMetricsTrace& trace, std::ofstream& out) {
-    std::string serialized;
-    if (!trace.SerializeToString(&serialized)) {
-        std::cerr << "Failed to serialize GPUMetricsTrace\n";
-        return 0;
-    }
-    google::protobuf::io::OstreamOutputStream raw(&out);
-    google::protobuf::io::CodedOutputStream coded(&raw);
-    coded.WriteVarint32(static_cast<uint32_t>(serialized.size()));
-    coded.WriteString(serialized);
-    return serialized.size();
+    return WriteDelimitedFrame(trace, out, "GPUMetricsTrace");
 }
 
 void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
@@ -96,7 +106,7 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
                      uint64_t samplingFrequencyHz,
                      uint32_t hostCpuCount,
                      const std::vector<const char*>& metricNames,
-                     std::atomic<bool>& stop,
+                     StopSignal& stop,
                      uint64_t flushIntervalMs,
                      uint64_t steadyClockRefNs,
                      uint64_t cuptiRefNs,
@@ -104,11 +114,16 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
                      PendingFlushStats& pending,
                      std::mutex& pendingMutex)
 {
+    lifecycle::BlockSignalsInThisThread();
+    ::pthread_setname_np(::pthread_self(), "cupti-gpu-flush");
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;
-    while (!stop) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(flushIntervalMs));
-        if (stop) break;
+    FlushBacklog backlog("GPU probe", flushIntervalMs);
+    struct SummaryAtEnd { FlushBacklog& b; ~SummaryAtEnd() { b.Summary(); } } summary{backlog};
+    // Stop() wakes the wait; the final flush is Stop()'s.
+    while (!stop.WaitUntil(std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(flushIntervalMs))) {
+        const uint64_t flushStartNs = SteadyNowNs();
 
         // Drain every device. Skip the flush if no device produced
         // anything this cycle.
@@ -125,6 +140,7 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
             p.peak_nvlink_bw_bytes_per_s = *slot.peak_nvlink_bw_bytes_per_s;
             p.max_warps_per_sm           = *slot.max_warps_per_sm;
             p.samples                    = slot.host->DrainSamples();
+            p.decode_stats               = slot.decode_stats;
             totalSamples += p.samples.size();
             payloads.push_back(std::move(p));
         }
@@ -142,6 +158,8 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
                 auto* fs = trace.add_flush_stats();
                 fs->set_flush_byte_size(pending.bytesWritten);
                 fs->set_flush_interval_ns(pending.intervalNs);
+                fs->set_flush_duration_ns(pending.durationNs);
+                fs->set_slow_flushes(pending.slowFlushes);
                 pending.valid = false;
             }
         }
@@ -152,8 +170,10 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
             bytes = WriteDelimitedToSized(trace, outFile);
             outFile.flush();
         }
-        uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        PassFlushDelay();   // test-only slow writer; see <cupti_profiler/testing.h>
+        uint64_t nowNs = SteadyNowNs();
+        const uint64_t durationNs = nowNs - flushStartNs;
+        backlog.Record(durationNs, bytes);
         uint64_t intervalNs = (prevFlushNs == 0) ? 0 : (nowNs - prevFlushNs);
         prevFlushNs = nowNs;
 
@@ -161,6 +181,8 @@ void FlushThreadFunc(std::vector<DeviceDrainSlot> devices,
             std::lock_guard<std::mutex> lock(pendingMutex);
             pending.bytesWritten = bytes;
             pending.intervalNs   = intervalNs;
+            pending.durationNs   = durationNs;
+            pending.slowFlushes  = backlog.SlowFlushes();
             pending.valid        = true;
         }
 

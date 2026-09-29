@@ -22,4 +22,53 @@ message SystemMetricsTrace {
     repeated Sample        system_samples        = 4;
     repeated ProcessSample process_samples       = 5;
     repeated FlushStats    flush_stats           = 6;
+    // Present while descendant tracking runs; see DiscoveryStats.
+    DiscoveryStats   discovery_stats             = 7;
+    // Exit tails of discovered processes (see CpuTail), each emitted once.
+    repeated CpuTail cpu_tails                   = 8;
+}
+
+// CPU a discovered process used after its last sample: between the
+// sample and its exit, which no sample can see. Measured on its tracked
+// parent: when the parent reaps it, the parent's cutime + cstime grow by
+// the child's whole CPU (plus what the child had itself reaped); the
+// tail is that growth minus the child's CPU at its last sample and minus
+// its own children's CPU as last read.
+//
+// Limits:
+//   * cutime/cstime are in USER_HZ ticks (10 ms) and truncated per
+//     field, so a tail is accurate to about +/-20 ms and is clamped at 0;
+//   * the growth appears only when the parent reaps the child: a parent
+//     that never waits, or that exits first, yields no tail;
+//   * a child reparented to a process that is not tracked yields none;
+//   * the growth also includes any short-lived child the parent reaped
+//     in the same interval that discovery never saw;
+//   * when several tracked children of one parent are reaped within one
+//     sample interval, their shares cannot be told apart: ONE CpuTail
+//     lists all of them in `pids` with their combined tail, rather than
+//     a guessed split;
+//   * a reap chain (the child reaped its own tracked child and exited in
+//     the same interval): see chain_pids / ambiguous_pids.
+message CpuTail {
+    uint64          timestamp_ns             = 1;  // sample tick that saw the growth
+    uint32          parent_pid               = 2;  // the tracked parent that reaped
+    repeated uint32 pids                     = 3;  // one = that child's own tail
+    uint64          cpu_after_last_sample_ns = 4;
+    // Reap chains: tracked descendants of `pids` that exited within the
+    // same sample interval, which a child in `pids` reaped (reap-chain
+    // rule: the host's orphan reaper runs and did not reap them). Their
+    // CPU, already in their own samples, is taken out of this tail.
+    repeated uint32 chain_pids               = 5;
+    // Tracked descendants of `pids` that exited within the same interval
+    // but may have been reaped by a subreaper or init instead (the host's
+    // orphan reaper is off, or they are not under the host): not taken
+    // out, so their CPU may be counted twice. Never guessed.
+    repeated uint32 ambiguous_pids           = 6;
+    // The CPU of `ambiguous_pids` (their clock at their last sample plus
+    // what they had reaped), already counted in their own samples. It is
+    // NOT subtracted: if the child in `pids` did reap them, this much of
+    // cpu_after_last_sample_ns is counted twice. The true tail is between
+    // max(0, cpu_after_last_sample_ns - ambiguous_cpu_ns) and
+    // cpu_after_last_sample_ns. 0 when nothing is ambiguous.
+    uint64          ambiguous_cpu_ns         = 7;
 }

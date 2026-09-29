@@ -127,12 +127,13 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | Field                  | Type       | Default       | Description                                      |
 | ---------------------- | ---------- | ------------- | ------------------------------------------------ |
 | `enabled`              | bool       | false         | Enable GPU profiling                             |
-| `device_index`         | int32      | 0             | CUDA device index                                |
-| `sampling_interval_ns` | uint64     | 100000        | HW counter sampling period (ns). 100000 = 10 kHz |
+| `device_indices`       | int32[]    | (empty = 0)   | CUDA device indices                              |
+| `sampling_frequency_hz`| uint64     | 100           | HW counter sampling rate in Hz (0 = 100)         |
 | `hw_buffer_size`       | uint64     | 536870912     | GPU ring buffer size (bytes). 512 MB default     |
-| `max_samples`          | uint64     | 50000         | Decode buffer capacity per cycle                 |
+| `decode_interval_ms`   | uint64     | 1000          | How often the host collects the buffered samples |
+| `max_samples`          | uint64     | 0 = auto      | Counter-data image per decode pass (0 = sized for the decode interval) |
 | `metrics`              | string[]   | (empty)       | CUPTI metric names. Must fit single pass         |
-| `flush_interval_ms`    | uint64     | 10000         | Periodic flush interval. 0 = flush at end only   |
+| `flush_interval_ms`    | uint64     | 5000          | Periodic flush interval. 0 = 5000                |
 | `output_file`          | string     | (empty)       | Output `.pb` path                                |
 
 ### System section (CPU + memory)
@@ -140,9 +141,9 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | Field                  | Type       | Default | Description                                      |
 | ---------------------- | ---------- | ------- | ------------------------------------------------ |
 | `enabled`              | bool       | false   | Enable CPU + memory profiling                    |
-| `sampling_interval_ms` | uint64     | 100     | Sampling period in milliseconds                  |
+| `sampling_frequency_hz`| uint64     | 100     | Sampling rate in Hz (0 = 100)                    |
 | `pids`                 | uint32[]   | (empty) | PIDs for per-process tracking. 0 = self          |
-| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval                          |
+| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval. 0 = 5000                |
 | `output_file`          | string     | (empty) | Output `.pb` path                                |
 
 ### Disk section
@@ -150,10 +151,10 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | Field                  | Type       | Default | Description                                      |
 | ---------------------- | ---------- | ------- | ------------------------------------------------ |
 | `enabled`              | bool       | false   | Enable disk I/O profiling                        |
-| `sampling_interval_ms` | uint64     | 100     | Sampling period in milliseconds                  |
+| `sampling_frequency_hz`| uint64     | 100     | Sampling rate in Hz (0 = 100)                    |
 | `devices`              | string[]   | (empty) | Block device names (e.g. `"nvme0n1"`, `"sda"`)  |
 | `pids`                 | uint32[]   | (empty) | PIDs for per-process I/O. 0 = self               |
-| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval                          |
+| `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval. 0 = 5000                |
 | `output_file`          | string     | (empty) | Output `.pb` path                                |
 
 > [!WARNING]
@@ -171,13 +172,15 @@ the layout — there is no hand-coded row table. See
 reference and [`docs/metric-model.md`](metric-model.md) for the
 underlying type system.
 
-The default layout produces 12 panels (some auto-skipped when no
+The default layout produces 13 panels (some auto-skipped when no
 series matches): SM Utilization, Active Warps / Cycle, DRAM
 Bandwidth, PCIe Bandwidth, NVLink Bandwidth, CPU Utilization, Per-PID
 CPU, System Memory, Per-PID Resident Memory, Disk Bandwidth, Disk
-Queue Depth, Per-PID I/O. Panels with `aggregation:
-PANEL_AGGREGATION_INTEGRATE` (PCIe / NVLink / Disk Bandwidth /
-Per-PID I/O) add a companion cumulative-total panel directly below.
+Queue Depth, Per-PID I/O (syscall layer: `rchar`/`wchar`), Per-PID I/O
+(storage layer: `read_bytes`/`write_bytes`/`cancelled_write_bytes`).
+Panels with `aggregation: PANEL_AGGREGATION_INTEGRATE` (PCIe / NVLink /
+Disk Bandwidth / both Per-PID I/O panels) add a companion
+cumulative-total panel directly below.
 Region annotations (shaded spans) overlay every metric panel.
 
 ---
@@ -273,3 +276,4 @@ sysProfiler.Stop();
 - [[full-system-internals|Detailed internals documentation]]
 - [[system-guide|GPU profiler system guide]]
 - [[cupti-overhead-analysis|CUPTI overhead analysis]]
+- [[cupti-hardware-findings|CUPTI hardware findings]]

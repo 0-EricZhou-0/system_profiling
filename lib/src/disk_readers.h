@@ -19,10 +19,16 @@ struct DiskInflightSnapshot {
     uint32_t writeInflight = 0;
 };
 
+// The five byte counters of /proc/<pid>/io (see docs/metric-model.md,
+// "Per-PID I/O counters", for what each one sees).
 struct PIDIOSnapshot {
-    uint64_t readBytes = 0;       // physical read bytes
-    uint64_t writeBytes = 0;      // physical write bytes
-    bool accessible = true;       // false if EACCES
+    uint64_t rchar = 0;                // syscall layer: bytes read() et al. returned
+    uint64_t wchar = 0;                // syscall layer: bytes write() et al. accepted
+    uint64_t readBytes = 0;            // storage layer: bytes fetched from storage
+    uint64_t writeBytes = 0;           // storage layer: bytes dirtied in the page cache
+    uint64_t cancelledWriteBytes = 0;  // dirtied bytes discarded before writeback
+    bool accessible = true;            // false if the file cannot be opened or read
+    int  error = 0;                    // errno when !accessible (ENODATA: fields missing)
 };
 
 /// Read disk stats for specified devices from /proc/diskstats.
@@ -31,8 +37,10 @@ std::vector<DiskStatSnapshot> ReadDiskStats(const std::vector<std::string>& devi
 /// Read in-flight I/O counts from /sys/block/<dev>/inflight.
 DiskInflightSnapshot ReadDiskInflight(const std::string& device);
 
-/// Read per-process I/O from /proc/[pid]/io.
-/// Sets accessible=false on EACCES.
+/// Read per-process I/O from /proc/[pid]/io. If it cannot be opened or
+/// read, accessible=false and error = the errno (EACCES also while the
+/// process is exiting: see ClassifyReadFailure); ENODATA if the file
+/// lacked a counter.
 PIDIOSnapshot ReadPIDIO(uint32_t pid);
 
 } // namespace internal

@@ -1,5 +1,7 @@
 #include <cupti_profiler/gpu_profiler.h>
 
+#include "lifecycle.h"
+#include "stop_signal.h"
 #include "cupti_pm_sampling.h"
 #include "profiler_host_internal.h"
 #include "decode_thread.h"
@@ -15,12 +17,15 @@
 #include <cupti_profiler_target.h>
 #include <nvml.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <unistd.h>
 
@@ -93,6 +98,27 @@ double NvLinkLinkBytesPerSec(unsigned int gen) {
     return s.laneGbps * 1e9 * s.lanesPerLink / 8.0;
 }
 
+// Hardware-buffer bytes one PM sample takes. CUPTI does not expose it;
+// measured on H100 (CUDA 13.3, 2026-09-28): ~4.2-4.6 KB with 1-2
+// metrics, ~5.9-7.0 KB with 4 (it grows with the counters the metrics
+// need). This bound is used to check that hw_buffer_size holds two
+// decode intervals of samples; an overflow is still detected at run
+// time (GpuDecodeStats.hw_buffer_overflows).
+constexpr uint64_t kHwBufferBytesPerSampleBound = 16 * 1024;
+
+// Counter-data image slots: four decode intervals (+ 64), so a decode
+// pass that starts up to three intervals late (a starved or stalled
+// host) still fits; beyond that the pass loses samples (a full image).
+// Cost: each pass re-initializes one image at ~0.07 ms per MB (measured,
+// H100 host, 13-16 GB/s), ~16 KB per slot with 4 metrics: 7.6 / 34 /
+// 66 MB, i.e. 0.05 / 0.23 / 0.5% of a core at 100 / 500 / 1000 Hz with the
+// 1 s interval, ~66 MB/s of memory traffic at 1 kHz (the 817 MB image
+// re-initialized ~16 times a second before 2026-09-28 was ~13 GB/s).
+constexpr uint64_t kImageIntervals = 4;
+uint64_t AutoMaxSamples(uint64_t hz, uint64_t decodeIntervalMs) {
+    return (hz * decodeIntervalMs * kImageIntervals + 999) / 1000 + 64;
+}
+
 } // namespace
 
 class GpuProfiler::Impl {
@@ -112,7 +138,7 @@ public:
         internal::CuptiPmSampling    target;
         internal::CuptiProfilerHost  host;
         std::vector<uint8_t>         configImage;
-        std::vector<uint8_t>         counterDataImage;
+        std::array<std::vector<uint8_t>, 2> counterDataImages;   // double-buffered
         std::string                  deviceName;
         std::string                  chipName;
         double                       peakDramBwGbps = 0.0;
@@ -121,10 +147,11 @@ public:
         double                       peakNvlinkBwBytesPerSec = 0.0;
         uint32_t                     maxWarpsPerSm = 0;
         std::thread                  decodeThread;
-        std::atomic<bool>            stopDecode{false};
+        internal::StopSignal         stopDecode;
         CUptiResult                  decodeResult = CUPTI_SUCCESS;
+        internal::DecodeStats        decodeStats;
     };
-    // unique_ptr because DeviceState holds an std::atomic which is
+    // unique_ptr because DeviceState holds a StopSignal and atomics, which are
     // non-movable — std::vector resize would otherwise invalidate.
     std::vector<std::unique_ptr<DeviceState>> devices;
 
@@ -133,7 +160,7 @@ public:
 
     // Single flush thread, one output file.
     std::thread flushThread;
-    std::atomic<bool> stopFlush{false};
+    internal::StopSignal stopFlush;
     std::ofstream outFile;
     std::mutex outMutex;
 
@@ -147,19 +174,66 @@ public:
 
     bool configured = false;
     bool running = false;
+    // Serializes Stop() (the host, the signal flusher and the exit hook
+    // may all call it).
+    std::mutex stopMutex;
+    GpuProfiler* owner = nullptr;   // the object Stop() is called on
 };
 
 GpuProfiler::GpuProfiler() : m_impl(std::make_unique<Impl>()) {}
 GpuProfiler::~GpuProfiler() {
     if (m_impl && m_impl->running) {
+        internal::lifecycle::WarnNotStopped("GpuProfiler", "when it was destroyed");
         Stop();
     }
 }
-GpuProfiler::GpuProfiler(GpuProfiler&&) noexcept = default;
-GpuProfiler& GpuProfiler::operator=(GpuProfiler&&) noexcept = default;
+GpuProfiler::GpuProfiler(GpuProfiler&& o) noexcept : m_impl(std::move(o.m_impl)) {
+    if (m_impl) m_impl->owner = this;
+}
+GpuProfiler& GpuProfiler::operator=(GpuProfiler&& o) noexcept {
+    if (this != &o) {
+        if (m_impl && m_impl->running) Stop();
+        m_impl = std::move(o.m_impl);
+        if (m_impl) m_impl->owner = this;
+    }
+    return *this;
+}
 
-void GpuProfiler::Configure(const ProfilerConfig& config) {
-    m_impl->config = config;
+void GpuProfiler::Configure(const ProfilerConfig& requested) {
+    ProfilerConfig resolved = requested;
+    if (resolved.decodeIntervalMs == 0) resolved.decodeIntervalMs = kDefaultDecodeIntervalMs;
+    resolved.flushIntervalMs = ResolveFlushIntervalMs(resolved.flushIntervalMs);
+    if (resolved.flushIntervalMs < resolved.decodeIntervalMs) {
+        throw std::invalid_argument(
+            "GPU flush_interval_ms (" + std::to_string(resolved.flushIntervalMs) +
+            ") is less than decode_interval_ms (" + std::to_string(resolved.decodeIntervalMs) +
+            "): a flush could only write what the last decode pass collected. "
+            "Raise flush_interval_ms or lower decode_interval_ms");
+    }
+    const uint64_t perPass = (resolved.samplingFrequencyHz * resolved.decodeIntervalMs + 999) / 1000;
+    const uint64_t hwNeeded = 2 * perPass * kHwBufferBytesPerSampleBound;
+    if (resolved.hwBufferSize < hwNeeded) {
+        throw std::invalid_argument(
+            "GPU hw_buffer_size (" + std::to_string(resolved.hwBufferSize >> 20) +
+            " MiB) cannot hold two decode intervals of samples at " +
+            std::to_string(resolved.samplingFrequencyHz) + " Hz every " +
+            std::to_string(resolved.decodeIntervalMs) + " ms: needs at least " +
+            std::to_string((hwNeeded + (1 << 20) - 1) >> 20) +
+            " MiB (at up to 16 KiB per sample). Raise hw_buffer_size, or lower "
+            "decode_interval_ms or the sampling rate");
+    }
+    const bool autoSize = resolved.maxSamples == 0;
+    if (autoSize) {
+        resolved.maxSamples = AutoMaxSamples(resolved.samplingFrequencyHz, resolved.decodeIntervalMs);
+    } else if (resolved.maxSamples < perPass) {
+        std::cerr << "[cupti-profiler] warning: GPU max_samples (" << resolved.maxSamples
+                  << ") is less than one decode pass (" << perPass << " samples at "
+                  << resolved.samplingFrequencyHz << " Hz every " << resolved.decodeIntervalMs
+                  << " ms); samples will be lost. 0 = sized for the decode interval\n";
+    }
+    m_impl->config = std::move(resolved);
+    // metricsCstr below points into this copy's strings.
+    const ProfilerConfig& config = m_impl->config;
 
     // Capture host context for the TraceHeader.
     char hostbuf[256] = {0};
@@ -180,7 +254,8 @@ void GpuProfiler::Configure(const ProfilerConfig& config) {
     std::vector<int> indices = config.deviceIndices;
     if (indices.empty()) indices.push_back(0);
 
-    std::cout << "Sampling frequency: " << config.samplingFrequencyHz << " Hz\n";
+    std::cout << "Sampling frequency: " << config.samplingFrequencyHz << " Hz, decode every "
+              << config.decodeIntervalMs << " ms\n";
     std::cout << "Metrics: " << config.metrics.size() << "\n";
     for (const auto& m : config.metrics) std::cout << "  " << m << "\n";
     std::cout << "Devices: " << indices.size() << "\n";
@@ -224,11 +299,20 @@ void GpuProfiler::Configure(const ProfilerConfig& config) {
         uint64_t intervalNs = static_cast<uint64_t>(1e9 / config.samplingFrequencyHz);
         CUPTI_API_CALL(d.target.SetConfig(d.configImage, config.hwBufferSize, intervalNs));
         CUPTI_API_CALL(d.target.CreateCounterDataImage(
-            config.maxSamples, m_impl->metricsCstr, d.counterDataImage));
+            config.maxSamples, m_impl->metricsCstr, d.counterDataImages[0]));
+        CUPTI_API_CALL(d.target.CreateCounterDataImage(
+            config.maxSamples, m_impl->metricsCstr, d.counterDataImages[1]));
+        std::cout << "  Counter-data image: " << config.maxSamples << " samples ("
+                  << (autoSize ? "auto" : "set") << "), " << std::fixed << std::setprecision(1)
+                  << d.counterDataImages[0].size() / 1e6 << " MB (x2, double-buffered)\n";
 
         cudaDeviceProp prop;
         RUNTIME_API_CALL(cudaGetDeviceProperties(&prop, idx));
-        d.peakDramBwGbps        = (double)prop.memoryClockRate * 1e3
+        // cudaDeviceProp::memoryClockRate was removed in CUDA 13; the
+        // device attribute (kHz) exists in every supported release.
+        int memClockKHz = 0;
+        RUNTIME_API_CALL(cudaDeviceGetAttribute(&memClockKHz, cudaDevAttrMemoryClockRate, idx));
+        d.peakDramBwGbps        = (double)memClockKHz * 1e3
                                   * (prop.memoryBusWidth / 8) * 2 / 1e9;
         d.peakDramBwBytesPerSec = d.peakDramBwGbps * 1e9;
         // Per-SM warp occupancy ceiling — used by the "Active Warps /
@@ -312,22 +396,37 @@ void GpuProfiler::Start() {
     m_impl->wallClockEpochNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
+    // Start PM sampling on every device before any decode thread runs.
+    for (auto& d : m_impl->devices) {
+        CUPTI_API_CALL(d->target.Start());
+    }
+
     // Launch one decode thread per device.
     for (auto& d : m_impl->devices) {
-        d->stopDecode   = false;
+        d->stopDecode.Reset();
         d->decodeResult = CUPTI_SUCCESS;
+        internal::DecodeTarget device;
+        device.gpuIndex           = static_cast<uint32_t>(d->deviceIndex);
+        device.samplingIntervalNs = static_cast<uint64_t>(1e9 / m_impl->config.samplingFrequencyHz);
+        device.decodeIntervalMs   = m_impl->config.decodeIntervalMs;
+        device.deviceIndex        = d->deviceIndex;
+        device.configImage        = &d->configImage;
+        device.hwBufferSize       = m_impl->config.hwBufferSize;
+        device.maxSamples         = m_impl->config.maxSamples;
         d->decodeThread = std::thread(internal::DecodeThreadFunc,
-                                       std::ref(d->counterDataImage),
+                                       std::ref(d->counterDataImages),
                                        std::ref(m_impl->metricsCstr),
                                        std::ref(d->target),
                                        std::ref(d->host),
+                                       device,
+                                       std::ref(d->decodeStats),
                                        std::ref(d->stopDecode),
                                        std::ref(d->decodeResult));
     }
 
     // Launch one flush thread that pulls from every device.
-    m_impl->stopFlush = false;
-    if (m_impl->config.flushIntervalMs > 0 && m_impl->outFile.is_open()) {
+    m_impl->stopFlush.Reset();
+    if (m_impl->outFile.is_open()) {
         std::cout << "Periodic flush every " << m_impl->config.flushIntervalMs << " ms\n";
         std::vector<internal::DeviceDrainSlot> slots;
         slots.reserve(m_impl->devices.size());
@@ -341,6 +440,7 @@ void GpuProfiler::Start() {
             s.peak_nvlink_bw_bytes_per_s = &d->peakNvlinkBwBytesPerSec;
             s.max_warps_per_sm           = &d->maxWarpsPerSm;
             s.host                       = &d->host;
+            s.decode_stats               = &d->decodeStats;
             slots.push_back(std::move(s));
         }
         m_impl->flushThread = std::thread(internal::FlushThreadFunc,
@@ -360,11 +460,10 @@ void GpuProfiler::Start() {
                                            std::ref(m_impl->flushStatsMutex));
     }
 
-    // Start PM sampling on every device.
-    for (auto& d : m_impl->devices) {
-        CUPTI_API_CALL(d->target.Start());
-    }
     m_impl->running = true;
+    m_impl->owner = this;
+    internal::lifecycle::Register(m_impl.get(), internal::lifecycle::Order::Probe, "GpuProfiler",
+                                  [impl = m_impl.get()] { impl->owner->Stop(); });
 
     std::cout << "\n=== PM sampling started at "
               << m_impl->config.samplingFrequencyHz << " Hz across "
@@ -372,21 +471,20 @@ void GpuProfiler::Start() {
 }
 
 void GpuProfiler::Stop() {
+    std::lock_guard<std::mutex> stopLock(m_impl->stopMutex);
+    internal::lifecycle::StopScope stopping;
     if (!m_impl->running) return;
 
-    // Stop sampling on every device.
+    // Each decode thread stops its device's sampler (it may be re-enabling
+    // it after an overflow) and decodes what is left: tell them all, then
+    // join.
+    for (auto& d : m_impl->devices) d->stopDecode.Set();
     for (auto& d : m_impl->devices) {
-        CUPTI_API_CALL(d->target.Stop());
-    }
-
-    // Join decode threads.
-    for (auto& d : m_impl->devices) {
-        d->stopDecode = true;
         if (d->decodeThread.joinable()) d->decodeThread.join();
     }
 
     // Join flush thread.
-    m_impl->stopFlush = true;
+    m_impl->stopFlush.Set();
     if (m_impl->flushThread.joinable()) m_impl->flushThread.join();
 
     for (auto& d : m_impl->devices) {
@@ -396,6 +494,7 @@ void GpuProfiler::Stop() {
             std::cerr << "Decode thread error on device " << d->deviceIndex << ": "
                       << errstr << "\n";
         }
+        internal::ReportDecodeSummary(static_cast<uint32_t>(d->deviceIndex), d->decodeStats);
     }
 
     // Write the final residual flush — one trace covering every device's
@@ -414,12 +513,14 @@ void GpuProfiler::Stop() {
             p.peak_nvlink_bw_bytes_per_s = d->peakNvlinkBwBytesPerSec;
             p.max_warps_per_sm           = d->maxWarpsPerSm;
             p.samples                    = d->host.DrainSamples();
+            p.decode_stats               = &d->decodeStats;
             totalRemaining              += p.samples.size();
             payloads.push_back(std::move(p));
         }
         std::cout << "Remaining samples after flush: " << totalRemaining << "\n";
 
-        if (totalRemaining > 0 || m_impl->flushStatsPending.valid) {
+        // Always: the last frame carries the run's decode totals.
+        {
             GPUMetricsTrace finalTrace = internal::BuildTrace(
                 m_impl->hostname, m_impl->config.samplingFrequencyHz, m_impl->hostCpuCount,
                 m_impl->metricsCstr, payloads,
@@ -428,6 +529,8 @@ void GpuProfiler::Stop() {
                 auto* fs = finalTrace.add_flush_stats();
                 fs->set_flush_byte_size(m_impl->flushStatsPending.bytesWritten);
                 fs->set_flush_interval_ns(m_impl->flushStatsPending.intervalNs);
+                fs->set_flush_duration_ns(m_impl->flushStatsPending.durationNs);
+                fs->set_slow_flushes(m_impl->flushStatsPending.slowFlushes);
                 m_impl->flushStatsPending.valid = false;
             }
             std::lock_guard<std::mutex> lock(m_impl->outMutex);
@@ -446,6 +549,7 @@ void GpuProfiler::Stop() {
     }
 
     m_impl->running = false;
+    internal::lifecycle::Unregister(m_impl.get());
 }
 
 std::vector<SamplerRange> GpuProfiler::DrainSamples() {

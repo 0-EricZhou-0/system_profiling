@@ -236,17 +236,22 @@ Today's `CPUProcessSample` and `MemoryProcessSample`:
 > Per-PID `cpu_pct` is "% of one CPU" — modelling it as a Counter with
 > `.sum.per_second` semantics (not pre-normalized) is more faithful: a
 > 4-thread saturating process reports `400`, exactly what `.sum` across
-> four cores would yield. The value is summed across every thread of
-> the process by walking `/proc/<pid>/task/*/schedstat` and totalling
-> field 1 (`sum_exec_runtime` in ns) — the TGID-level
-> `/proc/<pid>/schedstat` reports only the leader's `task_struct` and
-> would silently under-report multi-threaded work. Nanosecond precision
-> rather than the 10 ms `CLK_TCK` quantization that `utime/stime` would
-> impose. The denominator is the actual wall-clock elapsed between
+> four cores would yield. The value is read from the process CPU clock
+> (`clock_getcpuclockid` + `clock_gettime`): the kernel's
+> `sum_exec_runtime` for the whole thread group, including threads
+> that have already exited — unlike the TGID-level
+> `/proc/<pid>/schedstat`, which reports only the leader's
+> `task_struct`, or a walk of `/proc/<pid>/task/*/schedstat`, which
+> loses every thread that exits between ticks. It avoids the 10 ms
+> `CLK_TCK` quantization that `utime/stime` would impose; the remaining
+> granularity is the scheduler tick (a running thread's time is folded
+> in at each `CONFIG_HZ` tick or context switch), which can shift up to
+> one tick per running thread between adjacent samples but never loses
+> time. The denominator is the actual wall-clock elapsed between
 > ticks, not the nominal sample period, so reported % stays accurate
 > even when sample loop jitter stretches a tick. The trade-off is that
 > we no longer split per-PID time into user / kernel / iowait —
-> schedstat reports total on-CPU time only.
+> the CPU clock reports total on-CPU time only.
 
 ### 2.4 — Mapping `DiskMetricsTrace`
 
@@ -259,18 +264,110 @@ Today's `DiskDeviceSample`:
 | `read_queue_depth` | `disk__read_inflight` | Counter | REQUESTS | — | `DEVICE("nvme0n1")` |
 | `write_queue_depth` | `disk__write_inflight` | Counter | REQUESTS | — | `DEVICE("nvme0n1")` |
 
-Today's `DiskProcessSample`:
+Today's `DiskProcessSample` — the five byte counters of `/proc/<pid>/io`,
+each under the name of the counter it carries:
 
-| Legacy field | Catalog FQN | Type | Unit | Peak | Scope |
+| `/proc/<pid>/io` counter | Catalog FQN | Type | Unit | Peak | Scope |
 | ------------- | ------------ | ---- | ---- | ---- | ----- |
-| `read_bytes_per_sec` | `proc__io_rchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
-| `write_bytes_per_sec` | `proc__io_wchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `rchar` | `proc__io_rchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `wchar` | `proc__io_wchar.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `read_bytes` | `proc__io_read_bytes.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `write_bytes` | `proc__io_write_bytes.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
+| `cancelled_write_bytes` | `proc__io_cancelled_write_bytes.sum.per_second` | Counter | BYTES_PER_SEC | — | `PROCESS(pid)` |
 
-> The per-PID counters are syscall-layer (`rchar` / `wchar`), not
-> block-layer (`read_bytes` / `write_bytes`). Encoding the source in the
-> counter name (`io_rchar`, not `read_bytes`) makes that explicit and
-> matches the existing system-guide warning that the two aren't
-> comparable.
+Each rate is the counter's delta over the actual interval since the PID's
+previous sample, **minus the I/O of tracked children the process reaped in
+that interval** (see the last bullet below): per-PID I/O is the process's
+own I/O.
+
+> [!IMPORTANT]
+> **Changed on `feature/sidecar-mode` (2026-09-25).** Until then the
+> trace had only `proc__io_rchar` / `proc__io_wchar`, and despite those
+> names they carried `read_bytes` / `write_bytes` (they had since the
+> initial commit). They now carry real `rchar` / `wchar`. There is no
+> compatibility alias: in an older trace, read `proc__io_rchar` as
+> `read_bytes` and `proc__io_wchar` as `write_bytes`.
+
+#### Per-PID I/O counters: who records what
+
+The kernel updates the five counters at two different layers:
+
+- **`rchar` / `wchar` — the syscall layer.** Every `read`/`write`-family
+  call (`read`, `pread`, `readv`, `write`, `sendfile`, ...) adds the bytes
+  it transferred, **on any kind of fd**: files, pipes, sockets, ttys. Page
+  cache hits count in full. **`mmap` never counts**: touching pages
+  through a mapping makes no syscall.
+- **`read_bytes` — the storage layer.** Bytes this process caused to be
+  fetched from storage: `read()` misses **and** page faults on an
+  `mmap`'d file that miss the page cache. **Page cache hits count 0**,
+  however the file is read.
+- **`write_bytes` — when pages are dirtied, not at writeback.** A
+  buffered `write()` to a file counts here immediately, even though the
+  data may reach the disk seconds later (or never, see next).
+  Writes to pipes and sockets count 0.
+- **`cancelled_write_bytes` — dirtied, then discarded.** Pages counted
+  in `write_bytes` that were thrown away before writeback because the
+  file was truncated or deleted while they were dirty. Bytes that
+  actually reached storage ≈ `write_bytes` − `cancelled_write_bytes`.
+
+Measured on ext4 (a 64 MiB file; values in MiB; "cold" = page cache
+dropped with `posix_fadvise(POSIX_FADV_DONTNEED)` and checked with
+`mincore`):
+
+| Pattern | `rchar` | `read_bytes` | `wchar` | `write_bytes` | `cancelled_write_bytes` |
+|---|---|---|---|---|---|
+| `write()` + `fsync` | 0 | 0 | 64 | 64 | 0 |
+| `read()`, page cache warm | 64 | 0 | 0 | 0 | 0 |
+| `read()`, page cache cold | 64 | 64 | 0 | 0 | 0 |
+| `mmap` + touch pages, cold | 0 | 64 | 0 | 0 | 0 |
+| `mmap` + touch pages, warm | 0 | 0 | 0 | 0 | 0 |
+| `write()` to a pipe | — | 0 | 8 | 0 | 0 |
+| `write()` 32 MiB, delete before flush | 0 | 0 | 32 | 32 | 32 |
+
+(The pipe row wrote 8 MiB, and the delete row 32 MiB.)
+
+Consequences:
+
+- The gap between `rchar` and `read_bytes` is the page cache's
+  contribution (for `read()`-style I/O).
+- **A model loaded by `mmap` from a warm page cache is invisible to all
+  four read/write counters**: neither layer sees it. A cold `mmap` load
+  shows up in `read_bytes` only. Whether a framework maps or reads its
+  weights varies: vLLM 0.29's default safetensors loader **reads** them
+  (measured 2026-09-25: its EngineCore's `rchar` grew by 1.629 GiB during
+  the load of a 1.627 GiB checkpoint, with `read_bytes` 0 from a warm
+  cache), so there the load shows in the syscall layer only.
+- **The kernel folds a reaped child's I/O into its parent; the trace
+  takes it back out for tracked children.** When a process reaps a child
+  (`wait`), the kernel adds the child's lifetime I/O to the parent's own
+  `/proc/<pid>/io` (all five counters; verified on kernel 5.15: a
+  parent's `rchar` grew by exactly the 64.3 MiB its child had read, at
+  the reap). Unlike CPU's `cutime`/`cstime`, there is no separate
+  "children" counter. So when both are tracked, the child's I/O would
+  appear twice: under the child while it ran, and again as one jump in
+  the parent at the reap. The disk probe therefore subtracts each
+  reaped **tracked** child's counters at its last reading from the
+  parent's delta, and records it (`IoReapAdjustment`, see
+  [reaped children's I/O](system-guide.md#reaped-childrens-io)).
+  A child reaped by a tracked process that itself exits and is reaped
+  within one sampling interval is subtracted at the first live tracked
+  ancestor; when whether it was reaped there cannot be known (no
+  orphan reaper), it is listed as ambiguous and not subtracted.
+  **Per-PID I/O means the process's own I/O, excluding tracked children
+  it reaped.** It differs from the raw `/proc/<pid>/io` delta exactly by
+  the adjustment records, from which the raw value can be rebuilt. The
+  I/O of a child that was never sampled (discovery off, or too
+  short-lived to be found) is **not** subtracted: it was never counted
+  separately, and appears once, under the parent that reaped it.
+  (Changed on `feature/sidecar-mode`, 2026-09-25; traces written before
+  it show the jump. Per-PID CPU never had this effect: it is the
+  process's own CPU clock, which excludes children; see
+  [head and tail CPU](system-guide.md#head-and-tail-cpu).)
+- `wchar` includes pipe and socket traffic (e.g. a server's responses,
+  or a process's stdout), so it is not a file-write rate.
+- Per-device `disk__*_bytes` counts what the block device did, for every
+  process; the per-PID storage counters are the closest per-process
+  equivalent, attributed to whoever dirtied or faulted the pages.
 
 ### 2.5 — Generic post-processing pipeline
 

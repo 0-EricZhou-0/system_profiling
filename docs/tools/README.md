@@ -84,17 +84,156 @@ Quality / size knobs:
 
 - `--smooth-window-s <s>` boxcar-smooths every `smoothable` metric over
   the given window (per-probe kernel size). `0` (default) = no
-  smoothing. Cumulative companion panels stay raw so their run totals
+  smoothing. Cumulative companion panels stay raw so their integrals
   remain faithful.
+- `--fit-axis-to-data` (off by default): a panel whose ceiling (the
+  Peak line) is more than 5× the largest plotted value — the data would
+  fill under a fifth of an axis stretched to it — gets a y-axis sized to
+  its data and the ceiling written as `Peak: <value> (off-scale)` instead
+  of drawn (the full-system figure's NVLink panel: a few KiB/s under a
+  279 GiB/s ceiling). Panels whose ceiling is near their data are
+  unchanged. Off, every panel reaches its Peak as before. Also on
+  `visualize_interactive.py` and passed through by the vLLM example.
+- `--unit-scale-factor <F>` (default 2, must be ≥ 1): the byte-unit
+  threshold — an axis or footer rate uses the largest prefix P
+  (KiB, MiB, GiB, TiB) with its largest value ≥ F × P (see "Byte units"
+  below); 1 switches as soon as a value reaches the prefix. Also on
+  `visualize_interactive.py` (static and live mode) and passed through by
+  `examples/vllm_serving_profiling.py`.
 - `--display-hz <Hz>` stride-decimates every series to the given
   display rate after smoothing. `0` (default) keeps the raw sampling
   rate. Useful for cutting render time on high-frequency GPU traces.
 
+**Legends** sit above each panel, outside the plot, under the panel
+title, in as many columns as the widest entry allows. A panel with more
+than ten series (a cold vLLM start tracks ~160 processes) lists the ten
+most active — by the time integral of the value; on a cumulative panel,
+by run total — and one `+k more` entry; the rest are drawn in light
+grey, so every colour in a legend names one line (ten = the length of
+the colour cycle). A process keeps one colour in every panel, the
+busiest processes getting distinct colours first; within a panel the
+listed entries never share a colour. Legend entries name the series or
+process only, on cumulative companions too (the values are on the
+axis). Every series, listed or not, is in `<output>.legend.txt`.
+In a panel with several metrics per process (the per-process I/O
+panels) or per disk device (disk bandwidth: read and write), the
+legend's first row is the line-style key alone (`── IO rchar (sum)  - -
+IO wchar (sum)`), the processes (devices) on the rows under it, each
+entry naming the process (device) only.
+
+**Process timeline.** Directly under the Region strip, on the same time
+axis: one bar per tracked process (processes only — threads are not
+traced) from its start to its exit, or to the end of the trace if it was
+still running, in the process's colour from the per-process panels.
+Every process is labelled with its latest name: `comm (pid)` inside its
+bar where that fits (else `comm` alone); otherwise `comm (pid)` in rows
+under the lanes, joined to its bar by a thin grey leader drawn beneath
+the bars. The outside labels never overlap one another or a bar: they
+are spread along the axis, at least 8 pt apart and the first row clear
+of the lowest lane by more than half a lane (`tools/label_spread.py`,
+the same routine the event and region strips use) in as many rows as it takes
+for each to sit within 8% of the axis width of its bar; a burst of
+short-lived compilers (a cold vLLM start, ~90 processes in a few
+seconds) becomes a few rows of labels near the burst. No process is
+left unlabelled (`label_spread.place_bar_labels` with no row limit).
+Listed roots are outlined solid, orphans — discovered processes whose
+parent is not in the trace — dashed. A thin line with a dot on the
+parent's bar marks each fork: from the parent's bar at the child's start
+to the child's bar (the parent is the one recorded when the child was
+found, so a reparented process still links to the process that forked
+it). The bars are packed into the fewest lanes possible: in start order,
+each takes a lane free at its start — the one nearest its parent's — and
+a new lane opens only when none is free, so the lane count is the most
+processes alive at one instant. From the trace's process table (the
+System probe's): pid, parent, comm history, start (10 ms ticks) and end.
+
+**Colours and line order.** A process has one colour on the whole page
+(its PID's; per-process panels tell a process's metrics apart by line
+style). Every other series takes its colour from its *base metric* —
+entity, counter and submetric, plus the device or GPU it is of — one hue
+per base metric, handed out in layout order from the tab10 cycle and
+continuing across panels (SM activity blue, warps orange, DRAM read
+green, DRAM write red, ...). Statistic variants of one metric share its
+hue: `.max` in the full colour, `.avg` tinted halfway to white, `.min`
+three quarters, `.sum` shaded a third toward black; a statistic alone in
+its panel keeps the full colour. Within a panel two base metrics never
+share a hue (the more active keeps it). Series are drawn from the most
+active to the least, so a smaller one lies on top: the lighter `.avg`
+band over the full-colour `.max` one (max ≥ avg, so max shows from avg up
+to max). Series lines are 0.63 pt (the grey "+k more" 0.42 pt; the Bokeh
+page 0.84 / 0.56 px).
+
+**A process's end on memory panels.** While the kernel tears an exiting
+process's memory down, `/proc/<pid>/statm` reads RSS 0 though its pidfd
+still says alive. The System probe checks the exit evidence at that
+reading (`/proc/<pid>/stat` gone, zombie, or `PF_EXITING`) and records
+the sample's memory as missing (NaN) instead of 0 — its CPU is kept; a
+process that frees its memory while alive keeps its real drop.
+
+**Exit lines.** On every per-process gauge panel (a level: bytes such as
+RSS, counts) and every cumulative panel, each process that exited ends in
+a dashed vertical line from 0 up to its series' last value at its end:
+black in the PNG, the theme's ink on the Bokeh page (black; #E0E0E0 in
+the dark theme). `--no-exit-lines` (both tools; passed through by
+`examples/vllm_serving_profiling.py`) leaves them out: the series then just
+stops at its last value, it is never drawn down to 0.
+
+**Session stop** (Bokeh page only; the PNG has no stop mark). Every
+metric panel, rate and cumulative, has a dashed vertical line marked
+`stop` at the session's stop — the last sample any probe (GPU, System,
+Disk) took, within one sampling interval of the stop call (the trace does
+not record the call's own time); regions and events do not move it — and
+the time after it shaded light grey (a subtle grey in the dark theme) out
+to the plot's right edge, however far you pan or zoom past it. Neither is
+in a legend or changes an axis. Not on the event / region strips or the
+process timeline.
+
+**Cumulative companions.** A layout panel with `aggregation:
+PANEL_AGGREGATION_INTEGRATE` gets a companion under it plotting ∫ y dt of
+each of its series (trapezoid rule, full-resolution data), one line per
+series as in the panel above: nothing is summed across processes or
+devices. The disk bandwidth panel and its companion, in both shipped
+layouts, draw each device in one colour (the same in every disk panel),
+read solid and write dashed.
+
+**Byte units.** Every bytes and bytes/s axis — rates, gauges and
+cumulative panels, in both renderers — takes its unit from the largest
+value actually plotted on it (after any smoothing or decimation asked
+for; the Peak line does not choose it), with a threshold factor F
+(`--unit-scale-factor`, default 2) so it does not switch too early; with
+F = 2: ≥ 2 TiB → TiB, ≥ 2 GiB → GiB, ≥ 2 MiB → MiB,
+≥ 2 KiB → KiB, else B (a 1.5 GiB peak reads as 1,536 MiB); rates the same
+with `/s`; an empty or all-zero panel B. The Peak line is drawn as before
+and labelled in the axis's unit. The write-rate footer uses the same rule,
+each value in its own unit (`tools/units.py`).
+
+**Write-rate footer.** Under the panels (PNG) or the page (Bokeh), a
+table: `Probe`, `Sampling` (the probe's configured rate, from the trace's
+session metadata), `Estimated` (bytes per sample × rate), `Measured`
+(file size ÷ the probe's time span), `Samples`, one row per probe and a
+`Total`; `—` where a cell does not apply (Events have no configured rate
+or estimate). Headers and probe names left-aligned, numbers
+right-aligned; the same cells in both renderers (`tools/write_rate.py`).
+
+**Statistic labels.** A metric that is a statistic over its entity's
+instances says which in its legend, from the FQN's rollup:
+`sm__cycles_active.avg…` reads "Active Cycles (avg)" (the mean over the
+SMs), `.max` "(max)" (the busiest SM), `.sum` "(sum)" (e.g. a
+process's CPU summed over its threads). Metrics without a rollup
+(`mem__used_bytes`) carry none.
+
+**Peak line.** A panel with a known ceiling — from the layout
+(`peak_constant`, `peak_from_gpu_info`, …) or the catalog's `peak` —
+draws a dotted line at it labelled **`Peak: <value> <unit>`** (100 %,
+the GPU's peak DRAM / PCIe / NVLink bandwidth, installed RAM, …) and
+caps the y-axis 10% above it. It is the hardware or configured
+ceiling, not the largest value in the data.
+
 Panels in the default layout (auto-skipped when no series matches):
 SM Util → Active Warps/Cycle → DRAM Bandwidth → PCIe Bandwidth →
 NVLink Bandwidth → CPU Utilization → System Memory → Per-PID CPU →
-Per-PID Resident Memory → Per-PID I/O → Disk Bandwidth → Disk Queue
-Depth.
+Per-PID Resident Memory → Per-PID I/O (syscall layer) → Per-PID I/O
+(storage layer) → Disk Bandwidth → Disk Queue Depth.
 
 ## `visualize_interactive.py`
 
@@ -103,7 +242,8 @@ Bokeh-based interactive renderer, same input contract as
 with BokehJS bundled inline) plus a built-in HTTP server.
 
 ```bash
-# Build + serve on http://localhost:8000
+# Build + serve on http://localhost:8000 (it never opens a browser:
+# point yours at the URL it logs)
 python tools/visualize_interactive.py profiling_output/session_metadata.pb
 
 # Custom port + custom output file path:
@@ -131,7 +271,10 @@ Flag reference (selected; full list via `--help`):
 
 - `--theme {light,dark}` — `dark` applies Bokeh's `dark_minimal` to
   every plot and flips the page background, loading overlay, and
-  sticky-strip fills to match. Default `light`.
+  sticky-strip fills to match; the page's own marks (fold headers,
+  Peak labels, the timeline's outlines, fork links and outside labels,
+  the line-style key's swatches) take the theme's text colour, so they
+  stay legible on the dark background. Default `light`.
 - `--render-backend {canvas,webgl,svg}` — output backend per figure.
   Default `canvas`: ~4-5× faster first paint than `webgl` at our
   trace volume (some GPU drivers stall on WebGL `ReadPixels`). `webgl`
@@ -141,9 +284,65 @@ Flag reference (selected; full list via `--help`):
 
 What you get:
 
+- **Process timeline pinned** in the sticky band, under the event and
+  region strips (same x-range as the panels), as in `visualize_all.py`;
+  hover a bar for the process's every name, pid, parent, kind, start and
+  end (the tooltip at the pointer, so also on a zoomed-in bar whose
+  centre is off-screen; the region strip's the same). It keeps its full height (a cold vLLM start: 21 lanes and their
+  label rows make the band tall; fold the timeline with its ▾ to give the
+  space back). It has the panels' tools, toolbar and right-click menu
+  (drag to box-zoom, ctrl + scroll, pan, reset, save, hover), and its
+  key (listed root / discovered / orphan / fork link) right of the
+  lanes, like a panel's legend.
+- **Labels that follow the view** on the timeline and the region and
+  event strips: after every x-range change (zoom, pan, reset, keys;
+  debounced 60 ms) the page places them again for what is in view — on a
+  bar when the label fits its visible part, else in a label row with a
+  leader, never overlapping — so zooming in moves a label back onto its
+  bar once the bar is wide enough. Same rules as the full-view layout:
+  `tools/label_spread.js` is a line-for-line port of
+  `label_spread.place_bar_labels` (a test runs both on the same inputs).
+  Measured on the cold vLLM trace (86 processes): 0.3–0.6 ms per
+  relayout. Every figure on the page
+  has the same plot frame (left edge and width) and reserves the same
+  right border (room for the widest legend), so a time is at the same x
+  in the strips, the timeline and every panel, and the page has one
+  right edge. In a window too narrow for all of it, every frame narrows
+  alike.
+- **Foldable panels**: each panel, and the timeline, has a header with
+  its title and a ▾/▸ control; collapsed, only the header row is left.
+  *Collapse all* / *Expand all* sit at the top of the sticky band. Works
+  in the saved HTML without a server (not remembered across reloads).
+  A fold hides the panel by CSS, so only the page below it moves: on the
+  cold vLLM page ~50 ms to fold and ~110 ms to unfold a panel, ~0.5 s /
+  ~1 s to collapse / expand all (hiding by Bokeh's `visible` re-laid out
+  the whole page: ~1.1 s a panel, 6.6–8.5 s for all).
+- **Middle-button drag pans** the time axis on any plot (panels,
+  timeline, strips) whatever toolbar tool is active; left-drag keeps the
+  active tool (box zoom). The browser's middle-click autoscroll / paste
+  is suppressed on the plots.
+- **`? Keys` button** at the top right of the sticky band: the same key
+  list as the `?` key. Process and region tooltips show a duration next
+  to start and end.
+- **Room to scroll the last panel up**: a window's height of empty page
+  (the page background, either theme) follows the last panel and the
+  footer, so the last panel can sit right under the sticky band.
+- **Keys** (ignored while typing in a text field; the toolbar's tools
+  are unchanged):
+
+  | key | does |
+  |---|---|
+  | `r` or `0` | reset zoom to the whole trace |
+  | `=` or `+` | zoom in 2x around the centre (every panel: they share one x-range) |
+  | `-` | zoom out 2x |
+  | `←` / `→` | pan 10% of the visible span (`Shift`: 50%) |
+  | `c` | collapse / expand all panels |
+  | `?` | show / hide this key list |
 - **Sticky event + region strips** pinned at the top of the page; the
   metric panels below scroll past behind them. The two strips share
-  one continuous opaque band with a dashed separator at the bottom.
+  one continuous opaque band with a dashed separator at the bottom. Each
+  is 36 px high (its name left of the frame): the bars / markers on
+  top, up to two rows of labels under them.
 - **Gesture conventions** that match TensorBoard / NSYS / NCU:
     - plain mouse scroll → page scroll
     - **ctrl + scroll** → cursor-anchored x-axis zoom
@@ -151,15 +350,29 @@ What you get:
       x-region)
   Pan is still available via the toolbar's pan button on the left.
 - **Unified hover popup** anchored at the bottom edge of each panel:
-  one tooltip per panel listing every co-plotted series's value at
-  the cursor x (interpolated where sampling rates differ). Triggers
-  regardless of which legend entries are hidden.
-- **Click-to-hide legend entries**; legends are docked to the **right**
-  with their left edges aligned across panels (toolbar lives on the
-  left so the right column belongs to the legend).
+  one tooltip per panel listing every co-plotted series that has a value
+  at the cursor x (interpolated where sampling rates differ): a process
+  not started yet or already gone gets no row. Triggers regardless of
+  which legend entries are hidden.
+- **Same series styling as `visualize_all.py`** (shared code,
+  `tools/panel_legend.py`): one colour per process across the page,
+  panels and process timeline alike; a line style per metric in
+  panels with several metrics per process, with a legend of processes
+  plus line styles; discovered processes labelled `child of <pid>`;
+  statistic labels; legend entries that name the series only.
+- **Click-to-hide legend entries**; a panel's legend sits **to the
+  right** of its plot, one entry per compact row, capped as in
+  `visualize_all.py` (ten entries plus `+k more`, which hides or shows
+  all the grey lines at once; they are drawn as one multi-line per line
+  style, which keeps panning fast with many processes); a line-style key (several metrics per
+  process or device) stays on one row above the plot. The plot frame has
+  a fixed size, so a legend never squeezes it. (The PNG keeps its
+  legends above the panels.)
 - **Y-axis clamps** with dashed reference lines at the theoretical
   peak (100% SM Util, `max_warps_per_sm` for Active Warps, peak DRAM /
-  PCIe / NVLink BW, installed RAM total).
+  PCIe / NVLink BW, installed RAM total), labelled `Peak: …` as in
+  `visualize_all.py`; legend labels name the statistic ("(avg)", …) the
+  same way.
 - **X-axis clamp**: pan/zoom is bounded to
   `[0, t_end + 0.4 × current_window_length]`, recomputed live as you
   zoom. The trace stays at ≥60% of the viewport even when you scroll

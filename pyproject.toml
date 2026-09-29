@@ -25,7 +25,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "cupti-profiler"
-version = "0.0.1-dev0"
+version = "0.2.0"
 description = "GPU + system + disk profiling around CUPTI PM Sampling, with a Python wrapper."
 requires-python = ">=3.8"
 authors = [{ name = "Eric Zhou", email = "yiruiz2@illinois.edu" }]
@@ -36,7 +36,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-viz = ["numpy>=1.24", "matplotlib>=3.7"]
+# bokeh: tools/visualize_interactive.py (legends, fold buttons and
+# keyboard shortcuts tested with 3.9.2; needs Legend.ncols, bokeh >= 3.0)
+viz = ["numpy>=1.24", "matplotlib>=3.7", "bokeh>=3.9"]
 dev = ["pytest>=8.0"]
 
 [tool.scikit-build]

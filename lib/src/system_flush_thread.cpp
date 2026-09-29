@@ -1,15 +1,25 @@
 #include "system_flush_thread.h"
+#include "flush_backlog.h"
+#include "lifecycle.h"
+#include "delimited_write.h"
+#include "discovery_stats_proto.h"
+#include "tracked_process_proto.h"
+#include "testing_hooks.h"
 
 #include "system_metrics.pb.h"
 #include "metric_sample.pb.h"
-#include <google/protobuf/io/coded_stream.h>
-#include <google/protobuf/io/zero_copy_stream_impl.h>
 
 #include <array>
 #include <chrono>
+#include <limits>
+#include <pthread.h>
 #include <iostream>
 #include <thread>
 
+
+namespace {
+constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
+}
 namespace cupti_profiler {
 namespace internal {
 
@@ -125,7 +135,7 @@ inline constexpr std::array kProcessMetrics = {
         .rollup      = "sum",   .submetric = "per_second",
         .unit        = Unit::PctOfCore,  .scope = Scope::Process,
         .peak        = PeakExpr{"ncpus_x_100"},
-        .description = "Per-PID on-CPU time as % of one core, aggregated across every thread of the process. Sum of /proc/<pid>/task/*/schedstat sum_exec_runtime deltas (ns) over actual wall-clock between ticks — nanosecond-precise, no CLK_TCK quantization. >100% means multi-core use; the panel peak_expr caps the axis at ncpus × 100.",
+        .description = "Per-PID on-CPU time as % of one core, for the whole process. Delta of the process CPU clock (clock_getcpuclockid: sum_exec_runtime of every thread, including threads that exited between ticks) in ns over actual wall-clock between ticks. No CLK_TCK quantization; a thread that runs without being descheduled has its time folded in at each scheduler tick (CONFIG_HZ, 4 ms at 250 Hz), so one sample can be off by up to a tick per running thread, while the sum over samples stays exact. >100% means multi-core use; the panel peak_expr caps the axis at ncpus × 100.",
         .read        = [](const ProcessTick& t){ return t.cpu_pct; },
     },
     MetricDescriptor<ProcessTick>{
@@ -135,7 +145,7 @@ inline constexpr std::array kProcessMetrics = {
         .unit        = Unit::Bytes,  .scope = Scope::Process,
         .peak        = PeakRef{"mem__capacity_bytes"},
         .description = "Resident set size — /proc/<pid>/status VmRSS. Physical pages owned by the PID.",
-        .read        = [](const ProcessTick& t){ return static_cast<double>(t.rss_bytes); },
+        .read        = [](const ProcessTick& t){ return t.mem_unreadable ? kNaN : static_cast<double>(t.rss_bytes); },
     },
     MetricDescriptor<ProcessTick>{
         .fqn         = "proc__vms_bytes",
@@ -143,7 +153,7 @@ inline constexpr std::array kProcessMetrics = {
         .entity      = "proc",  .counter = "vms_bytes",
         .unit        = Unit::Bytes,  .scope = Scope::Process,
         .description = "Virtual memory size — /proc/<pid>/status VmSize. Can exceed physical RAM (file-backed, overcommit).",
-        .read        = [](const ProcessTick& t){ return static_cast<double>(t.vms_bytes); },
+        .read        = [](const ProcessTick& t){ return t.mem_unreadable ? kNaN : static_cast<double>(t.vms_bytes); },
     },
     MetricDescriptor<ProcessTick>{
         .fqn         = "proc__shared_bytes",
@@ -152,7 +162,7 @@ inline constexpr std::array kProcessMetrics = {
         .unit        = Unit::Bytes,  .scope = Scope::Process,
         .peak        = PeakRef{"mem__capacity_bytes"},
         .description = "Resident shared memory — /proc/<pid>/status RssShmem.",
-        .read        = [](const ProcessTick& t){ return static_cast<double>(t.shared_bytes); },
+        .read        = [](const ProcessTick& t){ return t.mem_unreadable ? kNaN : static_cast<double>(t.shared_bytes); },
     },
 };
 
@@ -195,9 +205,8 @@ void AddTrackedProcesses(
 {
     for (const auto& p : processes) {
         auto* tp = trace.add_tracked_processes();
-        tp->set_pid(p.pid);
-        tp->set_alias(p.alias);
-        tp->set_removed(p.pending_removal);
+        FillTrackedProcess(tp, p);
+        tp->set_cpu_before_tracking_ns(p.cpu_before_tracking_ns);
     }
 }
 
@@ -232,22 +241,23 @@ SystemMetricsTrace BuildSystemTrace(
     AddTrackedProcesses(trace, processes);
     for (const auto& t : drained.systemTicks)  AppendSystemSample(trace, t);
     for (const auto& t : drained.processTicks) AppendProcessSample(trace, t);
+    for (const auto& r : drained.cpuTails) {
+        auto* c = trace.add_cpu_tails();
+        c->set_timestamp_ns(r.timestamp_ns);
+        c->set_parent_pid(r.parent_pid);
+        for (uint32_t pid : r.pids) c->add_pids(pid);
+        c->set_cpu_after_last_sample_ns(r.cpu_ns);
+        for (uint32_t pid : r.chainPids) c->add_chain_pids(pid);
+        for (uint32_t pid : r.ambiguousPids) c->add_ambiguous_pids(pid);
+        c->set_ambiguous_cpu_ns(r.ambiguousCpuNs);
+    }
     return trace;
 }
 
 size_t WriteDelimitedSystemTraceSized(const SystemMetricsTrace& trace,
                                       std::ofstream& out)
 {
-    std::string serialized;
-    if (!trace.SerializeToString(&serialized)) {
-        std::cerr << "Failed to serialize SystemMetricsTrace\n";
-        return 0;
-    }
-    google::protobuf::io::OstreamOutputStream raw(&out);
-    google::protobuf::io::CodedOutputStream coded(&raw);
-    coded.WriteVarint32(static_cast<uint32_t>(serialized.size()));
-    coded.WriteString(serialized);
-    return serialized.size();
+    return WriteDelimitedFrame(trace, out, "SystemMetricsTrace");
 }
 
 void SystemFlushThreadFunc(SystemSampleBatch& batch,
@@ -258,33 +268,42 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
                            uint64_t samplingFrequencyHz,
                            uint32_t hostCpuCount,
                            ProcessTrackingProbe& probe,
-                           std::atomic<bool>& stop,
+                           StopSignal& stop,
                            uint64_t flushIntervalMs,
                            uint64_t steadyClockRefNs,
                            uint64_t wallClockEpochNs,
                            SystemPendingFlushStats& pending,
                            std::mutex& pendingMutex)
 {
+    lifecycle::BlockSignalsInThisThread();
+    ::pthread_setname_np(::pthread_self(), "cupti-sys-flush");
     size_t totalFlushed = 0;
     uint64_t prevFlushNs = 0;
-    while (!stop) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(flushIntervalMs));
-        if (stop) break;
+    FlushBacklog backlog("System probe", flushIntervalMs);
+    struct SummaryAtEnd { FlushBacklog& b; ~SummaryAtEnd() { b.Summary(); } } summary{backlog};
+    // Stop() wakes the wait; the final flush is Stop()'s.
+    while (!stop.WaitUntil(std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(flushIntervalMs))) {
+        const uint64_t flushStartNs = SteadyNowNs();
 
         SystemSampleBatch drained;
         {
             std::lock_guard<std::mutex> lock(batchMutex);
             drained.systemTicks.swap(batch.systemTicks);
             drained.processTicks.swap(batch.processTicks);
+            drained.cpuTails.swap(batch.cpuTails);
         }
 
         auto processSnapshot = probe.SnapshotProcesses();
-        if (drained.systemTicks.empty() && drained.processTicks.empty()) continue;
+        if (drained.systemTicks.empty() && drained.processTicks.empty() &&
+            drained.cpuTails.empty() && !HasRemovalMarker(processSnapshot) &&
+            !HasUnreadableRecord(processSnapshot)) continue;
 
         SystemMetricsTrace trace = BuildSystemTrace(
             hostname, samplingFrequencyHz, hostCpuCount,
             steadyClockRefNs, wallClockEpochNs,
             processSnapshot, drained);
+        AttachDiscoveryStats(trace, probe);
 
         {
             std::lock_guard<std::mutex> lock(pendingMutex);
@@ -292,6 +311,8 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
                 auto* fs = trace.add_flush_stats();
                 fs->set_flush_byte_size(pending.bytesWritten);
                 fs->set_flush_interval_ns(pending.intervalNs);
+                fs->set_flush_duration_ns(pending.durationNs);
+                fs->set_slow_flushes(pending.slowFlushes);
                 pending.valid = false;
             }
         }
@@ -304,10 +325,13 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
         }
         // Now that the removed=true markers have been written, drop
         // those entries so subsequent flushes don't keep emitting them.
-        probe.CommitPendingRemovals();
+        internal::PassFlushGate();   // test-only; see <cupti_profiler/testing.h>
+        probe.CommitPendingRemovals(processSnapshot);
 
-        uint64_t nowNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+        PassFlushDelay();   // test-only slow writer; see <cupti_profiler/testing.h>
+        uint64_t nowNs = SteadyNowNs();
+        const uint64_t durationNs = nowNs - flushStartNs;
+        backlog.Record(durationNs, bytes);
         uint64_t intervalNs = (prevFlushNs == 0) ? 0 : (nowNs - prevFlushNs);
         prevFlushNs = nowNs;
 
@@ -315,6 +339,8 @@ void SystemFlushThreadFunc(SystemSampleBatch& batch,
             std::lock_guard<std::mutex> lock(pendingMutex);
             pending.bytesWritten = bytes;
             pending.intervalNs   = intervalNs;
+            pending.durationNs   = durationNs;
+            pending.slowFlushes  = backlog.SlowFlushes();
             pending.valid        = true;
         }
 
