@@ -1438,6 +1438,10 @@ A full-suite run produces five `.pb` files under `output_dir`:
 | `events.pb` | `EventTrace` (length-delimited) | Regions + events, Generic + GPU domains |
 | `session_metadata.pb` | `SessionMetadata` (single message, **not** length-delimited) | Manifest of probes, hostname, wall-clock anchor, **inlined `MetricCatalog`** |
 
+The manifest names each probe file relative to its own directory, so a
+trace directory is self-contained: copy or move it (to another machine,
+too) and render it there.
+
 The three per-domain trace types share substructures (`TraceHeader`,
 `ScopeMetricNames`, `Sample` / `ProcessSample` / `DeviceSample` /
 `GPUSample`, `TrackedProcessV2`, `FlushStats`) defined in

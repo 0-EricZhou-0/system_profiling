@@ -69,6 +69,11 @@ auto-discovers each per-probe file from the manifest's `probes` list.
 Walks the panel layout and emits one matplotlib subplot per panel that
 has matching series.
 
+A trace directory is self-contained (the manifest names probe files
+relative to itself), so it can be copied to another machine and rendered
+there; traces from v0.2.0 and earlier, which recorded absolute paths, are
+read the same way.
+
 ```bash
 python tools/visualize_all.py profiling_output/session_metadata.pb \
     -o full_profile.png
