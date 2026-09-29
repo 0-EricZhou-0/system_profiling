@@ -23,6 +23,9 @@ message ActiveProbe {
     ProbeKind kind = 1;
     // Relative to the directory holding session_metadata.pb (normally
     // just the file name), so a trace directory can be copied or moved.
+    // v0.2.0 and earlier recorded output_dir + output_file (absolute when
+    // output_dir was); readers then fall back to the file's name next to
+    // session_metadata.pb (tools/trace_paths.py).
     string output_file = 2;
     uint64 sampling_frequency_hz = 3;  // 0 if not applicable (e.g. events)
 }

@@ -56,6 +56,7 @@ import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
+from trace_paths import resolve_probe_path  # noqa: E402
 
 from bokeh.application import Application  # noqa: E402
 from bokeh.application.handlers.function import FunctionHandler  # noqa: E402
@@ -107,16 +108,6 @@ def _load_session_metadata(path: str | Path) -> session_metadata_pb2.SessionMeta
     return meta
 
 
-def _resolve_path(metadata_path: Path, p: str) -> Path:
-    pp = Path(p)
-    if pp.is_absolute():
-        return pp
-    for c in (Path.cwd() / pp, metadata_path.parent / pp.name, metadata_path.parent / pp):
-        if c.exists():
-            return c
-    return Path.cwd() / pp
-
-
 def _ingest_probes(
     projector: TraceProjector,
     meta: session_metadata_pb2.SessionMetadata,
@@ -132,7 +123,7 @@ def _ingest_probes(
     sample_freqs: dict[str, int] = {}
     probes_info: dict[str, dict] = {}
     for probe in meta.probes:
-        out = _resolve_path(metadata_path, probe.output_file)
+        out = resolve_probe_path(metadata_path, probe.output_file)
         if not out.exists():
             _log(f"  skip {out} (not found)")
             continue
@@ -980,7 +971,7 @@ def _load_events_for_session(meta: session_metadata_pb2.SessionMetadata,
     for probe in meta.probes:
         if probe.kind != session_metadata_pb2.PROBE_KIND_EVENTS:
             continue
-        out = _resolve_path(metadata_path, probe.output_file)
+        out = resolve_probe_path(metadata_path, probe.output_file)
         if not out.exists():
             return [], []
         return _load_events(out)

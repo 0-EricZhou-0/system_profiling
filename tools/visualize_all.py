@@ -63,6 +63,7 @@ import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
+from trace_paths import resolve_probe_path  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -156,17 +157,6 @@ def _load_session_metadata(path: str | Path) -> session_metadata_pb2.SessionMeta
         meta = session_metadata_pb2.SessionMetadata()
         meta.ParseFromString(f.read())
     return meta
-
-
-def _resolve_probe_path(metadata_path: Path, p: str) -> Path:
-    pp = Path(p)
-    if pp.is_absolute():
-        return pp
-    cands = [Path.cwd() / pp, metadata_path.parent / pp.name, metadata_path.parent / pp]
-    for c in cands:
-        if c.exists():
-            return c
-    return cands[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1073,7 +1063,7 @@ def _ingest_probes(
     }
 
     for probe in meta.probes:
-        out_path = _resolve_probe_path(metadata_path, probe.output_file)
+        out_path = resolve_probe_path(metadata_path, probe.output_file)
         if not out_path.exists():
             _log(f"  skip {out_path} (not found)")
             continue

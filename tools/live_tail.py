@@ -46,6 +46,7 @@ import session_metadata_pb2  # noqa: E402
 import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
+from trace_paths import resolve_probe_path  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +161,7 @@ class LiveCoordinator:
         # One TraceTail per active probe.
         self.tails: list[tuple[int, TraceTail]] = []
         for probe in meta.probes:
-            out = self._resolve_path(probe.output_file)
+            out = resolve_probe_path(self.metadata_path, probe.output_file)
             if probe.kind == session_metadata_pb2.PROBE_KIND_GPU:
                 self.tails.append((probe.kind,
                                    TraceTail(out, gpu_metrics_pb2.GPUMetricsTrace)))
@@ -183,18 +184,8 @@ class LiveCoordinator:
         self._removal_markers_drawn: set[tuple[int, object]] = set()
 
     # ------------------------------------------------------------------
-    # Path resolution + bookkeeping
+    # Bookkeeping
     # ------------------------------------------------------------------
-
-    def _resolve_path(self, p: str) -> Path:
-        pp = Path(p)
-        if pp.is_absolute():
-            return pp
-        for c in (Path.cwd() / pp, self.metadata_path.parent / pp.name,
-                  self.metadata_path.parent / pp):
-            if c.exists():
-                return c
-        return Path.cwd() / pp
 
     def register_panel(self, entry: _PanelEntry) -> None:
         self.panels.append(entry)
