@@ -105,6 +105,10 @@ public:
         bool     reaped     = false;
         uint64_t startNs    = 0;   // ProcessEntry::start_time_ns: identity for `adopted`
         uint32_t rootParent = 0;   // parent of the listed root it descends from; 0 = unknown
+        // Its parent ignored SIGCHLD when the reap was found, so it was
+        // auto-reaped and its I/O never reached the parent; nullopt =
+        // not known (not reaped yet, or the parent could not be read).
+        std::optional<bool> autoreaped;
     };
     std::unordered_map<uint32_t, ReapWatch> reapWatch;
     std::unordered_set<uint64_t>            reapNoted;
@@ -115,18 +119,22 @@ public:
     ProcessTrackingProbe::ReapRuleState reap;
 
     bool Reaped(uint32_t pid, ReapWatch& w);
+    void MarkReaped(ReapWatch& w);
     void NoteGone(uint32_t pid, uint64_t serial, uint32_t parent);
 
     // Where a watched process's I/O ends up. At: in `anchor`'s next
     // reading (unsure: the anchor's reading this tick may or may not
     // include it; ambiguous: listed there but not subtracted). Wait: not
     // there yet (not reaped, or reaped by a watched process that is not
-    // reaped yet). Drop: in no tracked process's reading.
+    // reaped yet). Drop: in no tracked process's reading. autoreaped: a
+    // process on the way up was auto-reaped, so none of it reached the
+    // anchor (listed there, not subtracted).
     struct Resolution {
         enum Kind { Wait, Drop, At } kind = Drop;
-        uint32_t anchor    = 0;
-        bool     unsure    = false;
-        bool     ambiguous = false;
+        uint32_t anchor     = 0;
+        bool     unsure     = false;
+        bool     ambiguous  = false;
+        bool     autoreaped = false;
     };
     Resolution Resolve(uint32_t pid, const std::unordered_set<uint32_t>& liveTracked,
                        const std::unordered_set<uint32_t>& reapedAfter) const;
@@ -146,6 +154,17 @@ bool DiskProfiler::Impl::Reaped(uint32_t pid, ReapWatch& w) {
     w.startTicks = st->startTime;
     w.parent     = st->ppid;
     return false;
+}
+
+// The watch's reap was just found: did its parent reap it (wait_task_zombie
+// folds its I/O into the parent), or was it auto-reaped because the parent
+// ignores SIGCHLD (nothing folded)? One /proc/<parent>/status read per
+// reap, never per tick. The disposition is the one at this reading, not
+// at the child's exit; a parent already gone (and reaped) leaves it
+// unknown, which is treated as a wait.
+void DiskProfiler::Impl::MarkReaped(ReapWatch& w) {
+    w.reaped = true;
+    w.autoreaped = internal::IgnoresSigchld(w.parent);
 }
 
 // A tracked process exited or left the tracked set. If it was ever read,
@@ -177,6 +196,7 @@ DiskProfiler::Impl::Resolution DiskProfiler::Impl::Resolve(
     uint32_t cur = pid;
     for (int depth = 0; depth < 64; ++depth) {
         const uint32_t par = w->parent;
+        if (w->reaped && w->autoreaped.value_or(false)) r.autoreaped = true;
         if (liveTracked.count(par)) {
             r.kind   = pending ? Resolution::Wait : Resolution::At;
             r.anchor = par;
@@ -303,7 +323,7 @@ void DiskProfiler::Start() {
             std::unordered_set<uint32_t> reapedBefore;
             for (auto& [pid, w] : impl.reapWatch) {
                 if (w.reaped || impl.Reaped(pid, w)) {
-                    w.reaped = true;
+                    if (!w.reaped) impl.MarkReaped(w);
                     reapedBefore.insert(pid);
                 }
             }
@@ -365,7 +385,7 @@ void DiskProfiler::Start() {
             std::unordered_set<uint32_t> reapedAfter;
             for (auto& [pid, w] : impl.reapWatch) {
                 if (!reapedBefore.count(pid) && impl.Reaped(pid, w)) {
-                    w.reaped = true;
+                    impl.MarkReaped(w);
                     reapedAfter.insert(pid);
                 }
             }
@@ -393,7 +413,7 @@ void DiskProfiler::Start() {
                     const auto& l = w.lastSeen;
                     reapedUnder[r.anchor].push_back({pid, {l.rchar, l.wchar, l.readBytes, l.writeBytes,
                                                            l.cancelledWriteBytes},
-                                                     w.parent, r.ambiguous});
+                                                     w.parent, r.ambiguous, r.autoreaped});
                 }
                 for (uint32_t pid : ended) impl.reapWatch.erase(pid);
             }
@@ -445,13 +465,14 @@ void DiskProfiler::Start() {
                 // Every counter is monotonic for the life of the process.
                 // The process's own I/O: the delta minus the last reading
                 // of each tracked child whose reap this interval brought
-                // in (directly, or through a chain), unless ambiguous.
+                // in (directly, or through a chain), unless ambiguous or
+                // auto-reaped (then it never reached this process).
                 int64_t own[5];
                 for (int k = 0; k < 5; ++k) {
                     const auto c = kIoCounters[k];
                     own[k] = curIO.*c > prev.*c ? static_cast<int64_t>(curIO.*c - prev.*c) : 0;
                     for (const auto& kid : kids)
-                        if (!kid.ambiguous)
+                        if (!kid.ambiguous && !kid.autoreaped)
                             own[k] -= static_cast<int64_t>(impl.reapWatch[kid.pid].lastSeen.*c);
                 }
                 auto rate = [&](int k) { return own[k] > 0 ? (double)own[k] / dtSec : 0.0; };
@@ -472,7 +493,8 @@ void DiskProfiler::Start() {
                     reap->timestamp_ns = tsNs;
                     reap->parent_pid   = pid;
                     for (const auto& c : kids) {
-                        reap->ambiguous = reap->ambiguous || c.ambiguous;
+                        reap->ambiguous  = reap->ambiguous || c.ambiguous;
+                        reap->autoreaped = reap->autoreaped || c.autoreaped;
                         impl.reapWatch.erase(c.pid);
                     }
                     reap->children = std::move(kids);

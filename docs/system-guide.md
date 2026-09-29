@@ -1184,7 +1184,11 @@ Limits of the tail:
 - when several tracked children of one parent are reaped within one
   sample interval, their shares cannot be told apart: **one `CpuTail`
   lists all of them in `pids`** with their combined tail, rather than a
-  guessed split.
+  guessed split;
+- a parent that ignores `SIGCHLD` has its children **auto-reaped**, and
+  its `cutime`/`cstime` never grow (see *Auto-reaped children* below): the
+  `CpuTail` is emitted with `autoreaped = true` and a tail of 0, which is
+  not a measurement.
 
 **Chains.** A tracked P that reaps its tracked child C and then exits
 and is reaped by a tracked G, all within one sample interval (a
@@ -1291,14 +1295,39 @@ and discovered processes alike:
   parent is not tracked or stops being tracked while alive (then no
   tracked reading includes the reap).
 
-Limits: a parent that ignores `SIGCHLD` (`SIG_IGN` or `SA_NOCLDWAIT`) has
-its children auto-reaped, and the kernel then folds **nothing** into it
-(`exit_notify` releases the child without `wait_task_zombie`); the probe
-cannot see that without reading `/proc/<pid>/status` at each reap, and
-would subtract a child that was never added (the sample is clamped at 0;
-the negative remainder shows it). The reaper rule also assumes no
-process between the launcher and the reaping tracked ancestor is itself
-a subreaper.
+**Auto-reaped children.** A parent whose `SIGCHLD` disposition is
+`SIG_IGN`, or that set `SA_NOCLDWAIT`, has its children reaped by the
+kernel as they exit (`do_notify_parent` in `kernel/signal.c` returns
+"autoreap", and `exit_notify` in `kernel/exit.c` releases the child
+without `wait_task_zombie`). Only `wait_task_zombie` adds a child's I/O
+(`ioac`) and CPU (`cutime`/`cstime`) to its parent, so **nothing** is
+folded (checked in the 5.15 source). When the probe finds a watched
+child reaped, it reads the parent's `/proc/<pid>/status` once — only at
+that reap, never per tick — and if bit `SIGCHLD - 1` of `SigIgn` is set:
+
+- disk: the child is listed in the `IoReapAdjustment` with
+  `autoreaped = true` and **not subtracted**, and the record has
+  `autoreaped = true` (a chain whose link was auto-reaped is marked the
+  same way: none of it reached the parent);
+- system: the `CpuTail` has `autoreaped = true` and a tail of 0 (the
+  CPU after the child's last sample is lost: no counter holds it).
+
+Limits of the detection:
+
+- `SA_NOCLDWAIT` does not show in `/proc` (`SigIgn` lists `SIG_IGN`
+  handlers only): with it, a child is still subtracted (the sample is
+  clamped at 0; the negative remainder shows it), and its tail reads 0
+  without the mark;
+- the disposition is read when the reap is found, within a sample
+  interval of it, not at the exit itself; a parent that changes it in
+  between is misread;
+- a reaper that is already gone when the reap is found (a chain: P
+  auto-reaped C, then exited and was reaped, all within one interval)
+  cannot be read and is treated as having waited. A zombie's `status`
+  is still readable.
+
+The reaper rule also assumes no process between the launcher and the
+reaping tracked ancestor is itself a subreaper.
 
 So per-PID I/O is **the process's own I/O, excluding tracked children it
 reaped**, and differs from the raw `/proc/<pid>/io` delta exactly by the
@@ -1311,8 +1340,8 @@ Cost: nothing while no tracked process has exited. The probe already
 reads each process's `/proc/<pid>/io` and learns of exits from its
 pidfds; the watch adds two `/proc/<pid>/stat` reads per sample tick for
 each watched child, from its exit until its reap (one tick for a parent
-blocked in `wait()`), and one list of watched children to check per
-tick. Resolving chains adds no reads: it walks the watched children's
+blocked in `wait()`), one `/proc/<parent>/status` read when its reap is
+found, and one list of watched children to check per tick. Resolving chains adds no reads: it walks the watched children's
 recorded parents, only on ticks when something is watched, and consults
 the reaper's reported PIDs (pruned once nothing tracks or watches the
 PID). It shares nothing with the system probe's CPU-tail bookkeeping:

@@ -70,9 +70,20 @@ message IoCounterDeltas {
 //     I/O is then counted twice if P did reap it: in C's samples, and in
 //     G's remainder), and the record has ambiguous = true.
 //
+// Auto-reaped children. A parent whose SIGCHLD is SIG_IGN (or that set
+// SA_NOCLDWAIT) has its children reaped by the kernel at their exit,
+// without wait_task_zombie: nothing is folded into it (kernel/signal.c,
+// do_notify_parent; kernel/exit.c, exit_notify -> release_task). When a
+// watched child's reap is found, its parent's /proc/<pid>/status SigIgn
+// mask is read once (never per tick); if SIGCHLD is ignored the child is
+// listed with autoreaped = true and NOT subtracted, and the record has
+// autoreaped = true. In a chain, a child whose own reaper auto-reaped a
+// process on the way up is marked the same way (none of it arrived).
+//
 // The raw /proc value stays reconstructable: the parent's raw delta over
 // that sample's interval is
-//     children[*].last_seen (summed over the non-ambiguous)  +  remainder
+//     children[*].last_seen (summed over those neither ambiguous nor
+//                            autoreaped)  +  remainder
 // and `remainder` is exactly what the parent's sample carries (its rates
 // times the interval). It mixes the parent's own I/O in that interval
 // with the children's I/O after their last reading, which no reading can
@@ -88,9 +99,14 @@ message IoCounterDeltas {
 //   * the parent is the one the child had as a zombie (its ppid), or, if
 //     it was reaped before the probe could look, the one it was
 //     registered with; a parent that is not tracked gets no adjustment;
-//   * a parent that ignores SIGCHLD has its children auto-reaped: the
-//     kernel folds nothing into it, and subtracting would be wrong. Not
-//     detected (it would need a per-reap read of /proc/<pid>/status);
+//   * auto-reaping is detected from SIG_IGN only: SA_NOCLDWAIT does not
+//     show in /proc, so a parent that set it with a handler or SIG_DFL
+//     still has its auto-reaped children subtracted (the sample is then
+//     clamped at 0, the remainder negative). The disposition is read when
+//     the reap is found (within a sample interval of it), not at the exit
+//     itself; a reaper already gone by then (a chain whose middle process
+//     exited in the same interval and was reaped) cannot be read and is
+//     treated as having waited;
 //   * the reaper rule assumes no process between the launcher and the
 //     reaping tracked ancestor is itself a subreaper.
 message IoReapAdjustment {
@@ -105,9 +121,13 @@ message IoReapAdjustment {
         // reaped_by exited in the same interval, and whether it reaped
         // this child before exiting is unknown (see above): not subtracted.
         bool       ambiguous       = 4;
+        // Auto-reaped (its reaper ignored SIGCHLD) here or on the way up:
+        // its I/O never reached parent_pid. Not subtracted.
+        bool       autoreaped      = 5;
     }
     repeated Child  children       = 3;
     IoCounterDeltas remainder      = 4;
     bool            ambiguous      = 5;  // some child is ambiguous
+    bool            autoreaped     = 6;  // some child is autoreaped
 }
 

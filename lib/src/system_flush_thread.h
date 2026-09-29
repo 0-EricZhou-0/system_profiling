@@ -83,6 +83,7 @@ struct CpuTailRecord {
     std::vector<uint32_t> chainPids;       // reaped in the same interval, taken out
     std::vector<uint32_t> ambiguousPids;   // reaped by whom is unknown, left in
     uint64_t              ambiguousCpuNs = 0;   // their CPU already in their samples
+    bool                  autoreaped = false;   // the parent ignores SIGCHLD: no tail
 };
 
 struct SystemSampleBatch {

@@ -130,6 +130,7 @@ def test_reaped_traced_child_io_subtracted(tmp_path, mode, linger):
     assert len(adjs) == 1, f"expected one IoReapAdjustment: {adjs}"
     [a] = adjs
     assert a.parent_pid == root and [c.pid for c in a.children] == [kid], a
+    assert not a.autoreaped and not a.children[0].autoreaped, a   # the root waits
     last = a.children[0].last_seen
     failures = []
     for k in COUNTERS:

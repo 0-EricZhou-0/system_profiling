@@ -204,12 +204,14 @@ DiskMetricsTrace BuildDiskTrace(
         a->set_timestamp_ns(r.timestamp_ns);
         a->set_parent_pid(r.parent_pid);
         a->set_ambiguous(r.ambiguous);
+        a->set_autoreaped(r.autoreaped);
         for (const auto& ch : r.children) {
             const auto& v = ch.lastSeen;
             auto* c = a->add_children();
             c->set_pid(ch.pid);
             c->set_reaped_by(ch.reapedBy);
             c->set_ambiguous(ch.ambiguous);
+            c->set_autoreaped(ch.autoreaped);
             auto* l = c->mutable_last_seen();
             l->set_rchar(v.rchar);
             l->set_wchar(v.wchar);

@@ -65,9 +65,11 @@ struct IoReapRecord {
         IoCounterValues lastSeen;           // its last reading
         uint32_t        reapedBy  = 0;      // parent_pid, or a chain member
         bool            ambiguous = false;  // listed, not subtracted
+        bool            autoreaped = false; // auto-reaped on the way: listed, not subtracted
     };
     std::vector<Child> children;
     bool     ambiguous    = false;   // some child is
+    bool     autoreaped   = false;   // some child is
     // Raw parent delta minus the subtracted, per counter.
     int64_t  remainder[5] = {0, 0, 0, 0, 0};
 };

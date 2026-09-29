@@ -40,6 +40,15 @@ message SystemMetricsTrace {
 //     field, so a tail is accurate to about +/-20 ms and is clamped at 0;
 //   * the growth appears only when the parent reaps the child: a parent
 //     that never waits, or that exits first, yields no tail;
+//   * a parent that ignores SIGCHLD (SIG_IGN) has its children auto-reaped
+//     without any growth (kernel/exit.c: cutime/cstime are added only in
+//     wait_task_zombie, which auto-reaping skips): read from the parent's
+//     /proc/<pid>/status SigIgn when the reap is found, the CpuTail is
+//     emitted with autoreaped = true and no tail (0). SA_NOCLDWAIT has
+//     the same effect but does not show in /proc: such a tail reads 0
+//     without the mark. In a reap chain, a middle process that ignored
+//     SIGCHLD is gone when the chain is seen and cannot be read: its
+//     children's CPU is still taken out as if it had waited;
 //   * a child reparented to a process that is not tracked yields none;
 //   * the growth also includes any short-lived child the parent reaped
 //     in the same interval that discovery never saw;
@@ -71,4 +80,8 @@ message CpuTail {
     // max(0, cpu_after_last_sample_ns - ambiguous_cpu_ns) and
     // cpu_after_last_sample_ns. 0 when nothing is ambiguous.
     uint64          ambiguous_cpu_ns         = 7;
+    // parent_pid ignored SIGCHLD when the reap was found: `pids` were
+    // auto-reaped, their CPU was never added to its cutime/cstime, and
+    // cpu_after_last_sample_ns (0) is not a measurement.
+    bool            autoreaped               = 8;
 }

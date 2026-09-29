@@ -70,6 +70,16 @@ struct ProcStat {
 /// (see process_discovery.h). nullopt if missing or malformed.
 std::optional<ProcStat> ReadProcStat(const std::string& procRoot, uint32_t pid);
 
+/// Does the process ignore SIGCHLD (SIG_IGN; the SigIgn mask of
+/// /proc/<pid>/status, bit SIGCHLD - 1)? Its children are then
+/// auto-reaped: the kernel releases them without wait_task_zombie, so
+/// neither their I/O nor their CPU (cutime/cstime) is folded into it
+/// (kernel/signal.c do_notify_parent, kernel/exit.c exit_notify).
+/// SA_NOCLDWAIT has the same effect but does not show in /proc. Read at a
+/// reap event only. nullopt if the file cannot be read or parsed (the
+/// process is gone; a zombie's is still readable).
+std::optional<bool> IgnoresSigchld(uint32_t pid);
+
 /// Why a per-PID /proc read of a tracked process failed (err = errno):
 ///   Gone       ENOENT/ESRCH, or any error while the process is exiting:
 ///              /proc/<pid>/stat is missing, its state is Z/X, or
