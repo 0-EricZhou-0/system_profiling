@@ -61,6 +61,7 @@ import units  # noqa: E402
 import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
+import decimate  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
 from trace_paths import probe_file, resolve_probe_path, warn_on_version_mismatch  # noqa: E402
 
@@ -404,7 +405,9 @@ _FRAME_HEIGHT    = 150
 # ~3.1M points over 17 figures (up to ~0.5M in one), counted 2026-09-29
 # without --display-hz. webgl was not re-measured at these sizes, nor in
 # a real (non-headless) browser; it wins on pan/zoom repaints and stays
-# available as an opt-in.
+# available as an opt-in. Long series are now drawn reduced to the view's
+# pixel columns (_decimate_lines): the vLLM page draws ~0.22 M of its
+# ~3.1 M points.
 _RENDER_BACKEND = "canvas"
 
 # Headroom above a known peak when sizing y_range, so the dashed
@@ -1141,6 +1144,128 @@ def _strip_labels(fig, x_range, key: str, bars: list, t_end_s: float) -> None:
                 max_rows=_STRIP_ROWS, char_px=_TIMELINE_CHAR_PX, pad=6.0, max_shift=shift,
                 font=_STRIP_FONT, in_color=t["label"], out_color=t["label"],
                 leader_color=t["leader"])
+
+
+# Long series are drawn reduced to the view's pixel columns (tools/
+# decimate.py, decimate.js): each keeps its full data in a ColumnDataSource
+# that is not drawn, and its drawn source holds, per column of the view
+# ±1 width, the first, last, lowest and highest samples and any gap —
+# the full line at pixel resolution, real samples only. Each panel's
+# hover anchor (the table of every series' values at each time) is
+# reduced the same way by whole rows, about one per pixel column, so a
+# tooltip still shows one real row of samples. The page
+# recomputes it from the full data when the x range changes: at once
+# (at most every _DECIMATE_THROTTLE_MS) when the view leaves the drawn
+# window or its width changes, e.g. while dragging past it or zooming,
+# else _RELAYOUT_DEBOUNCE_MS after the last change if the view is not
+# where the window was drawn for, or has come within half a width of its
+# edge. A window with at most EXACT_PER_COLUMN samples a column is drawn
+# exactly. Pan steps inside the drawn window cost nothing. Series of at most _DECIMATE_MIN samples are
+# drawn as they are. (Phase 8 item 29: drag frames were dominated by
+# drawing up to ~0.5 M points per figure.)
+_DECIMATE_COLS = _FRAME_WIDTH
+_DECIMATE_MIN = 3 * decimate.EXACT_PER_COLUMN * _DECIMATE_COLS
+_DECIMATE_THROTTLE_MS = 100
+_DECIMATE_JS = (_HERE / "decimate.js").read_text()
+
+
+def _decimate_lines(figs: list, x_range, x_end_s: float) -> None:
+    """Draw every long line / multi-line series of `figs` reduced (see
+    above), starting from the full view [0, x_end_s]."""
+    pairs = []
+    seen: set = set()
+    for fig in figs:
+        for r in fig.renderers:
+            src = getattr(r, "data_source", None)
+            glyph = getattr(r, "glyph", None)
+            if not isinstance(src, ColumnDataSource) or src.id in seen:
+                continue
+            kind = type(glyph).__name__
+            d = src.data
+            if kind == "Line" and glyph.x == "x" and glyph.y in ("y", "_anchor_y") \
+                    and len(d["x"]) > _DECIMATE_MIN:
+                # A series (x, y), or a hover anchor (x, _anchor_y = 0, and
+                # one column per series): whole rows are kept, so the hover
+                # still shows a real row of values, about one per pixel.
+                cols = {c: np.asarray(v) for c, v in d.items()}
+                full = ColumnDataSource(data=cols)
+                k = decimate.indices(cols["x"], cols[glyph.y], 0.0, x_end_s, _DECIMATE_COLS)
+                src.data = {c: v[k] for c, v in cols.items()}
+                ycol = glyph.y
+            elif kind == "MultiLine" and set(d) == {"xs", "ys"} \
+                    and sum(len(v) for v in d["xs"]) > _DECIMATE_MIN:
+                xs = [np.asarray(v, np.float64) for v in d["xs"]]
+                ys = [np.asarray(v, np.float64) for v in d["ys"]]
+                full = ColumnDataSource(data=dict(xs=xs, ys=ys))
+                red = [decimate.reduce(x, y, 0.0, x_end_s, _DECIMATE_COLS) for x, y in zip(xs, ys)]
+                src.data = dict(xs=[a for a, _ in red], ys=[b for _, b in red])
+                ycol = "ys"
+            else:
+                continue
+            seen.add(src.id)
+            pairs.append([full, src, ycol])
+    if not pairs:
+        return
+    redraw = CustomJS(args=dict(rng=x_range, pairs=pairs, cols=_DECIMATE_COLS,
+                                wait=_RELAYOUT_DEBOUNCE_MS, every=_DECIMATE_THROTTLE_MS),
+                      code=_DECIMATE_JS + """
+        const st = (window.cuptiDecim = window.cuptiDecim ||
+                    {timer: 0, last: -1e9, lo: NaN, hi: NaN, w: NaN, ext: new Map(), ms: []});
+        const redraw = () => {
+            const s = rng.start, e = rng.end, w = e - s;
+            if (!(w > 0)) return;
+            const t = performance.now();
+            const ext = (full, k, y) => {
+                const key = full.id + ":" + k;
+                if (!st.ext.has(key)) st.ext.set(key, decimExtremes(y));
+                return st.ext.get(key);
+            };
+            for (const [full, drawn, ycol] of pairs) {
+                const f = full.data;
+                if (ycol === "ys") {
+                    const xs = [], ys = [];
+                    for (let k = 0; k < f.xs.length; k++) {
+                        const [a, b] = decimReduce(f.xs[k], f.ys[k], s, e, cols, ext(full, k, f.ys[k]));
+                        xs.push(a); ys.push(b);
+                    }
+                    drawn.data = {xs, ys};
+                } else {                         // whole rows, every column
+                    const k = decimIndices(f.x, f[ycol], s, e, cols, ext(full, 0, f[ycol]));
+                    const d = {};
+                    for (const c of Object.keys(f)) {
+                        const v = f[c], o = new v.constructor(k.length);
+                        for (let i = 0; i < k.length; i++) o[i] = v[k[i]];
+                        d[c] = o;
+                    }
+                    drawn.data = d;
+                }
+            }
+            const win = decimWindow(s, e, cols);
+            st.lo = win[0]; st.hi = win[1]; st.w = w; st.last = performance.now();
+            st.ms.push(st.last - t);
+        };
+        // At once (at most every `every` ms) when the view is no longer
+        // inside the drawn window at the drawn width (a zoom, or a drag past
+        // the window); `wait` ms after the last change when it is not, or
+        // when it has come within half a width of the window's edge. A pan
+        // inside the window redraws nothing. Decided once start and end
+        // have both changed (a microtask after the first change), so a
+        // view set one end at a time is not seen at a passing width.
+        if (st.queued) return;
+        st.queued = true;
+        queueMicrotask(() => {
+            st.queued = false;
+            const s = rng.start, e = rng.end, w = e - s;
+            const same = Math.abs(w - st.w) <= 1e-9 * Math.abs(w);
+            const inside = same && s >= st.lo && e <= st.hi;
+            const centred = inside && s - st.lo >= 0.5 * w && st.hi - e >= 0.5 * w;
+            clearTimeout(st.timer);
+            if (!inside && performance.now() - st.last >= every) redraw();
+            else if (!centred) st.timer = setTimeout(redraw, wait);
+        });
+    """)
+    x_range.js_on_change("start", redraw)
+    x_range.js_on_change("end", redraw)
 
 
 def _build_region_strip(regions, t0_ns: int, x_range, t_end_s: float = 0.0) -> "figure":
@@ -1937,6 +2062,8 @@ def _build_static_document(
     # they don't drown the traces).
     _overlay_regions(metric_figs, regions, t0_ns)
     _mark_stop(metric_figs, (stop_ns - t0_ns) / 1e9)
+    if shared_x is not None:
+        _decimate_lines(metric_figs, shared_x, x_end_s)
 
     # Strips above the panels: events first (so its hairlines line up
     # vertically with the panels below), then regions.

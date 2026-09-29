@@ -299,6 +299,21 @@ Flag reference (selected; full list via `--help`):
   and `webgl` has not been re-measured at those sizes or in a real
   browser. `webgl` wins on pan/zoom repaint smoothness;
   `--display-hz` shrinks a large page.
+
+Long series are drawn at the view's pixel resolution. The page keeps every
+sample, and draws each series (and each panel's hover table) reduced to,
+per pixel column of the view ±1 view width, its first, last, lowest and
+highest samples and any gap (NaN) — the full line at pixel resolution,
+real samples only, so tooltips show real values. Zooming in far enough
+draws every sample; a zoom, or a pan past the drawn window, recomputes it
+(at most every 100 ms while dragging, and 60 ms after the last change);
+a pan inside it costs nothing. Legends, exit lines, the stop shade and
+folding are unaffected, and `visualize_all.py`'s PNG is unchanged.
+Measured on the vLLM serving pages (headless Chrome, software
+rasterised; `tools/decimate.py` has the rules): a pan step 371 → 120 ms
+(warm, 3.1 M points, 0.22 M drawn) and 441 → 143 ms (cold); first paint
+3.2 → 2.4 s and 4.0 → 3.4 s; the file ~6–10% larger (the initial reduced
+copy).
 - `--smooth-window-s <s>` / `--display-hz <Hz>` — same semantics as
   `visualize_all.py`.
 
