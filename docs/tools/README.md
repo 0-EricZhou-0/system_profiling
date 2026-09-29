@@ -454,6 +454,12 @@ How it works:
 
 Caveats:
 
+- **Cumulative panels are not supported**: a layout panel with
+  `aggregation: PANEL_AGGREGATION_INTEGRATE` makes `--live` refuse to
+  start (`NotImplementedError`), and the default layout
+  (`configs/visualizer_panels.pbtxt`) has five. Use `--panel-layout`
+  with those panels removed or set to `PANEL_AGGREGATION_UNSPECIFIED`.
+  Known limitation, not planned.
 - **One Python process per page.** Closing the browser does not stop
   the server; Ctrl-C in Terminal B does.
 - **Long runs**: per-tick delta streaming scales linearly in the
