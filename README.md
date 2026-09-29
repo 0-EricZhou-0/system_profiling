@@ -165,7 +165,7 @@ python tools/visualize_all.py profiling_output/session_metadata.pb \
 
 # Or render an interactive HTML viewer (with synced pan/zoom + crosshair):
 python tools/visualize_interactive.py profiling_output/session_metadata.pb
-# → opens at http://localhost:8000/
+# → serves http://127.0.0.1:8000/ (this machine only; it never opens a browser)
 ```
 
 ### Annotating your own workload

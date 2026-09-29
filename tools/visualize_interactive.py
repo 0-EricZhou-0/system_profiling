@@ -3,8 +3,9 @@
 
 Static mode (default):
     python tools/visualize_interactive.py profiling_output/session_metadata.pb
-    # → writes the page and serves it on http://<host>:8000 (it never
-    #   opens a browser: point yours at the URL it logs).
+    # → writes the page and serves it on http://127.0.0.1:8000 (it never
+    #   opens a browser: point yours at the URL it logs; --host 0.0.0.0
+    #   serves on every interface).
 
 Live mode (--live):
     python tools/visualize_interactive.py --live \\
@@ -2080,7 +2081,10 @@ def main() -> int:
     parser.add_argument("--panel-layout", default=None,
                         help="Override PanelLayout pbtxt")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="Address to serve on (static and live). Default: "
+                             "127.0.0.1, this machine only; 0.0.0.0 serves on "
+                             "every interface, to anyone who can reach it.")
     parser.add_argument("--no-serve", action="store_true",
                         help="Render HTML and exit (don't start a server).")
     parser.add_argument("--live", action="store_true",

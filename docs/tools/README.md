@@ -257,7 +257,7 @@ Bokeh-based interactive renderer, same input contract as
 with BokehJS bundled inline) plus a built-in HTTP server.
 
 ```bash
-# Build + serve on http://localhost:8000 (it never opens a browser:
+# Build + serve on http://127.0.0.1:8000 (it never opens a browser:
 # point yours at the URL it logs)
 python tools/visualize_interactive.py profiling_output/session_metadata.pb
 
@@ -268,8 +268,9 @@ python tools/visualize_interactive.py session_metadata.pb \
 # Build only — don't host:
 python tools/visualize_interactive.py session_metadata.pb --no-serve
 
-# Bind to localhost only (default is 0.0.0.0 = all interfaces):
-python tools/visualize_interactive.py session_metadata.pb --host 127.0.0.1
+# Serve on every interface (default is 127.0.0.1 = this machine only).
+# Anyone who can reach the port can read the trace:
+python tools/visualize_interactive.py session_metadata.pb --host 0.0.0.0
 
 # Dark theme + downsample for faster first paint:
 python tools/visualize_interactive.py session_metadata.pb \
@@ -416,7 +417,7 @@ writing to them** and refreshes every `--poll-interval-ms` (default
 python tools/visualize_interactive.py --live \
     profiling_output/session_metadata.pb \
     --port 8000 --poll-interval-ms 1000
-# → http://localhost:8000/
+# → http://127.0.0.1:8000/
 ```
 
 How it works:
@@ -462,14 +463,18 @@ Disk I/O is the only non-obvious permission gotcha — see
 
 ### Viewing from a remote server
 
-The script binds `--host 0.0.0.0` by default, but the easiest way to
-view it from a laptop SSH'd into the box is local port forwarding:
+The script binds `127.0.0.1` by default (static and live mode), so the
+page is reachable only from the machine it runs on. To view it from a
+laptop SSH'd into the box, forward the port:
 
 ```bash
 # On the laptop, in a new terminal:
-ssh -L 8000:localhost:8000 user@remote-host
+ssh -L 8000:127.0.0.1:8000 user@remote-host
 # → open http://localhost:8000/ in your browser
 ```
+
+`--host 0.0.0.0` serves on every interface instead, to anyone who can
+reach the port.
 
 VS Code / Cursor's "Remote - SSH" auto-detects the listening port and
 forwards it; check the **Ports** panel at the bottom.
