@@ -21,7 +21,9 @@ enum ProbeKind {
 
 message ActiveProbe {
     ProbeKind kind = 1;
-    string output_file = 2;            // path resolved via output_dir
+    // Relative to the directory holding session_metadata.pb (normally
+    // just the file name), so a trace directory can be copied or moved.
+    string output_file = 2;
     uint64 sampling_frequency_hz = 3;  // 0 if not applicable (e.g. events)
 }
 

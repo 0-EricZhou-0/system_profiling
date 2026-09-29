@@ -21,6 +21,7 @@
 #include <chrono>
 #include <climits>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -154,6 +155,20 @@ static std::string JoinPath(const std::string& dir, const std::string& file) {
     if (dir.empty() || file.empty()) return file;
     if (dir.back() == '/') return dir + file;
     return dir + "/" + file;
+}
+
+/// A probe file's path as session_metadata.pb records it: relative to the
+/// directory holding session_metadata.pb, so a trace directory stays
+/// readable after it is copied or moved. Both paths are as the probes
+/// open them (relative ones against the current directory).
+static std::string RelativeToManifest(const std::string& file, const std::string& manifest) {
+    namespace fs = std::filesystem;
+    std::error_code ec1, ec2;
+    const fs::path f   = fs::absolute(file, ec1).lexically_normal();
+    const fs::path dir = fs::absolute(manifest, ec2).lexically_normal().parent_path();
+    if (ec1 || ec2) return file;
+    const fs::path rel = f.lexically_relative(dir);
+    return rel.empty() ? file : rel.generic_string();
 }
 
 static void ResolvePIDZero(std::vector<TrackedProcess>& processes) {
@@ -499,7 +514,7 @@ void ProfilerSuite::Impl::WriteSessionManifest() {
     auto addProbe = [&](ProbeKind kind, const std::string& path, uint64_t hz) {
         auto* p = meta.add_probes();
         p->set_kind(kind);
-        p->set_output_file(path);
+        p->set_output_file(RelativeToManifest(path, sessionMetadataPath));
         p->set_sampling_frequency_hz(hz);
     };
     if (gpuEnabled)
