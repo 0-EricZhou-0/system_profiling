@@ -474,6 +474,28 @@ ssh -L 8000:localhost:8000 user@remote-host
 VS Code / Cursor's "Remote - SSH" auto-detects the listening port and
 forwards it; check the **Ports** panel at the bottom.
 
+## Viewing without a build
+
+The visualizers are pure Python. They need the protobuf modules generated
+from `proto/`, which the CMake build writes into `generated/proto/`, but
+not the library: no nvcc, no CUDA, no GPU. On any machine with Python
+and a clone of this repository:
+
+```bash
+python -m venv viz-venv && . viz-venv/bin/activate
+pip install -r requirements-viz.txt   # numpy, matplotlib, bokeh, protobuf, grpcio-tools
+python tools/gen_protos.py            # grpc_tools.protoc: proto/*.proto -> generated/proto/
+python tools/visualize_all.py <trace>/session_metadata.pb -o profile.png
+python tools/visualize_interactive.py <trace>/session_metadata.pb
+```
+
+A trace directory can be copied from the machine that recorded it (see
+`visualize_all.py` above). When the generated modules or a package are
+missing, each visualizer prints the command to run and exits with
+status 2, instead of an ImportError traceback. When a `.proto` file is
+newer than its generated module (after a `git pull`), it warns: rerun
+`tools/gen_protos.py`.
+
 ## Dependencies
 
 All Python tools share the same dependency set, declared in the repo
@@ -482,6 +504,9 @@ root [`requirements.txt`](../../requirements.txt). Quick install:
 ```bash
 pip install -r requirements.txt
 ```
+
+To only view traces, [`requirements-viz.txt`](../../requirements-viz.txt)
+is enough (see [*Viewing without a build*](#viewing-without-a-build)).
 
 `visualize_all.py` needs `numpy + matplotlib + protobuf`;
 `visualize_interactive.py` adds `bokeh + tornado` (Bokeh transitive).

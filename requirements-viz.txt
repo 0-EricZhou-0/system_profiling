@@ -1,0 +1,14 @@
+# Viewing traces without building the library (no nvcc, no CUDA):
+#
+#     pip install -r requirements-viz.txt
+#     python tools/gen_protos.py
+#     python tools/visualize_all.py <trace>/session_metadata.pb
+#
+# See docs/tools/README.md, "Viewing without a build".
+numpy>=1.24
+matplotlib>=3.7
+# tools/visualize_interactive.py (tested with 3.9.2)
+bokeh>=3.9
+protobuf>=4.25
+# tools/gen_protos.py: generates generated/proto/*_pb2.py
+grpcio-tools>=1.60

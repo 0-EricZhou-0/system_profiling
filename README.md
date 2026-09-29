@@ -263,6 +263,15 @@ read shows up in none of them). Where to read more:
 
 Detailed usage in [`docs/tools/README.md`](docs/tools/README.md).
 
+Viewing a trace needs no build, no nvcc and no GPU — for example on a
+laptop, with a trace directory copied from the cluster:
+
+```bash
+pip install -r requirements-viz.txt
+python tools/gen_protos.py        # proto/ -> generated/proto/
+python tools/visualize_all.py <trace>/session_metadata.pb -o profile.png
+```
+
 ## Documentation
 
 - [`docs/full-system-overview.md`](docs/full-system-overview.md) —
