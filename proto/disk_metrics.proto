@@ -29,6 +29,8 @@ message DiskMetricsTrace {
     // One per parent sample from which reaped tracked children's I/O
     // was subtracted (see IoReapAdjustment).
     repeated IoReapAdjustment io_reap_adjustments = 9;
+    // Reaped children whose reap chain has no link (see IoReapChainBreak).
+    repeated IoReapChainBreak io_reap_chain_breaks = 10;
 }
 
 // Same, signed: a difference of two readings.
@@ -107,6 +109,9 @@ message IoCounterDeltas {
 //     itself; a reaper already gone by then (a chain whose middle process
 //     exited in the same interval and was reaped) cannot be read and is
 //     treated as having waited;
+//   * a chain through a traced parent that was never read (see
+//     IoReapChainBreak) is not followed: the child is not subtracted
+//     anywhere, and is probably counted twice in the parent's reaper;
 //   * the reaper rule assumes no process between the launcher and the
 //     reaping tracked ancestor is itself a subreaper.
 message IoReapAdjustment {
@@ -131,3 +136,24 @@ message IoReapAdjustment {
     bool            autoreaped     = 6;  // some child is autoreaped
 }
 
+
+// A reap chain with a missing link. The chain walk (IoReapAdjustment)
+// follows a reaped child up through its traced parents by the record each
+// one got at its readings. A traced parent P whose I/O was never read has
+// none: its /proc/<pid>/io unreadable (another uid, a setuid/setgid
+// wrapper, or not dumpable) while its traced child C is readable, or P
+// gone before its first reading. When P reaps C and P is then reaped by
+// its traced parent G, G's reading holds P's I/O and C's (the kernel folds
+// both), while C's I/O is also in C's own samples: C is counted twice in
+// G. Not fixed (the planned fix: a chain record, parent link and start
+// time, made at discovery, with no per-tick cost); found when the walk
+// stops at P, warned about (at most once a second per P) and recorded
+// here. Pure timing does not cause it: P and C are found in the same
+// top-down scan and first read on the same tick. The CPU tail has no such
+// gap: its links are made at discovery, not at a reading.
+message IoReapChainBreak {
+    uint64 timestamp_ns = 1;   // the sample tick where the walk stopped
+    uint32 pid          = 2;   // the reaped child C (its I/O is in its own samples)
+    uint32 missing_pid  = 3;   // the traced parent P that was never read
+    uint32 absorbed_by  = 4;   // P's traced parent G, which reaps P: C is probably in it too
+}

@@ -1326,6 +1326,31 @@ Limits of the detection:
   cannot be read and is treated as having waited. A zombie's `status`
   is still readable.
 
+**A chain through a parent that was never read.** The chain walk
+follows a reaped child up through the records its traced parents got at
+their readings. A traced parent P whose I/O was never read has none. The
+realistic case is a P whose `/proc/<pid>/io` is **unreadable** — it runs
+as another uid, is a setuid/setgid wrapper, or is not dumpable — with a
+readable traced child C. (Pure timing does not produce it: P and C are
+found in the same top-down scan and first read on the same tick, and C
+dies before P.) When P reaps C and P is then reaped by its traced parent
+G, the kernel folds P's I/O and C's into G, while C's I/O is also in C's
+own samples: **C is counted twice, in G**. Not fixed. The planned fix
+makes the chain record (parent link and start time) at discovery, with no
+per-tick cost. Until then it is detected when the walk stops at P (only
+then, never per tick):
+
+- a `[cupti-profiler] warning:` line names C, P and G and says C's I/O
+  may be double-counted in G (at most once a second per P, suppressed
+  ones counted, dropped when P stops being tracked);
+- an `IoReapChainBreak` (`DiskMetricsTrace.io_reap_chain_breaks`)
+  records the tick, C, P and G.
+
+It is reported only when G is traced (otherwise the trace holds C once).
+The CPU tail has no such gap: its chain links are made when a process is
+discovered, not when it is read, and a parent whose CPU clock cannot be
+read has its whole CPU in its tail, counted once.
+
 The reaper rule also assumes no process between the launcher and the
 reaping tracked ancestor is itself a subreaper.
 

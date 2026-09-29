@@ -199,6 +199,13 @@ DiskMetricsTrace BuildDiskTrace(
     }
     for (const auto& t : drained.deviceTicks)  AppendDeviceSample(trace, t);
     for (const auto& t : drained.processTicks) AppendProcessSample(trace, t);
+    for (const auto& b : drained.chainBreaks) {
+        auto* x = trace.add_io_reap_chain_breaks();
+        x->set_timestamp_ns(b.timestamp_ns);
+        x->set_pid(b.pid);
+        x->set_missing_pid(b.missing_pid);
+        x->set_absorbed_by(b.absorbed_by);
+    }
     for (const auto& r : drained.ioReaps) {
         auto* a = trace.add_io_reap_adjustments();
         a->set_timestamp_ns(r.timestamp_ns);
@@ -268,11 +275,13 @@ void DiskFlushThreadFunc(DiskSampleBatch& batch,
             drained.deviceTicks.swap(batch.deviceTicks);
             drained.processTicks.swap(batch.processTicks);
             drained.ioReaps.swap(batch.ioReaps);
+            drained.chainBreaks.swap(batch.chainBreaks);
         }
 
         auto processSnapshot = probe.SnapshotProcesses();
         if (drained.deviceTicks.empty() && drained.processTicks.empty() &&
-            drained.ioReaps.empty() && !HasRemovalMarker(processSnapshot) &&
+            drained.ioReaps.empty() && drained.chainBreaks.empty() &&
+            !HasRemovalMarker(processSnapshot) &&
             !HasUnreadableRecord(processSnapshot)) continue;
 
         DiskMetricsTrace trace = BuildDiskTrace(

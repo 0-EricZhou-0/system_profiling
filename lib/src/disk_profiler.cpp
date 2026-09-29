@@ -31,6 +31,9 @@ namespace cupti_profiler {
 
 namespace {
 // The /proc/<pid>/io counters, in IoCounters / IoReapRecord order.
+// WarnLimited() type of the reap-chain-break warning (see Impl::unread).
+constexpr int kChainBreakWarning = 32;
+
 constexpr uint64_t internal::PIDIOSnapshot::* kIoCounters[5] = {
     &internal::PIDIOSnapshot::rchar,
     &internal::PIDIOSnapshot::wchar,
@@ -112,6 +115,16 @@ public:
     };
     std::unordered_map<uint32_t, ReapWatch> reapWatch;
     std::unordered_set<uint64_t>            reapNoted;
+    //   unread: tracked processes that left without ever being read (their
+    //     I/O unreadable, or gone before a first reading) -> their parent
+    //     and registration. Such a process gets no watch, so a chain
+    //     through it has no link there: a child it reaped is not
+    //     subtracted where the chain ends, and when it is reaped by a
+    //     traced parent that parent's reading holds the child's I/O a
+    //     second time. Kept only while a watch names it as parent; used
+    //     to warn and record it (IoReapChainBreak), not to fix it.
+    struct Unread { uint32_t parent = 0; uint64_t serial = 0; };
+    std::unordered_map<uint32_t, Unread>    unread;
 
     // The host's orphan reaper and its reaped set (the reap-chain rule of
     // ProcessTrackingProbe::WhoReaped), refreshed once per tick; the
@@ -135,6 +148,7 @@ public:
         bool     unsure     = false;
         bool     ambiguous  = false;
         bool     autoreaped = false;
+        uint32_t missingLink = 0;   // Drop at a traced parent never read (see unread)
     };
     Resolution Resolve(uint32_t pid, const std::unordered_set<uint32_t>& liveTracked,
                        const std::unordered_set<uint32_t>& reapedAfter) const;
@@ -173,7 +187,10 @@ void DiskProfiler::Impl::MarkReaped(ReapWatch& w) {
 void DiskProfiler::Impl::NoteGone(uint32_t pid, uint64_t serial, uint32_t parent) {
     if (!reapNoted.insert(serial).second) return;
     auto b = prevPIDIO.find(pid);
-    if (b == prevPIDIO.end() || b->second.serial != serial) return;
+    if (b == prevPIDIO.end() || b->second.serial != serial) {
+        unread[pid] = {parent, serial};
+        return;
+    }
     reapWatch[pid] = {parent, 0, b->second.s, false, b->second.startNs, b->second.rootParent};
 }
 
@@ -203,7 +220,13 @@ DiskProfiler::Impl::Resolution DiskProfiler::Impl::Resolve(
             return r;
         }
         auto pw = reapWatch.find(par);
-        if (pw == reapWatch.end()) return r;   // Drop: an untracked parent counts it once
+        if (pw == reapWatch.end()) {
+            // Drop: an untracked parent counts it once. A traced parent
+            // that was never read has no watch either: the chain breaks
+            // there (reported by the caller).
+            if (!pending && unread.count(par)) r.missingLink = par;
+            return r;
+        }
         if (!pending) {
             const auto by = DiskProfiler::WhoReaped(reap, cur, w->startNs, w->rootParent);
             if (by == ReapedBy::Host) return r;   // Drop
@@ -407,7 +430,30 @@ void DiskProfiler::Start() {
                 std::vector<uint32_t> ended;
                 for (const auto& [pid, w] : impl.reapWatch) {
                     const auto r = impl.Resolve(pid, liveTracked, reapedAfter);
-                    if (r.kind == Impl::Resolution::Drop) { ended.push_back(pid); continue; }
+                    if (r.kind == Impl::Resolution::Drop) {
+                        ended.push_back(pid);
+                        // A chain with no link at a traced parent never
+                        // read: when that parent's own (traced) parent
+                        // reaps it, its reading holds this child's I/O
+                        // again. Warn and record; nothing is changed.
+                        if (r.missingLink) {
+                            const auto& u = impl.unread.at(r.missingLink);
+                            if (snapshotPids.count(u.parent)) {
+                                this->WarnLimited(u.serial, kChainBreakWarning, tsNs,
+                                    "[cupti-profiler] warning: [Disk] PID " + std::to_string(pid) +
+                                    " was reaped by traced PID " + std::to_string(r.missingLink) +
+                                    ", whose I/O was never read (unreadable: another uid, setuid/setgid "
+                                    "or not dumpable; or gone before its first reading). The reap chain "
+                                    "has no link there, so PID " + std::to_string(pid) +
+                                    "'s I/O is probably also in traced PID " + std::to_string(u.parent) +
+                                    " (which reaps PID " + std::to_string(r.missingLink) +
+                                    ") and may be double-counted there. Recorded as IoReapChainBreak.");
+                                std::lock_guard<std::mutex> lock(impl.batchMutex);
+                                impl.batch.chainBreaks.push_back({tsNs, pid, r.missingLink, u.parent});
+                            }
+                        }
+                        continue;
+                    }
                     if (r.kind != Impl::Resolution::At) continue;
                     if (r.unsure) unsureAnchors.insert(r.anchor);
                     const auto& l = w.lastSeen;
@@ -417,6 +463,11 @@ void DiskProfiler::Start() {
                 }
                 for (uint32_t pid : ended) impl.reapWatch.erase(pid);
             }
+            // An unread process matters only while a watch names it.
+            std::erase_if(impl.unread, [&](const auto& kv) {
+                for (const auto& [p, w] : impl.reapWatch) if (w.parent == kv.first) return false;
+                return true;
+            });
 
             for (const auto& [ep, curIO] : readings) {
                 const auto& entry = *ep;
@@ -574,11 +625,12 @@ void DiskProfiler::Stop() {
             drained.deviceTicks.swap(m_impl->batch.deviceTicks);
             drained.processTicks.swap(m_impl->batch.processTicks);
             drained.ioReaps.swap(m_impl->batch.ioReaps);
+            drained.chainBreaks.swap(m_impl->batch.chainBreaks);
         }
 
         auto processSnapshot = SnapshotProcesses();
         if (!drained.deviceTicks.empty() || !drained.processTicks.empty() ||
-            !drained.ioReaps.empty() ||
+            !drained.ioReaps.empty() || !drained.chainBreaks.empty() ||
             internal::HasRemovalMarker(processSnapshot) ||
             internal::HasUnreadableRecord(processSnapshot) ||
             m_impl->flushStatsPending.valid) {

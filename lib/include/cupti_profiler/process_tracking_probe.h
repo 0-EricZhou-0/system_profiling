@@ -213,6 +213,13 @@ public:
     void NoteUnreadable(uint64_t serial, UnreadableFile which, int warningType,
                         uint64_t tsNs, const std::string& warning);
 
+    /// Write `warning` to stderr through the same limiter as
+    /// NoteUnreadable(): at most once a second per (serial, warningType),
+    /// suppressed ones counted, dropped when `serial` stops being
+    /// tracked. warningType must not collide with NoteUnreadable's
+    /// (which * 16 + type < 32): use 32 and up. Thread-safe.
+    void WarnLimited(uint64_t serial, int warningType, uint64_t tsNs, const std::string& warning);
+
     /// Per-process warning keys this probe holds (tests).
     size_t WarnStateSize() const;
 
