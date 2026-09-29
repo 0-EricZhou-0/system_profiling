@@ -292,9 +292,13 @@ Flag reference (selected; full list via `--help`):
   the line-style key's swatches) take the theme's text colour, so they
   stay legible on the dark background. Default `light`.
 - `--render-backend {canvas,webgl,svg}` — output backend per figure.
-  Default `canvas`: ~4-5× faster first paint than `webgl` at our
-  trace volume (some GPU drivers stall on WebGL `ReadPixels`). `webgl`
-  wins on pan/zoom repaint smoothness.
+  Default `canvas`: ~4-5× faster first paint than `webgl` on a page
+  of ~6k points (headless Chromium; some GPU drivers stall on WebGL
+  `ReadPixels`). Today's pages are larger — ~14k points for the
+  full-system example, ~3.1M for the vLLM serving example (1 kHz GPU) —
+  and `webgl` has not been re-measured at those sizes or in a real
+  browser. `webgl` wins on pan/zoom repaint smoothness;
+  `--display-hz` shrinks a large page.
 - `--smooth-window-s <s>` / `--display-hz <Hz>` — same semantics as
   `visualize_all.py`.
 

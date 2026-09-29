@@ -59,28 +59,29 @@ cmake --build build -j$(nproc)
 
 ### Create a config
 
-```protobuf title:"configs/example.pbtxt"
+```protobuf title:"configs/example.pbtxt (abridged)"
+output_dir: "profiling_output"
 gpu {
     enabled: true
-    device_index: 0
-    sampling_interval_ns: 100000
-    metrics: "sm__cycles_active.avg"
-    metrics: "sm__cycles_elapsed.avg"
-    flush_interval_ms: 10000
+    device_indices: 0
+    sampling_frequency_hz: 100       # the default (0 or unset = 100)
+    metrics: "sm__cycles_active.avg.pct_of_peak_sustained_elapsed"
+    metrics: "dram__read_throughput.avg.pct_of_peak_sustained_elapsed"
+    flush_interval_ms: 5000
     output_file: "gpu_metrics.pb"
 }
 system {
     enabled: true
-    sampling_interval_ms: 100
-    pids: 0                          # 0 = current process
+    sampling_frequency_hz: 100
+    processes { pid: 0  alias: "self" }   # 0 = current process
     flush_interval_ms: 5000
     output_file: "system_metrics.pb"
 }
 disk {
     enabled: true
-    sampling_interval_ms: 100
+    sampling_frequency_hz: 100
     devices: "nvme0n1"
-    pids: 0
+    processes { pid: 0  alias: "self" }
     flush_interval_ms: 5000
     output_file: "disk_metrics.pb"
 }
@@ -197,9 +198,9 @@ Usage: full_system_profiling [-c config.pbtxt]
 ### `gemm_profiling` (GPU-only, legacy)
 
 ```text ln:false
-Usage: gemm_profiling [-d device] [-i interval_ns] [-o output.pb]
+Usage: gemm_profiling [-d device] [-f frequency_hz] [-o output.pb]
   -d  Device index (default: 0)
-  -i  Sampling interval in nanoseconds (default: 100000)
+  -f  Sampling frequency in Hz (default: 10000 = 10kHz)
   -o  Output protobuf file (default: gpu_metrics.pb)
 ```
 

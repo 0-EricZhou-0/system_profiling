@@ -312,7 +312,7 @@ The build produces:
 export LD_LIBRARY_PATH=build/lib:$LD_LIBRARY_PATH
 
 # GPU-only — writes gpu_metrics.pb in the cwd
-./build/examples/gemm_profiling -d 0 -i 100000 -o gpu_metrics.pb
+./build/examples/gemm_profiling -d 0 -f 10000 -o gpu_metrics.pb
 
 # Full suite — uses configs/example.pbtxt by default
 ./build/examples/full_system_profiling [-c your_config.pbtxt]

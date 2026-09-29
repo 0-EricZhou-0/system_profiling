@@ -396,11 +396,15 @@ _FRAME_HEIGHT    = 150
 
 
 # Bokeh `output_backend` applied to every figure. main() overrides via
-# --render-backend. canvas is the default because for our trace volume
-# (~6k pts × ~15 panels) it's roughly 4-5× faster to first paint than
-# webgl (measured: canvas 585 ms vs webgl 2687 ms in headless
-# Chromium; some real-world GPU drivers stall on webgl ReadPixels and
-# blow up by 20-50×). webgl wins on pan/zoom repaints, so it's still
+# --render-backend. canvas became the default on a page of ~6k points
+# over ~15 panels, where it was roughly 4-5× faster to first paint than
+# webgl (canvas 585 ms vs webgl 2687 ms, headless Chromium; some GPU
+# drivers stall on webgl ReadPixels and blow up by 20-50×). Today's pages
+# are larger: the full-system example (100 Hz GPU) is ~14k points over
+# 21 figures (at most 1.4k in one), the vLLM serving example (1 kHz GPU)
+# ~3.1M points over 17 figures (up to ~0.5M in one), counted 2026-09-29
+# without --display-hz. webgl was not re-measured at these sizes, nor in
+# a real (non-headless) browser; it wins on pan/zoom repaints and stays
 # available as an opt-in.
 _RENDER_BACKEND = "canvas"
 

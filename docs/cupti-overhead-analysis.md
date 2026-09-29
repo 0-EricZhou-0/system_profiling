@@ -88,7 +88,7 @@ cuptiProfilerHostEvaluateToGpuValues();  // raw counters → metric doubles
 ```text ln:false
 CLI flags:
   -d, --device <idx>        GPU device index          (default: 0)
-  -i, --interval <ns>       Sampling interval in ns   (default: 100,000 = 0.1 ms = 10 kHz)
+  -f, --frequency <hz>      Sampling frequency in Hz  (default: 10000 = 10 kHz)
   -o, --output <file>       Output protobuf file      (default: gpu_metrics.pb)
 
 Library defaults (configurable, see docs/system-guide.md):
