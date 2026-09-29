@@ -64,7 +64,10 @@ public:
     /// sidecar rejected the config) or SidecarAffinityFailed
     /// (sidecar_cpus unusable). Returns InvalidConfig, with the reason
     /// on stderr, for an inconsistent GPU config (flush_interval_ms
-    /// below decode_interval_ms); nothing is configured then.
+    /// below decode_interval_ms), or for an output_file or
+    /// session_metadata_file that is not a plain file name (a "/":
+    /// subdirectories are not allowed; use output_dir); nothing is
+    /// configured then.
     /// Returns ProfilerError::NotConfigured if LoadConfig has not
     /// been called yet.
     ProfilerError Configure();

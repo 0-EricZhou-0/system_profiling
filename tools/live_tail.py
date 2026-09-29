@@ -161,7 +161,14 @@ class LiveCoordinator:
         # One TraceTail per active probe.
         self.tails: list[tuple[int, TraceTail]] = []
         for probe in meta.probes:
-            out = resolve_probe_path(self.metadata_path, probe.output_file)
+            # Live: a probe file may not exist yet (not flushed); only a
+            # probe with no file name at all is skipped.
+            try:
+                out = resolve_probe_path(self.metadata_path, probe.output_file)
+            except ValueError as e:
+                print(f"error: {self.metadata_path}: probe kind {probe.kind}: {e}; skipping it",
+                      file=sys.stderr, flush=True)
+                continue
             if probe.kind == session_metadata_pb2.PROBE_KIND_GPU:
                 self.tails.append((probe.kind,
                                    TraceTail(out, gpu_metrics_pb2.GPUMetricsTrace)))

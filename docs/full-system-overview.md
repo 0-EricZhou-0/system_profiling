@@ -123,6 +123,19 @@ that didn't run are simply omitted from the layout. See
 
 The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are comments.
 
+### Top level
+
+| Field                   | Type   | Default                 | Description |
+| ----------------------- | ------ | ----------------------- | ----------- |
+| `output_dir`            | string | (empty = current directory) | Directory for every file of the trace; created if missing |
+| `session_metadata_file` | string | `session_metadata.pb`   | Plain file name in `output_dir` |
+
+Every file of a trace is directly in `output_dir`. Each `output_file` and
+`session_metadata_file` must be a plain file name: a `/` is rejected, as
+are two files with the same name (`Configure()` returns `InvalidConfig`,
+naming the fields). An enabled probe with no `output_file` writes its
+default name.
+
 ### GPU section
 
 | Field                  | Type       | Default       | Description                                      |
@@ -135,7 +148,7 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | `max_samples`          | uint64     | 0 = auto      | Counter-data image per decode pass (0 = sized for the decode interval) |
 | `metrics`              | string[]   | (empty)       | CUPTI metric names. Must fit single pass         |
 | `flush_interval_ms`    | uint64     | 5000          | Periodic flush interval. 0 = 5000                |
-| `output_file`          | string     | (empty)       | Output `.pb` path                                |
+| `output_file`          | string     | `gpu_metrics.pb` | Plain file name in `output_dir`; one file for every device |
 
 ### System section (CPU + memory)
 
@@ -143,9 +156,9 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | ---------------------- | ---------- | ------- | ------------------------------------------------ |
 | `enabled`              | bool       | false   | Enable CPU + memory profiling                    |
 | `sampling_frequency_hz`| uint64     | 100     | Sampling rate in Hz (0 = 100)                    |
-| `pids`                 | uint32[]   | (empty) | PIDs for per-process tracking. 0 = self          |
+| `processes`            | {pid, alias}[] | (empty) | Processes for per-process tracking. pid 0 = self |
 | `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval. 0 = 5000                |
-| `output_file`          | string     | (empty) | Output `.pb` path                                |
+| `output_file`          | string     | `system_metrics.pb` | Plain file name in `output_dir` |
 
 ### Disk section
 
@@ -154,9 +167,9 @@ The config uses **protobuf text format** (`.pbtxt`). Lines starting with `#` are
 | `enabled`              | bool       | false   | Enable disk I/O profiling                        |
 | `sampling_frequency_hz`| uint64     | 100     | Sampling rate in Hz (0 = 100)                    |
 | `devices`              | string[]   | (empty) | Block device names (e.g. `"nvme0n1"`, `"sda"`)  |
-| `pids`                 | uint32[]   | (empty) | PIDs for per-process I/O. 0 = self               |
+| `processes`            | {pid, alias}[] | (empty) | Processes for per-process I/O. pid 0 = self |
 | `flush_interval_ms`    | uint64     | 5000    | Periodic flush interval. 0 = 5000                |
-| `output_file`          | string     | (empty) | Output `.pb` path                                |
+| `output_file`          | string     | `disk_metrics.pb` | Plain file name in `output_dir` |
 
 > [!WARNING]
 > Per-process disk I/O (`/proc/[PID]/io`) requires the profiler to run as the same user as the target process, or with `CAP_SYS_PTRACE`. If access is denied, a warning is printed and per-process disk data is skipped.

@@ -21,8 +21,10 @@ enum ProbeKind {
 
 message ActiveProbe {
     ProbeKind kind = 1;
-    // Relative to the directory holding session_metadata.pb (normally
-    // just the file name), so a trace directory can be copied or moved.
+    // Relative to the directory holding session_metadata.pb: the file
+    // name, since every file of a trace is directly in output_dir (a "/"
+    // in a configured name is rejected). A trace directory can be copied
+    // or moved.
     // v0.2.0 and earlier recorded output_dir + output_file (absolute when
     // output_dir was); readers then fall back to the file's name next to
     // session_metadata.pb (tools/trace_paths.py).

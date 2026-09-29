@@ -106,3 +106,32 @@ def test_live_tail_follows_old_absolute_paths(tmp_path):
     paths = {Path(t.path) for _k, t in coord.tails}
     assert paths == {Path(meta_path).parent / f for f in ("system_metrics.pb", "disk_metrics.pb",
                                                           "gpu_metrics.pb")}
+
+
+def test_empty_recorded_path_is_an_error():
+    with pytest.raises(ValueError, match="no file name recorded"):
+        trace_paths.resolve_probe_path("/x/session_metadata.pb", "")
+
+
+@pytest.mark.parametrize("tool,out,extra", [
+    ("visualize_all.py", "out.png", []),
+    ("visualize_interactive.py", "out.html", ["--no-serve"]),
+])
+@pytest.mark.parametrize("broken", ["empty", "missing"])
+def test_bad_probe_path_is_skipped_with_an_error(tmp_path, tool, out, extra, broken):
+    """A probe whose path is empty (older writers) or names no file: an
+    error naming the probe on stderr, that probe skipped, the rest
+    rendered, exit 0."""
+    meta_path = _trace(tmp_path)
+    if broken == "empty":
+        _rewrite_probe_paths(meta_path, lambda f: "" if f == "disk_metrics.pb" else f)
+    else:
+        os.unlink(Path(meta_path).parent / "disk_metrics.pb")
+    out = tmp_path / out
+    p = subprocess.run([sys.executable, os.path.join(viz_trace.TOOLS, tool), meta_path, "-o", str(out)] + extra,
+                       capture_output=True, text=True, cwd=str(tmp_path), timeout=300)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert out.stat().st_size > 0
+    errors = [l for l in p.stderr.splitlines() if l.startswith("error:")]
+    assert len(errors) == 1 and "Disk probe" in errors[0] and "skipping it" in errors[0], p.stderr
+    assert "Traceback" not in p.stderr, p.stderr

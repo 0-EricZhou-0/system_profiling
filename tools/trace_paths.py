@@ -23,7 +23,10 @@ _PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 def resolve_probe_path(metadata_path: str | Path, recorded: str) -> Path:
     """The probe file `recorded` of the trace whose session_metadata.pb is
     `metadata_path`. When no candidate exists yet (a live trace whose
-    probe has not flushed), the path the recording names."""
+    probe has not flushed), the path the recording names. ValueError when
+    no file name is recorded (the writer always records one now)."""
+    if not recorded:
+        raise ValueError("no file name recorded for this probe")
     meta_dir = Path(metadata_path).parent
     p = Path(recorded)
     if p.is_absolute():
@@ -34,6 +37,29 @@ def resolve_probe_path(metadata_path: str | Path, recorded: str) -> Path:
         if c.exists():
             return c
     return cands[0]
+
+
+_KIND_NAMES = {1: "GPU", 2: "System", 3: "Disk", 4: "Events"}   # ProbeKind
+
+
+def probe_file(metadata_path: str | Path, probe, tool: str) -> Path | None:
+    """The file of `probe` (an ActiveProbe) for a reader that renders a
+    finished trace, or None: when its path is empty or names no file,
+    an error naming the probe goes to stderr and the reader skips it
+    (everything else still renders)."""
+    kind = _KIND_NAMES.get(probe.kind, f"kind {probe.kind}")
+    try:
+        path = resolve_probe_path(metadata_path, probe.output_file)
+    except ValueError as e:
+        print(f"error: {tool}: {metadata_path}: {kind} probe: {e}; skipping it",
+              file=sys.stderr, flush=True)
+        return None
+    if not path.is_file():
+        what = "is not a file" if path.exists() else "not found"
+        print(f"error: {tool}: {metadata_path}: {kind} probe file {path} {what}; skipping it",
+              file=sys.stderr, flush=True)
+        return None
+    return path
 
 
 def reader_version() -> str | None:

@@ -68,7 +68,7 @@ import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
-from trace_paths import resolve_probe_path, warn_on_version_mismatch  # noqa: E402
+from trace_paths import probe_file, warn_on_version_mismatch  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -1069,9 +1069,8 @@ def _ingest_probes(
     }
 
     for probe in meta.probes:
-        out_path = resolve_probe_path(metadata_path, probe.output_file)
-        if not out_path.exists():
-            _log(f"  skip {out_path} (not found)")
+        out_path = probe_file(metadata_path, probe, "visualize_all.py")
+        if out_path is None:
             continue
 
         if probe.kind == session_metadata_pb2.PROBE_KIND_GPU:

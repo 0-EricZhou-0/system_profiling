@@ -519,7 +519,7 @@ public:
 | `samplingFrequencyHz` | How often `/proc/stat` and friends are polled. Default 100 Hz (a proto value of 0 means the same); see [Sampling frequency guidance](#sampling-frequency-guidance) for what each rate costs. |
 | `Processes` | Initial PIDs (with optional aliases) to sample per-process. `Add/RemoveTrackedProcess` may grow or shrink this set mid-run. See `TrackedProcess`. |
 | `flushIntervalMs` | How often the in-memory sample buffer is serialized to `outputFile`. |
-| `outputFile` | Path to the system trace `.pb`. Resolved against `output_dir` when driven by `ProfilerSuite`. |
+| `outputFile` | Path to the system trace `.pb`. When driven by `ProfilerSuite`, `output_file` is a plain file name in `output_dir` (a `/` is rejected: `InvalidConfig`). |
 
 `SystemProfiler` writes one `SystemMetricsTrace` per flush. CPU and memory readings at one tick are combined into a single `Sample` (system-wide) or `ProcessSample` (per-PID); `values[]` is ordered to match the per-scope FQN registry in `scope_metric_names[]` of the same trace. See the [Output format](#output-format) section for the schema.
 
@@ -1457,7 +1457,17 @@ atomic load per flush.
 
 ## Output format
 
-A full-suite run produces five `.pb` files under `output_dir`:
+A full-suite run produces five `.pb` files, all directly in `output_dir`:
+every `output_file` and `session_metadata_file` must be a plain file name
+(`Configure()` returns `InvalidConfig` for one with a `/`, naming the
+field: subdirectories are not allowed; use `output_dir`), and no two may
+be the same (also `InvalidConfig`). An enabled probe with no
+`output_file` writes its default name (`gpu_metrics.pb`,
+`system_metrics.pb`, `disk_metrics.pb`, `events.pb`; the metadata file
+is `session_metadata.pb`). The directory is therefore self-contained and
+can be copied or moved. A viewer given a probe whose file is missing
+(or, from an older writer, has no name) prints an error naming the
+probe, skips it, and renders the rest.
 
 | File | Schema | Contents |
 | ---- | ------ | -------- |

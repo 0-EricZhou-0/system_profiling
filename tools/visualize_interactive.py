@@ -62,7 +62,7 @@ import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
-from trace_paths import resolve_probe_path, warn_on_version_mismatch  # noqa: E402
+from trace_paths import probe_file, resolve_probe_path, warn_on_version_mismatch  # noqa: E402
 
 from bokeh.application import Application  # noqa: E402
 from bokeh.application.handlers.function import FunctionHandler  # noqa: E402
@@ -130,9 +130,8 @@ def _ingest_probes(
     sample_freqs: dict[str, int] = {}
     probes_info: dict[str, dict] = {}
     for probe in meta.probes:
-        out = resolve_probe_path(metadata_path, probe.output_file)
-        if not out.exists():
-            _log(f"  skip {out} (not found)")
+        out = probe_file(metadata_path, probe, "visualize_interactive.py")
+        if out is None:
             continue
         if probe.kind == session_metadata_pb2.PROBE_KIND_GPU:
             traces = _read_delimited(out, gpu_metrics_pb2.GPUMetricsTrace)
@@ -982,8 +981,12 @@ def _load_events_for_session(meta: session_metadata_pb2.SessionMetadata,
     for probe in meta.probes:
         if probe.kind != session_metadata_pb2.PROBE_KIND_EVENTS:
             continue
-        out = resolve_probe_path(metadata_path, probe.output_file)
-        if not out.exists():
+        # Quietly: _ingest_probes already reported a missing file.
+        try:
+            out = resolve_probe_path(metadata_path, probe.output_file)
+        except ValueError:
+            return [], []
+        if not out.is_file():
             return [], []
         return _load_events(out)
     return [], []

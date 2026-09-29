@@ -62,7 +62,9 @@ message GPUProfilerConfig {
     // Must not be less than decode_interval_ms (Configure() fails with
     // InvalidConfig).
     uint64 flush_interval_ms = 7;
-    // GPU trace (GPUMetricsTrace frames), relative to output_dir.
+    // GPU trace (GPUMetricsTrace frames), one file for every device.
+    // Empty = "gpu_metrics.pb". A plain file name in output_dir: a "/" is rejected (InvalidConfig).
+    // Two files of a trace with the same name: InvalidConfig.
     string output_file = 8;
     // How often the host collects the samples the GPU buffered (one
     // decode pass per interval). 0 = 1000 ms. The wait is interruptible:
@@ -79,6 +81,7 @@ message SystemProfilerConfig {
     repeated TrackedProcessV2 processes = 3;
     // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 4;
+    // Empty = "system_metrics.pb". A plain file name in output_dir: a "/" is rejected (InvalidConfig).
     string output_file = 5;
     // Where the sampler + flush threads run. UNSPECIFIED → LEGACY.
     SystemProbeMode mode = 6;
@@ -92,6 +95,7 @@ message DiskProfilerConfig {
     repeated TrackedProcessV2 processes = 4;
     // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 5;
+    // Empty = "disk_metrics.pb". A plain file name in output_dir: a "/" is rejected (InvalidConfig).
     string output_file = 6;
     // Where the sampler + flush threads run. UNSPECIFIED → LEGACY.
     // If both System and Disk are SIDECAR, one sidecar process serves
@@ -105,7 +109,8 @@ message EventsProfilerConfig {
     bool enabled = 1;
     // Periodic flush of buffered samples to output_file. 0 = 5000 ms.
     uint64 flush_interval_ms = 2;
-    string output_file = 3;          // events.pb
+    // Empty = "events.pb". A plain file name in output_dir: a "/" is rejected (InvalidConfig).
+    string output_file = 3;
 }
 
 // Descendant tracking for the System + Disk probes. One setting drives
@@ -136,14 +141,16 @@ message ProfilerSuiteConfig {
     SystemProfilerConfig system = 2;
     DiskProfilerConfig disk = 3;
 
-    // Output directory for all .pb files. Prepended to each component's output_file.
-    // Empty or unset = current working directory.
+    // Output directory for all .pb files; every file of the trace is
+    // directly in it. Empty or unset = current working directory.
     string output_dir = 4;
 
     EventsProfilerConfig events = 5;
 
-    // session_metadata.pb path, relative to output_dir.
-    // Empty = "session_metadata.pb" by default at runtime.
+    // session_metadata.pb's name. Empty = "session_metadata.pb". A plain
+    // file name in output_dir: a "/" is rejected, as is a name another
+    // file of the trace has (Configure() returns InvalidConfig, naming
+    // the fields), so a trace directory is always self-contained.
     string session_metadata_file = 6;
 
     // Optional: path to a MetricCatalog pbtxt to OVERLAY onto the

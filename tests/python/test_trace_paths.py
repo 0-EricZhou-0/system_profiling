@@ -1,7 +1,8 @@
-"""A trace directory is self-contained: session_metadata.pb records every
-probe file relative to its own directory (in both probe modes, with an
-absolute or a relative output_dir, and with files in subdirectories), so
-the directory still renders after it is moved to another place."""
+"""A trace directory is self-contained: every file is directly in
+output_dir (a configured name with a "/" is rejected), session_metadata.pb
+records each probe file relative to its own directory (in both probe
+modes, with an absolute or a relative output_dir), so the directory still
+renders after it is moved to another place."""
 
 import os
 import shutil
@@ -66,22 +67,59 @@ def test_relative_output_dir_records_file_names(tmp_path, monkeypatch):
     assert sorted(files) == ["disk_metrics.pb", "events.pb", "system_metrics.pb"]
 
 
-@pytest.mark.parametrize("mode", ["legacy", "sidecar"])
-def test_subdirectories_resolve_from_the_metadata_directory(tmp_path, mode):
-    """session_metadata.pb in meta/, probe files in probes/: each recorded
-    path, joined onto meta/, is the file the probe (or the sidecar) wrote."""
+BAD_NAME = "must be a plain file name: subdirectories are not allowed; use output_dir"
+SAME_NAME = "every file of a trace needs its own name"
+
+
+@pytest.mark.parametrize("kw,message", [
+    ({"sys_file": "probes/system_metrics.pb"}, "system.output_file " + '"probes/system_metrics.pb" ' + BAD_NAME),
+    ({"disk_file": "sub/disk_metrics.pb"}, "disk.output_file " + '"sub/disk_metrics.pb" ' + BAD_NAME),
+    ({"events_file": "../events.pb"}, "events.output_file " + '"../events.pb" ' + BAD_NAME),
+    ({"meta_file": "meta/session_metadata.pb"}, "session_metadata_file " + '"meta/session_metadata.pb" ' + BAD_NAME),
+    ({"meta_file": "/tmp/session_metadata.pb"}, "session_metadata_file " + '"/tmp/session_metadata.pb" ' + BAD_NAME),
+    ({"sys_file": ".."}, "system.output_file " + '".." ' + BAD_NAME),
+    ({"disk_file": "system_metrics.pb"}, 'disk.output_file and system.output_file are both "system_metrics.pb": ' + SAME_NAME),
+    ({"events_file": "session_metadata.pb"}, 'session_metadata_file and events.output_file are both "session_metadata.pb": ' + SAME_NAME),
+    ({"sys_file": "", "disk_file": "system_metrics.pb"}, 'disk.output_file and system.output_file are both "system_metrics.pb": ' + SAME_NAME),
+], ids=["probes/", "sub/", "../", "meta/", "absolute", "dotdot", "two-probes", "probe-and-metadata", "default-and-explicit"])
+def test_bad_file_names_are_rejected(tmp_path, kw, message):
+    """Every file of a trace is directly in output_dir, with its own name:
+    a name with a "/", or one used twice, fails Configure() with
+    InvalidConfig and a message naming the fields, and nothing is written."""
     out = tmp_path / "run"
-    for d in ("meta", "probes"):
-        (out / d).mkdir(parents=True)
-    _run(_config(str(out), mode, sys_file="probes/system_metrics.pb",
-                 disk_file="probes/disk_metrics.pb", events_file="probes/events.pb",
-                 meta_file="meta/session_metadata.pb"))
-    meta_dir = out / "meta"
-    files = _probe_files(meta_dir / "session_metadata.pb")
-    assert sorted(files) == ["../probes/disk_metrics.pb", "../probes/events.pb",
-                             "../probes/system_metrics.pb"]
+    code = (
+        "import sys, json, cupti_profiler as cp\n"
+        "s = cp.ProfilerSuite()\n"
+        "try:\n"
+        "    cp.configure_suite(s, json.loads(sys.argv[1]))\n"
+        "except Exception as e:\n"
+        "    print('RAISED', e)\n"
+        "    sys.exit(3)\n"
+        "s.start(); s.stop()\n"
+    )
+    import json
+    p = subprocess.run([sys.executable, "-c", code, json.dumps(_config(str(out), "legacy", **kw))],
+                       capture_output=True, text=True, timeout=60)
+    assert p.returncode == 3, p.stdout + p.stderr
+    assert "InvalidConfig" in p.stdout, p.stdout + p.stderr
+    assert message in p.stderr, p.stderr
+    assert not (out / "session_metadata.pb").exists()
+
+
+def test_unset_file_names_get_defaults(tmp_path):
+    """An enabled probe with no output_file writes its default file, and
+    the metadata names it: no empty name reaches session_metadata.pb."""
+    out = tmp_path / "run"
+    cfg = _config(str(out), "legacy")
+    cfg["gpu"] = {"enabled": True, "sampling_frequency_hz": 100,
+                  "metrics": ["sm__cycles_active.avg.pct_of_peak_sustained_elapsed"]}
+    for k in ("system", "disk", "events"):
+        del cfg[k]["output_file"]
+    _run(cfg)
+    files = _probe_files(out / "session_metadata.pb")
+    assert sorted(files) == ["disk_metrics.pb", "events.pb", "gpu_metrics.pb", "system_metrics.pb"]
     for f in files:
-        assert (meta_dir / f).is_file(), f
+        assert (out / f).is_file(), f
 
 
 @pytest.mark.parametrize("mode", ["legacy", "sidecar"])
