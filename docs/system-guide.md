@@ -1585,10 +1585,18 @@ message SessionMetadata {
     MetricCatalog catalog = 5;
     // Startup situation report (see "Startup situation report").
     repeated SituationCheck situation = 6;
+    // What wrote the trace (absent in traces from before it was added).
+    Producer producer = 7;
 }
 
 message SituationCheck { string check; string observed; string consequence; bool degraded; }
+message Producer { string name; string version; string git_commit; }  // git_commit "" if unknown
 ```
+
+`producer.version` is the package version (`pyproject.toml`, the one
+source; also `cupti_profiler.__version__`). Every reader warns once when
+it differs from its own, or is missing, and renders anyway: only the
+current version is supported.
 
 `session_metadata.pb` is written atomically (`.tmp` + `rename(2)`) at
 `ProfilerSuite::Start()` AND `Stop()` — tailers (live visualizer) never

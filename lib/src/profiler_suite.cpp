@@ -11,6 +11,7 @@
 #include "sidecar_process.h"
 #include <cupti_profiler/child_subreaper.h>
 #include <cupti_profiler/defaults.h>
+#include <cupti_profiler/version.h>
 #include "situation_report.h"
 
 #include <google/protobuf/text_format.h>
@@ -500,6 +501,9 @@ void ProfilerSuite::Impl::WriteSessionManifest() {
     char hostbuf[256] = {0};
     gethostname(hostbuf, sizeof(hostbuf));
     meta.set_hostname(hostbuf);
+    meta.mutable_producer()->set_name("cupti-profiler");
+    meta.mutable_producer()->set_version(Version());
+    meta.mutable_producer()->set_git_commit(GitCommit());
     meta.set_wall_clock_epoch_ns(startWallClockEpochNs);
     {
         std::time_t secs = startWallClockEpochNs / 1000000000ULL;

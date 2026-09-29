@@ -8,6 +8,7 @@ Re-exports the pybind11 extension classes and adds:
 """
 
 from . import _native
+from ._native import __version__, __git_commit__
 from ._native import (
     ProfilerSuite,
     GpuProfiler,

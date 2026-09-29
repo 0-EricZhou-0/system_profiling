@@ -14,6 +14,17 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# The package version: pyproject.toml is the one source of truth. The
+# library reports it (cupti_profiler::Version(), cupti_profiler.__version__)
+# and records it in every session_metadata.pb.
+file(READ "${CMAKE_SOURCE_DIR}/pyproject.toml" _PYPROJECT)
+if(NOT _PYPROJECT MATCHES "\n\\[project\\][^[]*\nversion = \"([^\"]+)\"")
+    message(FATAL_ERROR "No version = \"...\" in the [project] table of pyproject.toml")
+endif()
+set(CUPTI_PROFILER_VERSION "${CMAKE_MATCH_1}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/pyproject.toml")
+message(STATUS "cupti-profiler version ${CUPTI_PROFILER_VERSION}")
+
 # Find CUDA Toolkit (provides CUDA::cudart, CUDA::cublas, include paths)
 find_package(CUDAToolkit REQUIRED)
 

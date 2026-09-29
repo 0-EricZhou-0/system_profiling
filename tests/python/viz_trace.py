@@ -20,6 +20,8 @@ TOOLS = os.path.join(REPO, "tools")
 if TOOLS not in sys.path:
     sys.path.insert(0, TOOLS)
 
+import trace_paths  # noqa: E402
+
 CATALOG = os.path.join(REPO, "lib", "data", "metric_catalog.pbtxt")
 SYS_FQNS = ["cpu__cycles_busy.avg.pct_of_peak_sustained_elapsed",
             "cpu__cycles_user.avg.pct_of_peak_sustained_elapsed"]
@@ -122,6 +124,9 @@ def write_trace(out_dir, procs, duration_s=10.0, regions=(), gpu_fqns=(), gpu_va
     meta = session_metadata_pb2.SessionMetadata(hostname="synthetic",
                                                 wall_clock_epoch_ns=1_700_000_000_000_000_000,
                                                 start_iso8601="2026-09-28T00:00:00Z")
+    # Written by this version, as the suite would: no version warning.
+    meta.producer.name = "cupti-profiler"
+    meta.producer.version = trace_paths.reader_version()
     meta.catalog.CopyFrom(catalog)
     meta.probes.add(kind=session_metadata_pb2.PROBE_KIND_SYSTEM,
                     output_file="system_metrics.pb", sampling_frequency_hz=HZ)

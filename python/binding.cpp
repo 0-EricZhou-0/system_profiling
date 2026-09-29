@@ -20,6 +20,7 @@
 #include <cupti_profiler/tracked_process.h>
 #include <cupti_profiler/child_subreaper.h>
 #include <cupti_profiler/testing.h>
+#include <cupti_profiler/version.h>
 
 #include <cuda_runtime.h>
 
@@ -34,6 +35,10 @@ using namespace cupti_profiler;
 PYBIND11_MODULE(_native, m) {
     m.doc() = "pybind11 bindings for the cupti_profiler suite "
               "(GPU + System + Disk + Events).";
+
+    // The loaded library's version (pyproject.toml) and git commit.
+    m.attr("__version__") = Version();
+    m.attr("__git_commit__") = GitCommit();
 
     // -------------------------------------------------------------------
     // Shared TrackedProcess (PID + optional display alias) — used by both

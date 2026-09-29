@@ -46,7 +46,7 @@ import session_metadata_pb2  # noqa: E402
 import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
-from trace_paths import resolve_probe_path  # noqa: E402
+from trace_paths import resolve_probe_path, warn_on_version_mismatch  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -368,9 +368,11 @@ class LiveCoordinator:
 # ---------------------------------------------------------------------------
 
 def wait_for_metadata(path: Path, timeout_s: float,
-                       log: Callable[[str], None]) -> session_metadata_pb2.SessionMetadata:
+                       log: Callable[[str], None],
+                       tool: str = "live_tail.py") -> session_metadata_pb2.SessionMetadata:
     """Poll for `path` to appear. Returns the parsed SessionMetadata
-    or raises TimeoutError after `timeout_s`."""
+    or raises TimeoutError after `timeout_s`. `tool`: the reader named
+    in the version-mismatch warning."""
     deadline = time.time() + timeout_s
     last_log = 0.0
     while True:
@@ -380,6 +382,7 @@ def wait_for_metadata(path: Path, timeout_s: float,
                     meta = session_metadata_pb2.SessionMetadata()
                     meta.ParseFromString(f.read())
                 if meta.probes:
+                    warn_on_version_mismatch(meta, path, tool)
                     return meta
             except Exception:
                 pass  # Partial mid-write — retry.

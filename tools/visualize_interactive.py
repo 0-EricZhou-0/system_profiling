@@ -56,7 +56,7 @@ import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
-from trace_paths import resolve_probe_path  # noqa: E402
+from trace_paths import resolve_probe_path, warn_on_version_mismatch  # noqa: E402
 
 from bokeh.application import Application  # noqa: E402
 from bokeh.application.handlers.function import FunctionHandler  # noqa: E402
@@ -105,6 +105,7 @@ def _load_session_metadata(path: str | Path) -> session_metadata_pb2.SessionMeta
     with open(path, "rb") as f:
         meta = session_metadata_pb2.SessionMetadata()
         meta.ParseFromString(f.read())
+    warn_on_version_mismatch(meta, path, "visualize_interactive.py")
     return meta
 
 
@@ -2193,7 +2194,7 @@ def _run_live(args, metadata_path: Path) -> int:
     _log(f"--live  waiting for {metadata_path} (timeout {args.live_bootstrap_timeout_s}s)")
     try:
         meta = live_tail.wait_for_metadata(
-            metadata_path, args.live_bootstrap_timeout_s, _log)
+            metadata_path, args.live_bootstrap_timeout_s, _log, "visualize_interactive.py")
     except TimeoutError as e:
         print(str(e), file=sys.stderr)
         return 2

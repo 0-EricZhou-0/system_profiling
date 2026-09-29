@@ -41,6 +41,15 @@ message SituationCheck {
     bool   degraded    = 4;   // true = a guarantee is weaker than the default
 }
 
+// What wrote a trace. Readers (tools/trace_paths.py) warn when it is not
+// the version reading it: there are no compatibility code paths, so a
+// trace from another version may not render correctly.
+message Producer {
+    string name       = 1;   // "cupti-profiler"
+    string version    = 2;   // the package version (pyproject.toml)
+    string git_commit = 3;   // the commit built from, "" if unknown
+}
+
 message SessionMetadata {
     string hostname = 1;
     uint64 wall_clock_epoch_ns = 2;     // captured at suite Start()
@@ -59,4 +68,8 @@ message SessionMetadata {
     // subreaper line is refreshed on every write, and per-root lines
     // are appended as roots are added.
     repeated SituationCheck situation = 6;
+
+    // The library that wrote this trace. Absent in traces written by
+    // v0.2.0 and earlier.
+    Producer producer = 7;
 }

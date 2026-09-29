@@ -63,7 +63,7 @@ import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
-from trace_paths import resolve_probe_path  # noqa: E402
+from trace_paths import resolve_probe_path, warn_on_version_mismatch  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +156,7 @@ def _load_session_metadata(path: str | Path) -> session_metadata_pb2.SessionMeta
     with open(path, "rb") as f:
         meta = session_metadata_pb2.SessionMetadata()
         meta.ParseFromString(f.read())
+    warn_on_version_mismatch(meta, path, "visualize_all.py")
     return meta
 
 

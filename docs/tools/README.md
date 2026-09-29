@@ -74,6 +74,16 @@ relative to itself), so it can be copied to another machine and rendered
 there; traces from v0.2.0 and earlier, which recorded absolute paths, are
 read the same way.
 
+Every trace records the version that wrote it (`producer` in
+`session_metadata.pb`: name, version and, when the library was built
+from a git checkout, the commit). Every reader (`visualize_all.py`,
+`visualize_interactive.py`, `live_tail.py`) compares it with its own
+version, the one in the checkout's `pyproject.toml`. When they differ,
+or the trace does not say (v0.2.0 and earlier), it prints one warning —
+the trace was written by X, is being read by Y, and may not render
+correctly — and renders anyway. Only the current version is supported:
+there are no compatibility code paths.
+
 ```bash
 python tools/visualize_all.py profiling_output/session_metadata.pb \
     -o full_profile.png
