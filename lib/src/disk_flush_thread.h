@@ -65,17 +65,29 @@ struct IoReapRecord {
         IoCounterValues lastSeen;           // its last reading
         uint32_t        reapedBy  = 0;      // parent_pid, or a chain member
         bool            ambiguous = false;  // listed, not subtracted
+        bool            autoreaped = false; // auto-reaped on the way: listed, not subtracted
     };
     std::vector<Child> children;
     bool     ambiguous    = false;   // some child is
+    bool     autoreaped   = false;   // some child is
     // Raw parent delta minus the subtracted, per counter.
     int64_t  remainder[5] = {0, 0, 0, 0, 0};
 };
 
+// A reaped child whose reap chain stops at a traced parent that was never
+// read (IoReapChainBreak in disk_metrics.proto).
+struct IoChainBreakRecord {
+    uint64_t timestamp_ns = 0;
+    uint32_t pid          = 0;   // the reaped child
+    uint32_t missing_pid  = 0;   // the traced parent with no reading
+    uint32_t absorbed_by  = 0;   // missing_pid's parent (traced), which reaps it
+};
+
 struct DiskSampleBatch {
-    std::vector<DiskDeviceTick>  deviceTicks;
-    std::vector<DiskProcessTick> processTicks;
-    std::vector<IoReapRecord>    ioReaps;
+    std::vector<DiskDeviceTick>     deviceTicks;
+    std::vector<DiskProcessTick>    processTicks;
+    std::vector<IoReapRecord>       ioReaps;
+    std::vector<IoChainBreakRecord> chainBreaks;
 };
 
 // Accessors for the descriptor arrays owned by disk_flush_thread.cpp.

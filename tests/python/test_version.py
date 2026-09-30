@@ -13,8 +13,8 @@ def _version():
         return tomllib.load(f)["project"]["version"]
 
 
-def test_version_is_0_2_0():
-    assert _version() == "0.2.0"
+def test_version_is_0_2_1():
+    assert _version() == "0.2.1"
 
 
 def test_docs_wheel_names_follow_the_version():

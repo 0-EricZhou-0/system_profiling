@@ -285,6 +285,12 @@ void SystemProfiler::Impl::AttributeTails(uint64_t tsNs,
                 tail -= static_cast<int64_t>(e.lastCpuNs + e.lastChildrenCpuNs);
                 tail -= ChainCpu(c, r, 0);
             }
+            // A parent that ignores SIGCHLD had them auto-reaped: their CPU
+            // was never added to its cutime (kernel/exit.c, only
+            // wait_task_zombie adds it), so no tail can be measured. One
+            // /proc/<parent>/status read per reap, never per tick.
+            r.autoreaped   = internal::IgnoresSigchld(parent).value_or(false);
+            if (r.autoreaped) tail = 0;
             r.timestamp_ns = tsNs;
             r.parent_pid   = parent;
             r.pids         = reaped;

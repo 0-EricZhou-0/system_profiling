@@ -136,6 +136,7 @@ def test_cpu_tail_attributed(tmp_path, mode):
         assert len(tails) == 1 and list(tails[0].pids) == [pid], \
             f"expected one CpuTail of its own for {pid}: {tails}"
         assert tails[0].parent_pid == t.pid
+        assert not tails[0].autoreaped   # the root waits
         tail = tails[0].cpu_after_last_sample_ns / 1e9
         print(f"{pid}: head {head:.3f} + samples {samples:.3f} + tail {tail:.3f} = "
               f"{head + samples + tail:.3f} s vs truth {truth:.3f} s")

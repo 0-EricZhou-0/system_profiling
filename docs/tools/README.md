@@ -69,6 +69,21 @@ auto-discovers each per-probe file from the manifest's `probes` list.
 Walks the panel layout and emits one matplotlib subplot per panel that
 has matching series.
 
+A trace directory is self-contained (the manifest names probe files
+relative to itself), so it can be copied to another machine and rendered
+there; traces from v0.2.0 and earlier, which recorded absolute paths, are
+read the same way.
+
+Every trace records the version that wrote it (`producer` in
+`session_metadata.pb`: name, version and, when the library was built
+from a git checkout, the commit). Every reader (`visualize_all.py`,
+`visualize_interactive.py`, `live_tail.py`) compares it with its own
+version, the one in the checkout's `pyproject.toml`. When they differ,
+or the trace does not say (v0.2.0 and earlier), it prints one warning —
+the trace was written by X, is being read by Y, and may not render
+correctly — and renders anyway. Only the current version is supported:
+there are no compatibility code paths.
+
 ```bash
 python tools/visualize_all.py profiling_output/session_metadata.pb \
     -o full_profile.png
@@ -242,7 +257,7 @@ Bokeh-based interactive renderer, same input contract as
 with BokehJS bundled inline) plus a built-in HTTP server.
 
 ```bash
-# Build + serve on http://localhost:8000 (it never opens a browser:
+# Build + serve on http://127.0.0.1:8000 (it never opens a browser:
 # point yours at the URL it logs)
 python tools/visualize_interactive.py profiling_output/session_metadata.pb
 
@@ -253,8 +268,9 @@ python tools/visualize_interactive.py session_metadata.pb \
 # Build only — don't host:
 python tools/visualize_interactive.py session_metadata.pb --no-serve
 
-# Bind to localhost only (default is 0.0.0.0 = all interfaces):
-python tools/visualize_interactive.py session_metadata.pb --host 127.0.0.1
+# Serve on every interface (default is 127.0.0.1 = this machine only).
+# Anyone who can reach the port can read the trace:
+python tools/visualize_interactive.py session_metadata.pb --host 0.0.0.0
 
 # Dark theme + downsample for faster first paint:
 python tools/visualize_interactive.py session_metadata.pb \
@@ -276,9 +292,28 @@ Flag reference (selected; full list via `--help`):
   the line-style key's swatches) take the theme's text colour, so they
   stay legible on the dark background. Default `light`.
 - `--render-backend {canvas,webgl,svg}` — output backend per figure.
-  Default `canvas`: ~4-5× faster first paint than `webgl` at our
-  trace volume (some GPU drivers stall on WebGL `ReadPixels`). `webgl`
-  wins on pan/zoom repaint smoothness.
+  Default `canvas`: ~4-5× faster first paint than `webgl` on a page
+  of ~6k points (headless Chromium; some GPU drivers stall on WebGL
+  `ReadPixels`). Today's pages are larger — ~14k points for the
+  full-system example, ~3.1M for the vLLM serving example (1 kHz GPU) —
+  and `webgl` has not been re-measured at those sizes or in a real
+  browser. `webgl` wins on pan/zoom repaint smoothness;
+  `--display-hz` shrinks a large page.
+
+Long series are drawn at the view's pixel resolution. The page keeps every
+sample, and draws each series (and each panel's hover table) reduced to,
+per pixel column of the view ±1 view width, its first, last, lowest and
+highest samples and any gap (NaN) — the full line at pixel resolution,
+real samples only, so tooltips show real values. Zooming in far enough
+draws every sample; a zoom, or a pan past the drawn window, recomputes it
+(at most every 100 ms while dragging, and 60 ms after the last change);
+a pan inside it costs nothing. Legends, exit lines, the stop shade and
+folding are unaffected, and `visualize_all.py`'s PNG is unchanged.
+Measured on the vLLM serving pages (headless Chrome, software
+rasterised; `tools/decimate.py` has the rules): a pan step 371 → 120 ms
+(warm, 3.1 M points, 0.22 M drawn) and 441 → 143 ms (cold); first paint
+3.2 → 2.4 s and 4.0 → 3.4 s; the file ~6–10% larger (the initial reduced
+copy).
 - `--smooth-window-s <s>` / `--display-hz <Hz>` — same semantics as
   `visualize_all.py`.
 
@@ -401,7 +436,7 @@ writing to them** and refreshes every `--poll-interval-ms` (default
 python tools/visualize_interactive.py --live \
     profiling_output/session_metadata.pb \
     --port 8000 --poll-interval-ms 1000
-# → http://localhost:8000/
+# → http://127.0.0.1:8000/
 ```
 
 How it works:
@@ -434,6 +469,12 @@ How it works:
 
 Caveats:
 
+- **Cumulative panels are not supported**: a layout panel with
+  `aggregation: PANEL_AGGREGATION_INTEGRATE` makes `--live` refuse to
+  start (`NotImplementedError`), and the default layout
+  (`configs/visualizer_panels.pbtxt`) has five. Use `--panel-layout`
+  with those panels removed or set to `PANEL_AGGREGATION_UNSPECIFIED`.
+  Known limitation, not planned.
 - **One Python process per page.** Closing the browser does not stop
   the server; Ctrl-C in Terminal B does.
 - **Long runs**: per-tick delta streaming scales linearly in the
@@ -447,17 +488,43 @@ Disk I/O is the only non-obvious permission gotcha — see
 
 ### Viewing from a remote server
 
-The script binds `--host 0.0.0.0` by default, but the easiest way to
-view it from a laptop SSH'd into the box is local port forwarding:
+The script binds `127.0.0.1` by default (static and live mode), so the
+page is reachable only from the machine it runs on. To view it from a
+laptop SSH'd into the box, forward the port:
 
 ```bash
 # On the laptop, in a new terminal:
-ssh -L 8000:localhost:8000 user@remote-host
+ssh -L 8000:127.0.0.1:8000 user@remote-host
 # → open http://localhost:8000/ in your browser
 ```
 
+`--host 0.0.0.0` serves on every interface instead, to anyone who can
+reach the port.
+
 VS Code / Cursor's "Remote - SSH" auto-detects the listening port and
 forwards it; check the **Ports** panel at the bottom.
+
+## Viewing without a build
+
+The visualizers are pure Python. They need the protobuf modules generated
+from `proto/`, which the CMake build writes into `generated/proto/`, but
+not the library: no nvcc, no CUDA, no GPU. On any machine with Python
+and a clone of this repository:
+
+```bash
+python -m venv viz-venv && . viz-venv/bin/activate
+pip install -r requirements-viz.txt   # numpy, matplotlib, bokeh, protobuf, grpcio-tools
+python tools/gen_protos.py            # grpc_tools.protoc: proto/*.proto -> generated/proto/
+python tools/visualize_all.py <trace>/session_metadata.pb -o profile.png
+python tools/visualize_interactive.py <trace>/session_metadata.pb
+```
+
+A trace directory can be copied from the machine that recorded it (see
+`visualize_all.py` above). When the generated modules or a package are
+missing, each visualizer prints the command to run and exits with
+status 2, instead of an ImportError traceback. When a `.proto` file is
+newer than its generated module (after a `git pull`), it warns: rerun
+`tools/gen_protos.py`.
 
 ## Dependencies
 
@@ -467,6 +534,9 @@ root [`requirements.txt`](../../requirements.txt). Quick install:
 ```bash
 pip install -r requirements.txt
 ```
+
+To only view traces, [`requirements-viz.txt`](../../requirements-viz.txt)
+is enough (see [*Viewing without a build*](#viewing-without-a-build)).
 
 `visualize_all.py` needs `numpy + matplotlib + protobuf`;
 `visualize_interactive.py` adds `bokeh + tornado` (Bokeh transitive).

@@ -278,8 +278,10 @@ def test_sidecar_timestamps_share_host_clock(tmp_path):
 def test_start_failure_raises(tmp_path, mode):
     # A system probe whose output file cannot be opened used to run with
     # no data and one stderr line (in the sidecar's stderr, under SIDECAR).
+    # A directory where the file should be: a plain name that cannot be
+    # opened for writing.
     cfg = suite_config(tmp_path, mode, processes=[(0, "self")])
-    cfg["system"]["output_file"] = "no_such_dir/system_metrics.pb"
+    (tmp_path / "system_metrics.pb").mkdir()
     suite = cp.ProfilerSuite()
     cp.configure_suite(suite, cfg)
     with pytest.raises(RuntimeError, match="ProbeStartFailed"):

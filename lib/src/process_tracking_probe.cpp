@@ -204,6 +204,11 @@ void ProcessTrackingProbe::NoteUnreadable(uint64_t serial, UnreadableFile which,
     warn_->Warn(serial, static_cast<int>(which) * 16 + warningType, warning, tsNs);
 }
 
+void ProcessTrackingProbe::WarnLimited(uint64_t serial, int warningType, uint64_t tsNs,
+                                       const std::string& warning) {
+    warn_->Warn(serial, warningType, warning, tsNs);
+}
+
 size_t ProcessTrackingProbe::WarnStateSize() const { return warn_->Size(); }
 
 void ProcessTrackingProbe::FlushWarnings() { warn_->Flush(); }

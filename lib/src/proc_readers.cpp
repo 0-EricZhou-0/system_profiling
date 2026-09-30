@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <fstream>
 #include <poll.h>
+#include <signal.h>
 #include <sstream>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -124,6 +125,19 @@ std::optional<std::string> ReadSmallFile(const std::string& path) {
     }
     ::close(fd);
     return out;
+}
+
+std::optional<bool> IgnoresSigchld(uint32_t pid) {
+    auto text = ReadSmallFile("/proc/" + std::to_string(pid) + "/status");
+    if (!text) return std::nullopt;
+    const auto at = text->find("\nSigIgn:");
+    if (at == std::string::npos) return std::nullopt;
+    char* end = nullptr;
+    const char* hex = text->c_str() + at + 8;
+    errno = 0;
+    const unsigned long long mask = std::strtoull(hex, &end, 16);
+    if (end == hex || errno != 0) return std::nullopt;
+    return (mask >> (SIGCHLD - 1)) & 1;
 }
 
 std::optional<ProcStat> ReadProcStat(const std::string& procRoot, uint32_t pid) {

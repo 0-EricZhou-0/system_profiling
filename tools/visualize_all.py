@@ -32,6 +32,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Missing packages or generated protobuf modules: say what to run, not an
+# ImportError traceback (tools/ is on sys.path: this script's directory).
+from gen_protos import require_viewer_modules  # noqa: E402
+require_viewer_modules("visualize_all.py", ["numpy", "matplotlib"])
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -63,6 +68,7 @@ import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
+from trace_paths import probe_file, warn_on_version_mismatch  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -155,18 +161,8 @@ def _load_session_metadata(path: str | Path) -> session_metadata_pb2.SessionMeta
     with open(path, "rb") as f:
         meta = session_metadata_pb2.SessionMetadata()
         meta.ParseFromString(f.read())
+    warn_on_version_mismatch(meta, path, "visualize_all.py")
     return meta
-
-
-def _resolve_probe_path(metadata_path: Path, p: str) -> Path:
-    pp = Path(p)
-    if pp.is_absolute():
-        return pp
-    cands = [Path.cwd() / pp, metadata_path.parent / pp.name, metadata_path.parent / pp]
-    for c in cands:
-        if c.exists():
-            return c
-    return cands[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1073,9 +1069,8 @@ def _ingest_probes(
     }
 
     for probe in meta.probes:
-        out_path = _resolve_probe_path(metadata_path, probe.output_file)
-        if not out_path.exists():
-            _log(f"  skip {out_path} (not found)")
+        out_path = probe_file(metadata_path, probe, "visualize_all.py")
+        if out_path is None:
             continue
 
         if probe.kind == session_metadata_pb2.PROBE_KIND_GPU:

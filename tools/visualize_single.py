@@ -20,6 +20,11 @@ import sys
 import time
 from pathlib import Path
 
+# Missing packages or generated protobuf modules: say what to run, not an
+# ImportError traceback (tools/ is on sys.path: this script's directory).
+from gen_protos import require_viewer_modules  # noqa: E402
+require_viewer_modules("visualize_single.py", ["numpy", "matplotlib"])
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")

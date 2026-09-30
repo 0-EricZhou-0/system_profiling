@@ -21,7 +21,14 @@ enum ProbeKind {
 
 message ActiveProbe {
     ProbeKind kind = 1;
-    string output_file = 2;            // path resolved via output_dir
+    // Relative to the directory holding session_metadata.pb: the file
+    // name, since every file of a trace is directly in output_dir (a "/"
+    // in a configured name is rejected). A trace directory can be copied
+    // or moved.
+    // v0.2.0 and earlier recorded output_dir + output_file (absolute when
+    // output_dir was); readers then fall back to the file's name next to
+    // session_metadata.pb (tools/trace_paths.py).
+    string output_file = 2;
     uint64 sampling_frequency_hz = 3;  // 0 if not applicable (e.g. events)
 }
 
@@ -34,6 +41,15 @@ message SituationCheck {
     string observed    = 2;   // e.g. "available", "uid 1000 (same); spawned"
     string consequence = 3;   // what this means for the trace
     bool   degraded    = 4;   // true = a guarantee is weaker than the default
+}
+
+// What wrote a trace. Readers (tools/trace_paths.py) warn when it is not
+// the version reading it: there are no compatibility code paths, so a
+// trace from another version may not render correctly.
+message Producer {
+    string name       = 1;   // "cupti-profiler"
+    string version    = 2;   // the package version (pyproject.toml)
+    string git_commit = 3;   // the commit built from, "" if unknown
 }
 
 message SessionMetadata {
@@ -54,4 +70,8 @@ message SessionMetadata {
     // subreaper line is refreshed on every write, and per-root lines
     // are appended as roots are added.
     repeated SituationCheck situation = 6;
+
+    // The library that wrote this trace. Absent in traces written by
+    // v0.2.0 and earlier.
+    Producer producer = 7;
 }

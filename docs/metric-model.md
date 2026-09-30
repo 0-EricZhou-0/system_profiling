@@ -352,7 +352,9 @@ Consequences:
   A child reaped by a tracked process that itself exits and is reaped
   within one sampling interval is subtracted at the first live tracked
   ancestor; when whether it was reaped there cannot be known (no
-  orphan reaper), it is listed as ambiguous and not subtracted.
+  orphan reaper), it is listed as ambiguous and not subtracted. A child
+  auto-reaped because its parent ignores `SIGCHLD` never reaches the
+  parent, so it is listed as `autoreaped` and not subtracted.
   **Per-PID I/O means the process's own I/O, excluding tracked children
   it reaped.** It differs from the raw `/proc/<pid>/io` delta exactly by
   the adjustment records, from which the raw value can be rebuilt. The

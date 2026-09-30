@@ -165,7 +165,7 @@ python tools/visualize_all.py profiling_output/session_metadata.pb \
 
 # Or render an interactive HTML viewer (with synced pan/zoom + crosshair):
 python tools/visualize_interactive.py profiling_output/session_metadata.pb
-# → opens at http://localhost:8000/
+# → serves http://127.0.0.1:8000/ (this machine only; it never opens a browser)
 ```
 
 ### Annotating your own workload
@@ -262,6 +262,15 @@ read shows up in none of them). Where to read more:
 | [`visualize_interactive.py`](tools/visualize_interactive.py) | Bokeh HTML of the same data with synced pan / zoom / crosshair |
 
 Detailed usage in [`docs/tools/README.md`](docs/tools/README.md).
+
+Viewing a trace needs no build, no nvcc and no GPU — for example on a
+laptop, with a trace directory copied from the cluster:
+
+```bash
+pip install -r requirements-viz.txt
+python tools/gen_protos.py        # proto/ -> generated/proto/
+python tools/visualize_all.py <trace>/session_metadata.pb -o profile.png
+```
 
 ## Documentation
 

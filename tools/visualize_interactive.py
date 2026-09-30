@@ -3,8 +3,9 @@
 
 Static mode (default):
     python tools/visualize_interactive.py profiling_output/session_metadata.pb
-    # → writes the page and serves it on http://<host>:8000 (it never
-    #   opens a browser: point yours at the URL it logs).
+    # → writes the page and serves it on http://127.0.0.1:8000 (it never
+    #   opens a browser: point yours at the URL it logs; --host 0.0.0.0
+    #   serves on every interface).
 
 Live mode (--live):
     python tools/visualize_interactive.py --live \\
@@ -29,6 +30,11 @@ import socketserver
 import sys
 import time
 from pathlib import Path
+
+# Missing packages or generated protobuf modules: say what to run, not an
+# ImportError traceback (tools/ is on sys.path: this script's directory).
+from gen_protos import require_viewer_modules  # noqa: E402
+require_viewer_modules("visualize_interactive.py", ["numpy", "bokeh"])
 
 import numpy as np
 
@@ -55,7 +61,9 @@ import units  # noqa: E402
 import write_rate  # noqa: E402
 import process_timeline  # noqa: E402
 import label_spread  # noqa: E402
+import decimate  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
+from trace_paths import probe_file, resolve_probe_path, warn_on_version_mismatch  # noqa: E402
 
 from bokeh.application import Application  # noqa: E402
 from bokeh.application.handlers.function import FunctionHandler  # noqa: E402
@@ -104,17 +112,8 @@ def _load_session_metadata(path: str | Path) -> session_metadata_pb2.SessionMeta
     with open(path, "rb") as f:
         meta = session_metadata_pb2.SessionMetadata()
         meta.ParseFromString(f.read())
+    warn_on_version_mismatch(meta, path, "visualize_interactive.py")
     return meta
-
-
-def _resolve_path(metadata_path: Path, p: str) -> Path:
-    pp = Path(p)
-    if pp.is_absolute():
-        return pp
-    for c in (Path.cwd() / pp, metadata_path.parent / pp.name, metadata_path.parent / pp):
-        if c.exists():
-            return c
-    return Path.cwd() / pp
 
 
 def _ingest_probes(
@@ -132,9 +131,8 @@ def _ingest_probes(
     sample_freqs: dict[str, int] = {}
     probes_info: dict[str, dict] = {}
     for probe in meta.probes:
-        out = _resolve_path(metadata_path, probe.output_file)
-        if not out.exists():
-            _log(f"  skip {out} (not found)")
+        out = probe_file(metadata_path, probe, "visualize_interactive.py")
+        if out is None:
             continue
         if probe.kind == session_metadata_pb2.PROBE_KIND_GPU:
             traces = _read_delimited(out, gpu_metrics_pb2.GPUMetricsTrace)
@@ -398,12 +396,18 @@ _FRAME_HEIGHT    = 150
 
 
 # Bokeh `output_backend` applied to every figure. main() overrides via
-# --render-backend. canvas is the default because for our trace volume
-# (~6k pts × ~15 panels) it's roughly 4-5× faster to first paint than
-# webgl (measured: canvas 585 ms vs webgl 2687 ms in headless
-# Chromium; some real-world GPU drivers stall on webgl ReadPixels and
-# blow up by 20-50×). webgl wins on pan/zoom repaints, so it's still
-# available as an opt-in.
+# --render-backend. canvas became the default on a page of ~6k points
+# over ~15 panels, where it was roughly 4-5× faster to first paint than
+# webgl (canvas 585 ms vs webgl 2687 ms, headless Chromium; some GPU
+# drivers stall on webgl ReadPixels and blow up by 20-50×). Today's pages
+# are larger: the full-system example (100 Hz GPU) is ~14k points over
+# 21 figures (at most 1.4k in one), the vLLM serving example (1 kHz GPU)
+# ~3.1M points over 17 figures (up to ~0.5M in one), counted 2026-09-29
+# without --display-hz. webgl was not re-measured at these sizes, nor in
+# a real (non-headless) browser; it wins on pan/zoom repaints and stays
+# available as an opt-in. Long series are now drawn reduced to the view's
+# pixel columns (_decimate_lines): the vLLM page draws ~0.22 M of its
+# ~3.1 M points.
 _RENDER_BACKEND = "canvas"
 
 # Headroom above a known peak when sizing y_range, so the dashed
@@ -980,8 +984,12 @@ def _load_events_for_session(meta: session_metadata_pb2.SessionMetadata,
     for probe in meta.probes:
         if probe.kind != session_metadata_pb2.PROBE_KIND_EVENTS:
             continue
-        out = _resolve_path(metadata_path, probe.output_file)
-        if not out.exists():
+        # Quietly: _ingest_probes already reported a missing file.
+        try:
+            out = resolve_probe_path(metadata_path, probe.output_file)
+        except ValueError:
+            return [], []
+        if not out.is_file():
             return [], []
         return _load_events(out)
     return [], []
@@ -1136,6 +1144,128 @@ def _strip_labels(fig, x_range, key: str, bars: list, t_end_s: float) -> None:
                 max_rows=_STRIP_ROWS, char_px=_TIMELINE_CHAR_PX, pad=6.0, max_shift=shift,
                 font=_STRIP_FONT, in_color=t["label"], out_color=t["label"],
                 leader_color=t["leader"])
+
+
+# Long series are drawn reduced to the view's pixel columns (tools/
+# decimate.py, decimate.js): each keeps its full data in a ColumnDataSource
+# that is not drawn, and its drawn source holds, per column of the view
+# ±1 width, the first, last, lowest and highest samples and any gap —
+# the full line at pixel resolution, real samples only. Each panel's
+# hover anchor (the table of every series' values at each time) is
+# reduced the same way by whole rows, about one per pixel column, so a
+# tooltip still shows one real row of samples. The page
+# recomputes it from the full data when the x range changes: at once
+# (at most every _DECIMATE_THROTTLE_MS) when the view leaves the drawn
+# window or its width changes, e.g. while dragging past it or zooming,
+# else _RELAYOUT_DEBOUNCE_MS after the last change if the view is not
+# where the window was drawn for, or has come within half a width of its
+# edge. A window with at most EXACT_PER_COLUMN samples a column is drawn
+# exactly. Pan steps inside the drawn window cost nothing. Series of at most _DECIMATE_MIN samples are
+# drawn as they are. (Phase 8 item 29: drag frames were dominated by
+# drawing up to ~0.5 M points per figure.)
+_DECIMATE_COLS = _FRAME_WIDTH
+_DECIMATE_MIN = 3 * decimate.EXACT_PER_COLUMN * _DECIMATE_COLS
+_DECIMATE_THROTTLE_MS = 100
+_DECIMATE_JS = (_HERE / "decimate.js").read_text()
+
+
+def _decimate_lines(figs: list, x_range, x_end_s: float) -> None:
+    """Draw every long line / multi-line series of `figs` reduced (see
+    above), starting from the full view [0, x_end_s]."""
+    pairs = []
+    seen: set = set()
+    for fig in figs:
+        for r in fig.renderers:
+            src = getattr(r, "data_source", None)
+            glyph = getattr(r, "glyph", None)
+            if not isinstance(src, ColumnDataSource) or src.id in seen:
+                continue
+            kind = type(glyph).__name__
+            d = src.data
+            if kind == "Line" and glyph.x == "x" and glyph.y in ("y", "_anchor_y") \
+                    and len(d["x"]) > _DECIMATE_MIN:
+                # A series (x, y), or a hover anchor (x, _anchor_y = 0, and
+                # one column per series): whole rows are kept, so the hover
+                # still shows a real row of values, about one per pixel.
+                cols = {c: np.asarray(v) for c, v in d.items()}
+                full = ColumnDataSource(data=cols)
+                k = decimate.indices(cols["x"], cols[glyph.y], 0.0, x_end_s, _DECIMATE_COLS)
+                src.data = {c: v[k] for c, v in cols.items()}
+                ycol = glyph.y
+            elif kind == "MultiLine" and set(d) == {"xs", "ys"} \
+                    and sum(len(v) for v in d["xs"]) > _DECIMATE_MIN:
+                xs = [np.asarray(v, np.float64) for v in d["xs"]]
+                ys = [np.asarray(v, np.float64) for v in d["ys"]]
+                full = ColumnDataSource(data=dict(xs=xs, ys=ys))
+                red = [decimate.reduce(x, y, 0.0, x_end_s, _DECIMATE_COLS) for x, y in zip(xs, ys)]
+                src.data = dict(xs=[a for a, _ in red], ys=[b for _, b in red])
+                ycol = "ys"
+            else:
+                continue
+            seen.add(src.id)
+            pairs.append([full, src, ycol])
+    if not pairs:
+        return
+    redraw = CustomJS(args=dict(rng=x_range, pairs=pairs, cols=_DECIMATE_COLS,
+                                wait=_RELAYOUT_DEBOUNCE_MS, every=_DECIMATE_THROTTLE_MS),
+                      code=_DECIMATE_JS + """
+        const st = (window.cuptiDecim = window.cuptiDecim ||
+                    {timer: 0, last: -1e9, lo: NaN, hi: NaN, w: NaN, ext: new Map(), ms: []});
+        const redraw = () => {
+            const s = rng.start, e = rng.end, w = e - s;
+            if (!(w > 0)) return;
+            const t = performance.now();
+            const ext = (full, k, y) => {
+                const key = full.id + ":" + k;
+                if (!st.ext.has(key)) st.ext.set(key, decimExtremes(y));
+                return st.ext.get(key);
+            };
+            for (const [full, drawn, ycol] of pairs) {
+                const f = full.data;
+                if (ycol === "ys") {
+                    const xs = [], ys = [];
+                    for (let k = 0; k < f.xs.length; k++) {
+                        const [a, b] = decimReduce(f.xs[k], f.ys[k], s, e, cols, ext(full, k, f.ys[k]));
+                        xs.push(a); ys.push(b);
+                    }
+                    drawn.data = {xs, ys};
+                } else {                         // whole rows, every column
+                    const k = decimIndices(f.x, f[ycol], s, e, cols, ext(full, 0, f[ycol]));
+                    const d = {};
+                    for (const c of Object.keys(f)) {
+                        const v = f[c], o = new v.constructor(k.length);
+                        for (let i = 0; i < k.length; i++) o[i] = v[k[i]];
+                        d[c] = o;
+                    }
+                    drawn.data = d;
+                }
+            }
+            const win = decimWindow(s, e, cols);
+            st.lo = win[0]; st.hi = win[1]; st.w = w; st.last = performance.now();
+            st.ms.push(st.last - t);
+        };
+        // At once (at most every `every` ms) when the view is no longer
+        // inside the drawn window at the drawn width (a zoom, or a drag past
+        // the window); `wait` ms after the last change when it is not, or
+        // when it has come within half a width of the window's edge. A pan
+        // inside the window redraws nothing. Decided once start and end
+        // have both changed (a microtask after the first change), so a
+        // view set one end at a time is not seen at a passing width.
+        if (st.queued) return;
+        st.queued = true;
+        queueMicrotask(() => {
+            st.queued = false;
+            const s = rng.start, e = rng.end, w = e - s;
+            const same = Math.abs(w - st.w) <= 1e-9 * Math.abs(w);
+            const inside = same && s >= st.lo && e <= st.hi;
+            const centred = inside && s - st.lo >= 0.5 * w && st.hi - e >= 0.5 * w;
+            clearTimeout(st.timer);
+            if (!inside && performance.now() - st.last >= every) redraw();
+            else if (!centred) st.timer = setTimeout(redraw, wait);
+        });
+    """)
+    x_range.js_on_change("start", redraw)
+    x_range.js_on_change("end", redraw)
 
 
 def _build_region_strip(regions, t0_ns: int, x_range, t_end_s: float = 0.0) -> "figure":
@@ -1932,6 +2062,8 @@ def _build_static_document(
     # they don't drown the traces).
     _overlay_regions(metric_figs, regions, t0_ns)
     _mark_stop(metric_figs, (stop_ns - t0_ns) / 1e9)
+    if shared_x is not None:
+        _decimate_lines(metric_figs, shared_x, x_end_s)
 
     # Strips above the panels: events first (so its hairlines line up
     # vertically with the panels below), then regions.
@@ -2083,7 +2215,10 @@ def main() -> int:
     parser.add_argument("--panel-layout", default=None,
                         help="Override PanelLayout pbtxt")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="Address to serve on (static and live). Default: "
+                             "127.0.0.1, this machine only; 0.0.0.0 serves on "
+                             "every interface, to anyone who can reach it.")
     parser.add_argument("--no-serve", action="store_true",
                         help="Render HTML and exit (don't start a server).")
     parser.add_argument("--live", action="store_true",
@@ -2202,7 +2337,7 @@ def _run_live(args, metadata_path: Path) -> int:
     _log(f"--live  waiting for {metadata_path} (timeout {args.live_bootstrap_timeout_s}s)")
     try:
         meta = live_tail.wait_for_metadata(
-            metadata_path, args.live_bootstrap_timeout_s, _log)
+            metadata_path, args.live_bootstrap_timeout_s, _log, "visualize_interactive.py")
     except TimeoutError as e:
         print(str(e), file=sys.stderr)
         return 2

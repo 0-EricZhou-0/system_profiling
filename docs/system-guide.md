@@ -312,7 +312,7 @@ The build produces:
 export LD_LIBRARY_PATH=build/lib:$LD_LIBRARY_PATH
 
 # GPU-only — writes gpu_metrics.pb in the cwd
-./build/examples/gemm_profiling -d 0 -i 100000 -o gpu_metrics.pb
+./build/examples/gemm_profiling -d 0 -f 10000 -o gpu_metrics.pb
 
 # Full suite — uses configs/example.pbtxt by default
 ./build/examples/full_system_profiling [-c your_config.pbtxt]
@@ -519,7 +519,7 @@ public:
 | `samplingFrequencyHz` | How often `/proc/stat` and friends are polled. Default 100 Hz (a proto value of 0 means the same); see [Sampling frequency guidance](#sampling-frequency-guidance) for what each rate costs. |
 | `Processes` | Initial PIDs (with optional aliases) to sample per-process. `Add/RemoveTrackedProcess` may grow or shrink this set mid-run. See `TrackedProcess`. |
 | `flushIntervalMs` | How often the in-memory sample buffer is serialized to `outputFile`. |
-| `outputFile` | Path to the system trace `.pb`. Resolved against `output_dir` when driven by `ProfilerSuite`. |
+| `outputFile` | Path to the system trace `.pb`. When driven by `ProfilerSuite`, `output_file` is a plain file name in `output_dir` (a `/` is rejected: `InvalidConfig`). |
 
 `SystemProfiler` writes one `SystemMetricsTrace` per flush. CPU and memory readings at one tick are combined into a single `Sample` (system-wide) or `ProcessSample` (per-PID); `values[]` is ordered to match the per-scope FQN registry in `scope_metric_names[]` of the same trace. See the [Output format](#output-format) section for the schema.
 
@@ -1184,7 +1184,11 @@ Limits of the tail:
 - when several tracked children of one parent are reaped within one
   sample interval, their shares cannot be told apart: **one `CpuTail`
   lists all of them in `pids`** with their combined tail, rather than a
-  guessed split.
+  guessed split;
+- a parent that ignores `SIGCHLD` has its children **auto-reaped**, and
+  its `cutime`/`cstime` never grow (see *Auto-reaped children* below): the
+  `CpuTail` is emitted with `autoreaped = true` and a tail of 0, which is
+  not a measurement.
 
 **Chains.** A tracked P that reaps its tracked child C and then exits
 and is reaped by a tracked G, all within one sample interval (a
@@ -1291,14 +1295,64 @@ and discovered processes alike:
   parent is not tracked or stops being tracked while alive (then no
   tracked reading includes the reap).
 
-Limits: a parent that ignores `SIGCHLD` (`SIG_IGN` or `SA_NOCLDWAIT`) has
-its children auto-reaped, and the kernel then folds **nothing** into it
-(`exit_notify` releases the child without `wait_task_zombie`); the probe
-cannot see that without reading `/proc/<pid>/status` at each reap, and
-would subtract a child that was never added (the sample is clamped at 0;
-the negative remainder shows it). The reaper rule also assumes no
-process between the launcher and the reaping tracked ancestor is itself
-a subreaper.
+**Auto-reaped children.** A parent whose `SIGCHLD` disposition is
+`SIG_IGN`, or that set `SA_NOCLDWAIT`, has its children reaped by the
+kernel as they exit (`do_notify_parent` in `kernel/signal.c` returns
+"autoreap", and `exit_notify` in `kernel/exit.c` releases the child
+without `wait_task_zombie`). Only `wait_task_zombie` adds a child's I/O
+(`ioac`) and CPU (`cutime`/`cstime`) to its parent, so **nothing** is
+folded (checked in the 5.15 source). When the probe finds a watched
+child reaped, it reads the parent's `/proc/<pid>/status` once — only at
+that reap, never per tick — and if bit `SIGCHLD - 1` of `SigIgn` is set:
+
+- disk: the child is listed in the `IoReapAdjustment` with
+  `autoreaped = true` and **not subtracted**, and the record has
+  `autoreaped = true` (a chain whose link was auto-reaped is marked the
+  same way: none of it reached the parent);
+- system: the `CpuTail` has `autoreaped = true` and a tail of 0 (the
+  CPU after the child's last sample is lost: no counter holds it).
+
+Limits of the detection:
+
+- `SA_NOCLDWAIT` does not show in `/proc` (`SigIgn` lists `SIG_IGN`
+  handlers only): with it, a child is still subtracted (the sample is
+  clamped at 0; the negative remainder shows it), and its tail reads 0
+  without the mark;
+- the disposition is read when the reap is found, within a sample
+  interval of it, not at the exit itself; a parent that changes it in
+  between is misread;
+- a reaper that is already gone when the reap is found (a chain: P
+  auto-reaped C, then exited and was reaped, all within one interval)
+  cannot be read and is treated as having waited. A zombie's `status`
+  is still readable.
+
+**A chain through a parent that was never read.** The chain walk
+follows a reaped child up through the records its traced parents got at
+their readings. A traced parent P whose I/O was never read has none. The
+realistic case is a P whose `/proc/<pid>/io` is **unreadable** — it runs
+as another uid, is a setuid/setgid wrapper, or is not dumpable — with a
+readable traced child C. (Pure timing does not produce it: P and C are
+found in the same top-down scan and first read on the same tick, and C
+dies before P.) When P reaps C and P is then reaped by its traced parent
+G, the kernel folds P's I/O and C's into G, while C's I/O is also in C's
+own samples: **C is counted twice, in G**. Not fixed. The planned fix
+makes the chain record (parent link and start time) at discovery, with no
+per-tick cost. Until then it is detected when the walk stops at P (only
+then, never per tick):
+
+- a `[cupti-profiler] warning:` line names C, P and G and says C's I/O
+  may be double-counted in G (at most once a second per P, suppressed
+  ones counted, dropped when P stops being tracked);
+- an `IoReapChainBreak` (`DiskMetricsTrace.io_reap_chain_breaks`)
+  records the tick, C, P and G.
+
+It is reported only when G is traced (otherwise the trace holds C once).
+The CPU tail has no such gap: its chain links are made when a process is
+discovered, not when it is read, and a parent whose CPU clock cannot be
+read has its whole CPU in its tail, counted once.
+
+The reaper rule also assumes no process between the launcher and the
+reaping tracked ancestor is itself a subreaper.
 
 So per-PID I/O is **the process's own I/O, excluding tracked children it
 reaped**, and differs from the raw `/proc/<pid>/io` delta exactly by the
@@ -1311,8 +1365,8 @@ Cost: nothing while no tracked process has exited. The probe already
 reads each process's `/proc/<pid>/io` and learns of exits from its
 pidfds; the watch adds two `/proc/<pid>/stat` reads per sample tick for
 each watched child, from its exit until its reap (one tick for a parent
-blocked in `wait()`), and one list of watched children to check per
-tick. Resolving chains adds no reads: it walks the watched children's
+blocked in `wait()`), one `/proc/<parent>/status` read when its reap is
+found, and one list of watched children to check per tick. Resolving chains adds no reads: it walks the watched children's
 recorded parents, only on ticks when something is watched, and consults
 the reaper's reported PIDs (pruned once nothing tracks or watches the
 PID). It shares nothing with the system probe's CPU-tail bookkeeping:
@@ -1428,7 +1482,17 @@ atomic load per flush.
 
 ## Output format
 
-A full-suite run produces five `.pb` files under `output_dir`:
+A full-suite run produces five `.pb` files, all directly in `output_dir`:
+every `output_file` and `session_metadata_file` must be a plain file name
+(`Configure()` returns `InvalidConfig` for one with a `/`, naming the
+field: subdirectories are not allowed; use `output_dir`), and no two may
+be the same (also `InvalidConfig`). An enabled probe with no
+`output_file` writes its default name (`gpu_metrics.pb`,
+`system_metrics.pb`, `disk_metrics.pb`, `events.pb`; the metadata file
+is `session_metadata.pb`). The directory is therefore self-contained and
+can be copied or moved. A viewer given a probe whose file is missing
+(or, from an older writer, has no name) prints an error naming the
+probe, skips it, and renders the rest.
 
 | File | Schema | Contents |
 | ---- | ------ | -------- |
@@ -1437,6 +1501,10 @@ A full-suite run produces five `.pb` files under `output_dir`:
 | `disk_metrics.pb` | `DiskMetricsTrace` (length-delimited) | Disk device + per-PID I/O samples |
 | `events.pb` | `EventTrace` (length-delimited) | Regions + events, Generic + GPU domains |
 | `session_metadata.pb` | `SessionMetadata` (single message, **not** length-delimited) | Manifest of probes, hostname, wall-clock anchor, **inlined `MetricCatalog`** |
+
+The manifest names each probe file relative to its own directory, so a
+trace directory is self-contained: copy or move it (to another machine,
+too) and render it there.
 
 The three per-domain trace types share substructures (`TraceHeader`,
 `ScopeMetricNames`, `Sample` / `ProcessSample` / `DeviceSample` /
@@ -1581,10 +1649,18 @@ message SessionMetadata {
     MetricCatalog catalog = 5;
     // Startup situation report (see "Startup situation report").
     repeated SituationCheck situation = 6;
+    // What wrote the trace (absent in traces from before it was added).
+    Producer producer = 7;
 }
 
 message SituationCheck { string check; string observed; string consequence; bool degraded; }
+message Producer { string name; string version; string git_commit; }  // git_commit "" if unknown
 ```
+
+`producer.version` is the package version (`pyproject.toml`, the one
+source; also `cupti_profiler.__version__`). Every reader warns once when
+it differs from its own, or is missing, and renders anyway: only the
+current version is supported.
 
 `session_metadata.pb` is written atomically (`.tmp` + `rename(2)`) at
 `ProfilerSuite::Start()` AND `Stop()` — tailers (live visualizer) never

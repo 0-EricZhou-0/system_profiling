@@ -38,7 +38,7 @@ matplotlib>=3.7
 # --- Interactive Bokeh visualizer (tools/visualize_interactive.py) -------
 # Renders a self-contained HTML file with synced pan/zoom + hover.
 # pandas is a transitive runtime dependency of bokeh's data validation.
-bokeh>=3.4
+bokeh>=3.9
 pandas>=2.0
 
 # --- Optional: examples/full_system_profiling.py -------------------------

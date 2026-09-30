@@ -46,6 +46,7 @@ import session_metadata_pb2  # noqa: E402
 import metric_catalog  # noqa: E402
 import metric_layout  # noqa: E402
 from metric_projector import TraceProjector  # noqa: E402
+from trace_paths import resolve_probe_path, warn_on_version_mismatch  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -160,7 +161,14 @@ class LiveCoordinator:
         # One TraceTail per active probe.
         self.tails: list[tuple[int, TraceTail]] = []
         for probe in meta.probes:
-            out = self._resolve_path(probe.output_file)
+            # Live: a probe file may not exist yet (not flushed); only a
+            # probe with no file name at all is skipped.
+            try:
+                out = resolve_probe_path(self.metadata_path, probe.output_file)
+            except ValueError as e:
+                print(f"error: {self.metadata_path}: probe kind {probe.kind}: {e}; skipping it",
+                      file=sys.stderr, flush=True)
+                continue
             if probe.kind == session_metadata_pb2.PROBE_KIND_GPU:
                 self.tails.append((probe.kind,
                                    TraceTail(out, gpu_metrics_pb2.GPUMetricsTrace)))
@@ -183,18 +191,8 @@ class LiveCoordinator:
         self._removal_markers_drawn: set[tuple[int, object]] = set()
 
     # ------------------------------------------------------------------
-    # Path resolution + bookkeeping
+    # Bookkeeping
     # ------------------------------------------------------------------
-
-    def _resolve_path(self, p: str) -> Path:
-        pp = Path(p)
-        if pp.is_absolute():
-            return pp
-        for c in (Path.cwd() / pp, self.metadata_path.parent / pp.name,
-                  self.metadata_path.parent / pp):
-            if c.exists():
-                return c
-        return Path.cwd() / pp
 
     def register_panel(self, entry: _PanelEntry) -> None:
         self.panels.append(entry)
@@ -377,9 +375,11 @@ class LiveCoordinator:
 # ---------------------------------------------------------------------------
 
 def wait_for_metadata(path: Path, timeout_s: float,
-                       log: Callable[[str], None]) -> session_metadata_pb2.SessionMetadata:
+                       log: Callable[[str], None],
+                       tool: str = "live_tail.py") -> session_metadata_pb2.SessionMetadata:
     """Poll for `path` to appear. Returns the parsed SessionMetadata
-    or raises TimeoutError after `timeout_s`."""
+    or raises TimeoutError after `timeout_s`. `tool`: the reader named
+    in the version-mismatch warning."""
     deadline = time.time() + timeout_s
     last_log = 0.0
     while True:
@@ -389,6 +389,7 @@ def wait_for_metadata(path: Path, timeout_s: float,
                     meta = session_metadata_pb2.SessionMetadata()
                     meta.ParseFromString(f.read())
                 if meta.probes:
+                    warn_on_version_mismatch(meta, path, tool)
                     return meta
             except Exception:
                 pass  # Partial mid-write — retry.

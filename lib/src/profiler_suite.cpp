@@ -11,6 +11,7 @@
 #include "sidecar_process.h"
 #include <cupti_profiler/child_subreaper.h>
 #include <cupti_profiler/defaults.h>
+#include <cupti_profiler/version.h>
 #include "situation_report.h"
 
 #include <google/protobuf/text_format.h>
@@ -21,6 +22,7 @@
 #include <chrono>
 #include <climits>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -50,6 +52,10 @@ public:
     bool diskEnabled = false;
     bool eventEnabled = false;
 
+    // Every file name of the trace (field, effective name: the one given,
+    // or the default when unset): each must be a plain file name in
+    // output_dir, and no two may be the same (checked at Configure()).
+    std::vector<std::pair<std::string, std::string>> fileNames;
     std::string sessionMetadataPath;
     std::string metricCatalogPath;
 
@@ -156,6 +162,21 @@ static std::string JoinPath(const std::string& dir, const std::string& file) {
     return dir + "/" + file;
 }
 
+/// A probe file's path as session_metadata.pb records it: relative to the
+/// directory holding session_metadata.pb (both are plain file names in
+/// output_dir, so this is the file name), so a trace directory stays
+/// readable after it is copied or moved. Both paths are as the probes
+/// open them (relative ones against the current directory).
+static std::string RelativeToManifest(const std::string& file, const std::string& manifest) {
+    namespace fs = std::filesystem;
+    std::error_code ec1, ec2;
+    const fs::path f   = fs::absolute(file, ec1).lexically_normal();
+    const fs::path dir = fs::absolute(manifest, ec2).lexically_normal().parent_path();
+    if (ec1 || ec2) return file;
+    const fs::path rel = f.lexically_relative(dir);
+    return rel.empty() ? file : rel.generic_string();
+}
+
 static void ResolvePIDZero(std::vector<TrackedProcess>& processes) {
     uint32_t myPID = static_cast<uint32_t>(getpid());
     for (auto& p : processes) {
@@ -243,7 +264,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         m_impl->gpuConfig.maxSamples = g.max_samples();   // 0 = auto
         m_impl->gpuConfig.flushIntervalMs = g.flush_interval_ms();    // 0 = default
         m_impl->gpuConfig.decodeIntervalMs = g.decode_interval_ms();   // 0 = default
-        m_impl->gpuConfig.outputFile = g.output_file();
+        m_impl->gpuConfig.outputFile = !g.output_file().empty() ? g.output_file() : "gpu_metrics.pb";
         for (const auto& m : g.metrics()) {
             m_impl->gpuConfig.metrics.push_back(m);
         }
@@ -255,7 +276,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         const auto& s = proto.system();
         m_impl->sysConfig.samplingFrequencyHz = s.sampling_frequency_hz() > 0 ? s.sampling_frequency_hz() : kDefaultSystemSamplingHz;
         m_impl->sysConfig.flushIntervalMs = s.flush_interval_ms();   // 0 = default
-        m_impl->sysConfig.outputFile = s.output_file();
+        m_impl->sysConfig.outputFile = !s.output_file().empty() ? s.output_file() : "system_metrics.pb";
         m_impl->sysConfig.mode =
             (s.mode() == SYSTEM_PROBE_MODE_SIDECAR)
                 ? SystemProbeMode::Sidecar
@@ -275,7 +296,7 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
         const auto& d = proto.disk();
         m_impl->diskConfig.samplingFrequencyHz = d.sampling_frequency_hz() > 0 ? d.sampling_frequency_hz() : kDefaultDiskSamplingHz;
         m_impl->diskConfig.flushIntervalMs = d.flush_interval_ms();  // 0 = default
-        m_impl->diskConfig.outputFile = d.output_file();
+        m_impl->diskConfig.outputFile = !d.output_file().empty() ? d.output_file() : "disk_metrics.pb";
         m_impl->diskConfig.mode =
             (d.mode() == SYSTEM_PROBE_MODE_SIDECAR)
                 ? SystemProbeMode::Sidecar
@@ -304,6 +325,16 @@ void ProfilerSuite::Impl::ApplyParsedConfig(const ProfilerSuiteConfig& proto) {
     m_impl->sessionMetadataPath = proto.session_metadata_file().empty()
         ? std::string("session_metadata.pb")
         : proto.session_metadata_file();
+
+    // Effective file names, before output_dir is joined on (Configure()
+    // rejects one that is not a plain file name, and duplicates). An
+    // unset name has its default, so no empty name reaches the metadata.
+    m_impl->fileNames.clear();
+    if (m_impl->gpuEnabled)   m_impl->fileNames.emplace_back("gpu.output_file", m_impl->gpuConfig.outputFile);
+    if (m_impl->sysEnabled)   m_impl->fileNames.emplace_back("system.output_file", m_impl->sysConfig.outputFile);
+    if (m_impl->diskEnabled)  m_impl->fileNames.emplace_back("disk.output_file", m_impl->diskConfig.outputFile);
+    if (m_impl->eventEnabled) m_impl->fileNames.emplace_back("events.output_file", m_impl->eventConfig.outputFile);
+    m_impl->fileNames.emplace_back("session_metadata_file", m_impl->sessionMetadataPath);
 
     // Metric catalog path (loaded at Configure()). Empty = default
     // location next to the binary.
@@ -349,6 +380,26 @@ ProfilerError ProfilerSuite::Configure() {
         std::cerr << "ProfilerSuite::Configure() called before LoadConfig()\n";
         return ProfilerError::NotConfigured;
     }
+    // Every file of a trace lives directly in output_dir, so the trace
+    // directory is self-contained (session_metadata.pb names its probe
+    // files by name alone, and the directory can be copied or moved).
+    for (size_t i = 0; i < m_impl->fileNames.size(); ++i) {
+        const auto& [field, name] = m_impl->fileNames[i];
+        if (name.empty() || name.find('/') != std::string::npos || name == "." || name == "..") {
+            std::cerr << "[cupti-profiler] error: " << field << " \"" << name
+                      << "\" must be a plain file name: subdirectories are not allowed; "
+                         "use output_dir\n";
+            return ProfilerError::InvalidConfig;
+        }
+        for (size_t j = 0; j < i; ++j) {
+            if (m_impl->fileNames[j].second == name) {
+                std::cerr << "[cupti-profiler] error: " << field << " and " << m_impl->fileNames[j].first
+                          << " are both \"" << name << "\": every file of a trace needs its own name\n";
+                return ProfilerError::InvalidConfig;
+            }
+        }
+    }
+
     // Assemble the MetricCatalog before any probe configures.
     //
     //   builtins (every probe's MetricDescriptor<Tick> array)
@@ -485,6 +536,9 @@ void ProfilerSuite::Impl::WriteSessionManifest() {
     char hostbuf[256] = {0};
     gethostname(hostbuf, sizeof(hostbuf));
     meta.set_hostname(hostbuf);
+    meta.mutable_producer()->set_name("cupti-profiler");
+    meta.mutable_producer()->set_version(Version());
+    meta.mutable_producer()->set_git_commit(GitCommit());
     meta.set_wall_clock_epoch_ns(startWallClockEpochNs);
     {
         std::time_t secs = startWallClockEpochNs / 1000000000ULL;
@@ -499,7 +553,7 @@ void ProfilerSuite::Impl::WriteSessionManifest() {
     auto addProbe = [&](ProbeKind kind, const std::string& path, uint64_t hz) {
         auto* p = meta.add_probes();
         p->set_kind(kind);
-        p->set_output_file(path);
+        p->set_output_file(RelativeToManifest(path, sessionMetadataPath));
         p->set_sampling_frequency_hz(hz);
     };
     if (gpuEnabled)

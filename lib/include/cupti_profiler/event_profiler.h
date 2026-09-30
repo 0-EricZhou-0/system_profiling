@@ -56,8 +56,10 @@ struct CUPTI_PROFILER_API EventProfilerConfig {
 /// Multi-process:
 ///   This class is in-process only — the mutex protects in-process state.
 ///   For multi-process logging, give each process its own EventProfiler
-///   writing to its own `events.pb` (e.g. `events_<pid>.pb`); the
-///   visualizer can merge multiple files at view time.
+///   writing to its own file (e.g. `events_<pid>.pb`). The visualizers do
+///   not merge such files: they read only the events file named in the
+///   session_metadata.pb they are given (its ProfilerSuite's own
+///   EventProfiler), so other processes' files are not shown.
 class CUPTI_PROFILER_API EventTracker {
 public:
     enum class Domain { GENERIC, GPU };

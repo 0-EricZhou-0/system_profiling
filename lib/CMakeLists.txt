@@ -12,6 +12,20 @@ protobuf_generate_cpp(EVT_PROTO_SRCS EVT_PROTO_HDRS "${CMAKE_SOURCE_DIR}/proto/e
 protobuf_generate_cpp(SESS_PROTO_SRCS SESS_PROTO_HDRS "${CMAKE_SOURCE_DIR}/proto/session_metadata.proto")
 protobuf_generate_cpp(CFG_PROTO_SRCS CFG_PROTO_HDRS "${CMAKE_SOURCE_DIR}/proto/profiler_config.proto")
 
+# build_version.h: the version, plus the git commit, regenerated on every
+# build (rewritten only when it changes) so the commit stays current.
+set(BUILD_VERSION_H "${CMAKE_CURRENT_BINARY_DIR}/build_version.h")
+add_custom_target(cupti_profiler_version
+    COMMAND ${CMAKE_COMMAND}
+        -DVERSION=${CUPTI_PROFILER_VERSION}
+        -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DOUTPUT=${BUILD_VERSION_H}
+        -P "${CMAKE_SOURCE_DIR}/cmake/WriteVersion.cmake"
+    BYPRODUCTS "${BUILD_VERSION_H}"
+    COMMENT "Recording the cupti-profiler version and git commit"
+    VERBATIM
+)
+
 add_library(cupti_profiler SHARED
     # GPU profiler (existing)
     src/gpu_profiler.cpp
@@ -50,6 +64,8 @@ add_library(cupti_profiler SHARED
     src/situation_report.cpp
     # Orchestrator
     src/profiler_suite.cpp
+    # Version (build_version.h)
+    src/version.cpp
     # Generated protobuf sources
     ${MC_PROTO_SRCS}
     ${MS_PROTO_SRCS}
@@ -61,6 +77,8 @@ add_library(cupti_profiler SHARED
     ${SESS_PROTO_SRCS}
     ${CFG_PROTO_SRCS}
 )
+
+add_dependencies(cupti_profiler cupti_profiler_version)
 
 target_include_directories(cupti_profiler
     PUBLIC
