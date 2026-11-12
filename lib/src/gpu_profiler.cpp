@@ -541,10 +541,16 @@ void GpuProfiler::Stop() {
         std::cout << "Wrote trace to " << m_impl->config.outputFile << "\n";
     }
 
-    // Cleanup CUPTI per device.
+    // Cleanup CUPTI. The profiler interface is process-wide: cuptiProfilerInitialize
+    // and cuptiProfilerDeInitialize act on the process, not on a device. Disable every
+    // device's PM sampler first, then de-initialize the interface once, then release
+    // each device's host object. De-initializing per device tore the interface down
+    // under the next device's sampler, so its cuptiPmSamplingDisable faulted.
     for (auto& d : m_impl->devices) {
         CUPTI_API_CALL(d->target.DisablePmSampling());
-        d->target.TearDown();
+    }
+    if (!m_impl->devices.empty()) m_impl->devices.front()->target.TearDown();
+    for (auto& d : m_impl->devices) {
         d->host.TearDown();
     }
 
